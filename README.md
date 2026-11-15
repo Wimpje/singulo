@@ -83,17 +83,27 @@ npm test
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 ```
 
-Five focused Rust tests, not an extensive framework. Manually smoke-test import/re-import, matching, viewing, layout changes/undo, recycling on disposable data, and an interrupted operation.
+Five focused Rust tests and one JPEG fast-decode check, not an extensive framework. Manually smoke-test import/re-import, matching, viewing, layout changes/undo, recycling on disposable data, and an interrupted operation.
 
 ### Large collections
 
 The catalog is designed for 100,000+ records: source/companion lookups are indexed, library pages are fetched in SQL, counts are maintained incrementally, and recovery exports are streamed rather than loading all metadata into memory. Folder-name collision checks cache each destination directory once per import instead of rescanning it for every photo.
 
-Metadata extraction batches up to 64 files per ExifTool process. Exact duplicates are checked before image decoding. Verified staging files are linked into their final location on supporting filesystems (APFS/NTFS); filesystems without hard links retain the verified-copy fallback. Database changes are grouped per file without relaxing durable writes. UI progress updates are limited to four per second, and image/hash dependencies are optimized even in development builds.
+Metadata extraction batches up to 64 files per ExifTool process. Exact duplicates are checked before image decoding. Verified staging files are linked into their final location on supporting filesystems (APFS/NTFS); filesystems without hard links retain the verified-copy fallback. Database changes are grouped per file without relaxing durable writes. UI progress updates are limited to four per second, and the app crate plus image/hash dependencies are optimized even in development builds.
+
+#### How similarity matching works
+
+1. **Exact:** SHA-256 of the file bytes; byte-identical backups never get decoded.
+2. **Fingerprint:** a 64-bit difference hash (dHash) of a small greyscale version. SQLite indexes its 8 bytes, so candidates (≤ 6 differing bits) are found in about a millisecond at 100k photos.
+3. **Pixel check:** before a larger copy replaces a smaller one, both are compared on a 512×512 grid, tile by tile. Protected variants (RAW/JPEG pairs, edits, Live Photos, different capture times) and anything uncertain go to Similarity review instead.
+
+Each new file is decoded **once**, at reduced size, and that preview is reused for both the fingerprint and the pixel check. JPEGs are decoded with DCT scaling (1/2–1/8 size, short side never below 512 px), and RAW uses LibRaw half-size mode. Decoding runs on up to 8 worker threads (CPU cores − 1). File reads, hashing, metadata extraction and archive writes stay on one thread in scan order, so a spinning external drive is not forced to seek between files. Results are committed in the original order, so sidecars still follow their photos. On the development Mac, a 24 MP JPEG went from about 260–360 ms to 65–130 ms per photo on a single core, before parallelism.
+
+Vision models such as CLIP or DINOv2 are deliberately not used: they still need the decoded image, add hundreds of MB, and group *similar scenes* (bursts, re-shoots, crops), which is useful for browsing but too loose to decide what replaces what.
 
 These changes remove repeated whole-library work, not the necessary cost of reading originals, decoding new photos, verifying copies, or comparing an entire video. External HDD/USB speed and RAW/video content still determine throughput. Pause/cancel before restarting the app to pick up an update; the first open of an existing catalog builds its new indexes.
 
-An optional synthetic 100k-catalog check is separate from the five basic tests:
+An optional synthetic 100k-catalog check is separate from the basic tests:
 
 ```sh
 cargo test --manifest-path src-tauri/Cargo.toml catalog_handles_100k_records -- --ignored --nocapture

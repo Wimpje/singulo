@@ -1,5 +1,5 @@
 use crate::{archive::Archive, media, model::*, paths};
-use image::{DynamicImage, ImageBuffer, Rgb};
+use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
 use std::{fs, path::Path};
 
 fn sample(hash: String) -> Media {
@@ -156,7 +156,33 @@ fn photo_comparison_preserves_meaningful_variants() {
     let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(128, 128, |x, y| {
         Rgb([(x * 2) as u8, (y * 2) as u8, ((x + y) % 256) as u8])
     }));
-    assert!(media::photo_equivalent(&image, &image.clone()));
+    let preview = |image: &DynamicImage| {
+        let (w, h) = image.dimensions();
+        media::Preview::new(image, w, h)
+    };
+    assert!(media::photo_equivalent(&preview(&image), &preview(&image)));
     let crop = image.crop_imm(10, 10, 100, 100);
-    assert!(!media::photo_equivalent(&image, &crop));
+    assert!(!media::photo_equivalent(&preview(&image), &preview(&crop)));
+}
+
+#[test]
+fn scaled_jpeg_matches_full_decode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large.jpg");
+    let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(2400, 1600, |x, y| {
+        Rgb([
+            (x / 10) as u8,
+            (y / 7) as u8,
+            ((x / 20 + y / 20) % 256) as u8,
+        ])
+    }));
+    image.save(&path).unwrap();
+    let (scaled, width, height) = media::scaled_jpeg(&path).unwrap().unwrap();
+    assert_eq!((width, height), (2400, 1600));
+    assert!(scaled.width() < 2400 && scaled.height() >= 512);
+    let full = image::open(&path).unwrap();
+    assert!(media::photo_equivalent(
+        &media::Preview::new(&scaled, width, height),
+        &media::Preview::new(&full, 2400, 1600)
+    ));
 }

@@ -310,10 +310,17 @@ pub fn decode(
         }
         _ => return Err("Sidecars have no image preview.".into()),
     };
-    let orientation = value(metadata, "Orientation")
+    Ok(orient(image, metadata))
+}
+
+fn orientation(metadata: &serde_json::Value) -> u64 {
+    value(metadata, "Orientation")
         .and_then(|v| v.as_u64())
-        .unwrap_or(1);
-    Ok(match orientation {
+        .unwrap_or(1)
+}
+
+fn orient(image: DynamicImage, metadata: &serde_json::Value) -> DynamicImage {
+    match orientation(metadata) {
         2 => image.fliph(),
         3 => image.rotate180(),
         4 => image.flipv(),
@@ -322,7 +329,132 @@ pub fn decode(
         7 => image.rotate270().fliph(),
         8 => image.rotate270(),
         _ => image,
-    })
+    }
+}
+
+/// Side length of the comparison grid; reduced decodes never go below it.
+const COMPARE: u32 = 512;
+
+/// Reduced-size decode used for fingerprints and pixel comparison.
+pub struct Preview {
+    pub pixels: image::RgbImage,
+    pub alpha: bool,
+    /// Full-resolution size after orientation.
+    pub width: u32,
+    pub height: u32,
+    pub signature: String,
+}
+
+/// JPEG DCT scaling decodes at 1/2, 1/4 or 1/8 size, which is much cheaper than a full
+/// decode. Returns None for pixel formats the fast path does not handle.
+pub(crate) fn scaled_jpeg(path: &Path) -> Result<Option<(DynamicImage, u32, u32)>> {
+    let file = std::io::BufReader::new(File::open(path).map_err(|e| e.to_string())?);
+    let mut decoder = jpeg_decoder::Decoder::new(file);
+    decoder.read_info().map_err(|e| e.to_string())?;
+    let info = decoder.info().ok_or("Missing JPEG header.")?;
+    if info.width > 30_000 || info.height > 30_000 {
+        return Err("Image dimensions exceed the safety limit.".into());
+    }
+    if !matches!(
+        info.pixel_format,
+        jpeg_decoder::PixelFormat::L8 | jpeg_decoder::PixelFormat::RGB24
+    ) {
+        return Ok(None);
+    }
+    // The decoder picks the smallest scale where *either* side reaches the request, so
+    // request proportionally to keep the short side at or above the comparison size.
+    let short = u32::from(info.width.min(info.height)).max(1);
+    let request = |side: u16| {
+        (u32::from(side) * COMPARE)
+            .div_ceil(short)
+            .min(u32::from(side)) as u16
+    };
+    let (width, height) = decoder
+        .scale(request(info.width), request(info.height))
+        .map_err(|e| e.to_string())?;
+    let pixels = decoder.decode().map_err(|e| e.to_string())?;
+    let (w, h) = (u32::from(width), u32::from(height));
+    let image = match info.pixel_format {
+        jpeg_decoder::PixelFormat::L8 => {
+            image::GrayImage::from_raw(w, h, pixels).map(DynamicImage::ImageLuma8)
+        }
+        _ => image::RgbImage::from_raw(w, h, pixels).map(DynamicImage::ImageRgb8),
+    };
+    Ok(image.map(|image| (image, u32::from(info.width), u32::from(info.height))))
+}
+
+fn shrink(image: DynamicImage) -> DynamicImage {
+    let (w, h) = image.dimensions();
+    let short = w.min(h);
+    if short <= COMPARE * 2 {
+        return image;
+    }
+    let scale = f64::from(COMPARE) / f64::from(short);
+    let nw = ((f64::from(w) * scale).ceil() as u32).max(COMPARE);
+    let nh = ((f64::from(h) * scale).ceil() as u32).max(COMPARE);
+    image.thumbnail_exact(nw, nh)
+}
+
+pub fn preview(
+    app: &tauri::AppHandle,
+    path: &Path,
+    kind: &str,
+    metadata: &serde_json::Value,
+) -> Result<Preview> {
+    let jpeg = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg"));
+    let fast = if kind == "photo" && jpeg {
+        scaled_jpeg(path).unwrap_or(None)
+    } else {
+        None
+    };
+    let (mut image, mut width, mut height) = match (fast, kind) {
+        (Some(fast), _) => fast,
+        (None, "photo") => {
+            let image = reader(path)?;
+            let (w, h) = image.dimensions();
+            (shrink(image), w, h)
+        }
+        (None, "raw") => {
+            // Half-size mode skips demosaicing; it is plenty for a 512px comparison.
+            let mut command = Command::new(tool(app, "dcraw_emu")?);
+            command.args(["-w", "-h", "-T", "-Z", "-"]).arg(path);
+            let bytes = execute(command, 180)?;
+            let mut output = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+            output.write_all(&bytes).map_err(|e| e.to_string())?;
+            let image = reader(output.path())?;
+            let (w, h) = image.dimensions();
+            (image, w * 2, h * 2)
+        }
+        // HEIC and video decoders already apply their own rotation.
+        (None, _) => {
+            let image = decode(app, path, kind, metadata)?;
+            let (w, h) = image.dimensions();
+            (shrink(image), w, h)
+        }
+    };
+    if kind == "photo" {
+        if (5..=8).contains(&orientation(metadata)) {
+            std::mem::swap(&mut width, &mut height);
+        }
+        image = orient(image, metadata);
+    }
+    Ok(Preview::new(&image, width, height))
+}
+
+impl Preview {
+    pub fn new(image: &DynamicImage, width: u32, height: u32) -> Self {
+        Self {
+            alpha: image.color().has_alpha(),
+            signature: signature(image),
+            pixels: image
+                .resize_exact(COMPARE, COMPARE, image::imageops::FilterType::Triangle)
+                .to_rgb8(),
+            width,
+            height,
+        }
+    }
 }
 
 pub fn signature(image: &DynamicImage) -> String {
@@ -390,7 +522,7 @@ pub fn inspect(
     path: &Path,
     hash: String,
     metadata: Result<serde_json::Value>,
-) -> Result<Media> {
+) -> Result<(Media, Option<Preview>)> {
     let kind = kind(path).ok_or("Unsupported media extension.")?;
     let before = identity(path)?;
     let stat = fs::metadata(path).map_err(|e| e.to_string())?;
@@ -430,15 +562,15 @@ pub fn inspect(
     let mut height = value(&metadata, "ImageHeight")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
-    let signature = if kind == "sidecar" {
+    let preview = if kind == "sidecar" {
         None
     } else {
-        match decode(app, path, kind, &metadata) {
-            Ok(image) => {
+        match preview(app, path, kind, &metadata) {
+            Ok(preview) => {
                 if kind != "video" {
-                    (width, height) = image.dimensions();
+                    (width, height) = (preview.width, preview.height);
                 }
-                Some(signature(&image))
+                Some(preview)
             }
             Err(error) => {
                 warnings.push(format!("Preview/similarity unavailable: {error}"));
@@ -449,7 +581,7 @@ pub fn inspect(
     if identity(path)? != before {
         return Err("Source changed while it was being inspected; retry it.".into());
     }
-    Ok(Media {
+    let media = Media {
         kind: kind.into(),
         date,
         date_source,
@@ -458,26 +590,22 @@ pub fn inspect(
         height,
         hash,
         bytes: stat.len(),
-        signature,
+        signature: preview.as_ref().map(|p| p.signature.clone()),
         metadata,
-    })
+    };
+    Ok((media, preview))
 }
 
-pub fn photo_equivalent(left: &DynamicImage, right: &DynamicImage) -> bool {
-    if left.color().has_alpha() || right.color().has_alpha() {
+pub fn photo_equivalent(left: &Preview, right: &Preview) -> bool {
+    if left.alpha || right.alpha {
         return false;
     }
-    let (lw, lh) = left.dimensions();
-    let (rw, rh) = right.dimensions();
+    let (lw, lh) = (left.width, left.height);
+    let (rw, rh) = (right.width, right.height);
     if lh == 0 || rh == 0 || (lw as f64 / lh as f64 - rw as f64 / rh as f64).abs() > 0.001 {
         return false;
     }
-    let a = left
-        .resize_exact(512, 512, image::imageops::FilterType::Triangle)
-        .to_rgb8();
-    let b = right
-        .resize_exact(512, 512, image::imageops::FilterType::Triangle)
-        .to_rgb8();
+    let (a, b) = (&left.pixels, &right.pixels);
     let mean = a.as_raw().iter().map(|&x| x as f64).sum::<f64>() / a.as_raw().len() as f64;
     let variance = a
         .as_raw()
