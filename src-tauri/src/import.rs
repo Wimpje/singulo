@@ -2,22 +2,32 @@ use crate::{archive::Archive, media, model::*, paths};
 use std::{
     path::{Path, PathBuf},
     sync::atomic::Ordering,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-pub fn update(app: &tauri::AppHandle, progress: Progress) -> Result<()> {
+pub fn update(app: &tauri::AppHandle, progress: &Progress) -> Result<()> {
     let state = app.state::<AppState>();
-    *state.progress.lock().map_err(|e| e.to_string())? = progress.clone();
-    app.emit("progress", &progress).map_err(|e| e.to_string())
+    let mut previous = state.progress.lock().map_err(|e| e.to_string())?;
+    let mut updated = state.progress_updated.lock().map_err(|e| e.to_string())?;
+    if previous.status == progress.status && updated.elapsed() < Duration::from_millis(250) {
+        return Ok(());
+    }
+    *previous = progress.clone();
+    *updated = Instant::now();
+    app.emit("progress", progress).map_err(|e| e.to_string())
 }
 
 pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
     let state = app.state::<AppState>();
     let archive_root = {
-        let archive = state.archive.lock().map_err(|e| e.to_string())?;
+        let mut archive = state.archive.lock().map_err(|e| e.to_string())?;
+        archive
+            .as_mut()
+            .ok_or("Choose an archive first.")?
+            .begin_import();
         archive
             .as_ref()
             .ok_or("Choose an archive first.")?
@@ -28,7 +38,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         status: "scanning".into(),
         ..Progress::default()
     };
-    update(app, progress.clone())?;
+    update(app, &progress)?;
     let mut roots = Vec::<PathBuf>::new();
     for root in &job.roots {
         let root = Path::new(root);
@@ -84,39 +94,100 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
     files.sort_by_key(|(_, path)| media::kind(path) == Some("sidecar"));
     progress.total = files.len();
     progress.status = "importing".into();
-    update(app, progress.clone())?;
-    for (root, path) in files {
+    update(app, &progress)?;
+    let mut checkpoint = Instant::now();
+    for batch in files.chunks(64) {
         if state.cancel.load(Ordering::Relaxed) {
             break;
         }
-        while state.pause.load(Ordering::Relaxed) && !state.cancel.load(Ordering::Relaxed) {
-            progress.status = "paused".into();
-            update(app, progress.clone())?;
-            std::thread::sleep(Duration::from_millis(200));
+        let paths = batch
+            .iter()
+            .filter(|(_, path)| media::kind(path) != Some("sidecar"))
+            .map(|(_, path)| path.clone())
+            .collect::<Vec<_>>();
+        let mut identities = std::collections::HashMap::new();
+        for path in &paths {
+            identities.insert(path.clone(), media::identity(path));
         }
-        if state.cancel.load(Ordering::Relaxed) {
-            break;
+        let metadata = if paths.is_empty() {
+            Ok(std::collections::HashMap::new())
+        } else {
+            media::metadata_batch(app, &paths)
+        };
+        for (root, path) in batch {
+            if state.cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            while state.pause.load(Ordering::Relaxed) && !state.cancel.load(Ordering::Relaxed) {
+                progress.status = "paused".into();
+                update(app, &progress)?;
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            if state.cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            progress.status = "importing".into();
+            progress.current = path.to_string_lossy().into();
+            update(app, &progress)?;
+            let result = (|| {
+                let identity = media::identity(path)?;
+                if let Some(before) = identities.get(path)
+                    && before.as_ref().map_err(Clone::clone)? != &identity
+                {
+                    return Err("Source changed during batch metadata extraction; retry it.".into());
+                }
+                let hash = media::hash(path)?;
+                if media::identity(path)? != identity {
+                    return Err("Source changed during hashing; retry it.".into());
+                }
+                {
+                    let mut guard = state.archive.lock().map_err(|e| e.to_string())?;
+                    let archive = guard.as_mut().ok_or("Archive is not open.")?;
+                    if let Some(exact) = archive.exact(&hash)? {
+                        if media::identity(path)? != identity {
+                            return Err(
+                                "Source changed before duplicate confirmation; retry it.".into()
+                            );
+                        }
+                        let occurrence = occurrence(
+                            archive,
+                            root,
+                            path,
+                            &identity,
+                            &hash,
+                            exact.media.bytes,
+                            exact.id,
+                        )?;
+                        archive.record_occurrence(&occurrence)?;
+                        return Ok(true);
+                    }
+                }
+                let row = match &metadata {
+                    Ok(rows) => rows
+                        .get(path)
+                        .cloned()
+                        .ok_or_else(|| "Metadata batch omitted this file.".to_string()),
+                    Err(error) => Err(error.clone()),
+                };
+                let media = media::inspect(app, path, hash, row)?;
+                let mut guard = state.archive.lock().map_err(|e| e.to_string())?;
+                let archive = guard.as_mut().ok_or("Archive is not open.")?;
+                import_one(app, archive, &job.settings, root, path, &identity, media)
+            })();
+            match result {
+                Ok(true) => progress.duplicates += 1,
+                Ok(false) => progress.copied += 1,
+                Err(error) => progress.errors.push(format!("{}: {error}", path.display())),
+            }
+            progress.done += 1;
+            update(app, &progress)?;
+            if checkpoint.elapsed() >= Duration::from_secs(1) {
+                let guard = state.archive.lock().map_err(|e| e.to_string())?;
+                guard.as_ref().ok_or("Archive is not open.")?.save_job(&job.id,
+                &serde_json::json!({"id":job.id, "roots":job.roots, "settings":job.settings, "progress":progress}))?;
+                checkpoint = Instant::now();
+            }
         }
-        progress.status = "importing".into();
-        progress.current = path.to_string_lossy().into();
-        update(app, progress.clone())?;
-        let result = (|| {
-            let identity = media::identity(&path)?;
-            let media = media::inspect(app, &path)?;
-            let mut guard = state.archive.lock().map_err(|e| e.to_string())?;
-            let archive = guard.as_mut().ok_or("Archive is not open.")?;
-            import_one(app, archive, &job.settings, &root, &path, &identity, media)
-        })();
-        match result {
-            Ok(true) => progress.duplicates += 1,
-            Ok(false) => progress.copied += 1,
-            Err(error) => progress.errors.push(format!("{}: {error}", path.display())),
-        }
-        progress.done += 1;
-        update(app, progress.clone())?;
-        let guard = state.archive.lock().map_err(|e| e.to_string())?;
-        guard.as_ref().ok_or("Archive is not open.")?.save_job(&job.id,
-            &serde_json::json!({"id":job.id, "roots":job.roots, "settings":job.settings, "progress":progress}))?;
     }
     progress.current.clear();
     progress.status = if state.cancel.load(Ordering::Relaxed) {
@@ -137,7 +208,40 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         }
         archive.save_job(&job.id, &serde_json::json!({"id":job.id, "roots":job.roots, "settings":job.settings, "progress":progress}))?;
     }
-    update(app, progress)
+    update(app, &progress)
+}
+
+fn occurrence(
+    archive: &Archive,
+    root: &Path,
+    source: &Path,
+    identity: &str,
+    hash: &str,
+    bytes: u64,
+    item: String,
+) -> Result<Occurrence> {
+    Ok(Occurrence {
+        id: archive
+            .occurrence_id(source, hash)?
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        item,
+        source: source.to_string_lossy().into(),
+        root: root.to_string_lossy().into(),
+        album: root
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into(),
+        relative: source
+            .strip_prefix(root)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .into(),
+        hash: hash.into(),
+        identity: identity.into(),
+        status: "pending".into(),
+        bytes,
+    })
 }
 
 fn import_one(
@@ -156,10 +260,7 @@ fn import_one(
         .to_string_lossy()
         .to_string();
     let occurrence_id = archive
-        .occurrences()?
-        .iter()
-        .find(|o| o.source == source.to_string_lossy() && o.hash == media.hash)
-        .map(|o| o.id.clone())
+        .occurrence_id(source, &media.hash)?
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let occurrence = |item: String| Occurrence {
         id: occurrence_id.clone(),
@@ -191,17 +292,7 @@ fn import_one(
         .to_string_lossy()
         .to_string();
     let owner = if media.kind == "sidecar" {
-        archive
-            .occurrences()?
-            .into_iter()
-            .find(|o| {
-                let other = Path::new(&o.source);
-                other.parent() == source.parent()
-                    && other.file_stem() == source.file_stem()
-                    && media::kind(other) != Some("sidecar")
-            })
-            .map(|o| archive.item(&o.item))
-            .transpose()?
+        archive.sidecar_owner(source)?
     } else {
         None
     };
@@ -226,8 +317,11 @@ fn import_one(
             continue;
         }
         let protected = media.kind == "raw"
-            || source.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("gif"))
-            || media::value(&media.metadata, "BitsPerSample") != media::value(&candidate.media.metadata, "BitsPerSample")
+            || source
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("gif"))
+            || media::value(&media.metadata, "BitsPerSample")
+                != media::value(&candidate.media.metadata, "BitsPerSample")
             || !archive.companions(&candidate.id)?.is_empty()
             || media::value(&media.metadata, "ContentIdentifier").is_some()
             || media::value(&candidate.media.metadata, "ContentIdentifier").is_some()
@@ -247,7 +341,12 @@ fn import_one(
             } else {
                 (|| {
                     let left = media::decode(app, source, &media.kind, &media.metadata)?;
-                    let right = media::decode(app, &path, &candidate.media.kind, &candidate.media.metadata)?;
+                    let right = media::decode(
+                        app,
+                        &path,
+                        &candidate.media.kind,
+                        &candidate.media.metadata,
+                    )?;
                     Ok(media::photo_equivalent(&left, &right))
                 })()
             }
@@ -257,7 +356,9 @@ fn import_one(
         let equivalent = match comparison {
             Ok(equivalent) => equivalent,
             Err(error) => {
-                media.warnings.push(format!("Automatic comparison unavailable; original retained for review: {error}"));
+                media.warnings.push(format!(
+                    "Automatic comparison unavailable; original retained for review: {error}"
+                ));
                 false
             }
         };
@@ -279,7 +380,7 @@ fn import_one(
     } else {
         paths::relative(settings, &media, &original_name)?
     };
-    let path = paths::unique(&archive.root, &wanted, &id)?;
+    let path = archive.unique_import_path(&wanted, &id)?;
     if fs2::available_space(&archive.root).map_err(|e| e.to_string())?
         < media.bytes.saturating_mul(3)
     {

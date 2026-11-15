@@ -71,26 +71,16 @@ fn current_snapshot(app: &tauri::AppHandle) -> Result<Snapshot> {
             undo_bytes: 0,
         });
     };
-    let items = archive.all()?;
+    let (_, active_bytes, active_count) = archive.totals("active")?;
+    let (undo_count, undo_bytes, _) = archive.totals("undo")?;
     Ok(Snapshot {
         root: Some(archive.root.to_string_lossy().into()),
         settings: archive.settings.clone(),
         progress,
-        active_count: items
-            .iter()
-            .filter(|i| i.state == "active" && i.media.kind != "sidecar")
-            .count(),
-        undo_count: items.iter().filter(|i| i.state == "undo").count(),
-        active_bytes: items
-            .iter()
-            .filter(|i| i.state == "active")
-            .map(|i| i.media.bytes)
-            .sum(),
-        undo_bytes: items
-            .iter()
-            .filter(|i| i.state == "undo")
-            .map(|i| i.media.bytes)
-            .sum(),
+        active_count,
+        undo_count,
+        active_bytes,
+        undo_bytes,
     })
 }
 
@@ -192,42 +182,7 @@ async fn library(
         let state = app.state::<AppState>();
         let archive = state.archive.lock().map_err(|e| e.to_string())?;
         let archive = archive.as_ref().ok_or("Choose an archive first.")?;
-        let search = search.to_lowercase();
-        let mut items: Vec<_> = archive
-            .all()?
-            .into_iter()
-            .filter(|item| {
-                let visible = match filter.as_str() {
-                    "undo" => item.state == "undo",
-                    "unknown" => item.state == "active" && item.media.date.is_none(),
-                    "estimated" => {
-                        item.state == "active" && item.media.date_source.starts_with("estimated")
-                    }
-                    "video" => item.state == "active" && item.media.kind == "video",
-                    _ => item.state == "active",
-                };
-                visible
-                    && item.media.kind != "sidecar"
-                    && (search.is_empty()
-                        || item.original_name.to_lowercase().contains(&search)
-                        || item
-                            .media
-                            .date
-                            .as_ref()
-                            .is_some_and(|d| d.contains(&search))
-                        || item
-                            .albums
-                            .iter()
-                            .any(|a| a.to_lowercase().contains(&search)))
-            })
-            .collect();
-        items.sort_by(|a, b| {
-            b.media
-                .date
-                .cmp(&a.media.date)
-                .then_with(|| a.original_name.cmp(&b.original_name))
-        });
-        Ok(items.into_iter().skip(offset).take(60).collect())
+        archive.page(&search, &filter, offset)
     })
     .await
 }
@@ -239,9 +194,10 @@ async fn item_details(app: tauri::AppHandle, id: String) -> Result<serde_json::V
         let archive = state.archive.lock().map_err(|e| e.to_string())?;
         let archive = archive.as_ref().ok_or("Choose an archive first.")?;
         Ok(serde_json::json!({"item":archive.item(&id)?,
-            "sources":archive.occurrences()?.into_iter().filter(|o| o.item == id).collect::<Vec<_>>(),
+            "sources":archive.item_occurrences(&id)?,
             "companions":archive.companions(&id)?}))
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -408,7 +364,7 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
                         errors: vec![format!("Import queue failed: {error}")],
                         ..Progress::default()
                     };
-                    if let Err(error) = import::update(&handle, progress) {
+                    if let Err(error) = import::update(&handle, &progress) {
                         eprintln!("Could not publish queue failure: {error}");
                     }
                     break;
@@ -431,7 +387,7 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
                 if let Err(error) = saved {
                     eprintln!("Could not persist failed import: {error}");
                 }
-                if let Err(error) = import::update(&handle, progress) {
+                if let Err(error) = import::update(&handle, &progress) {
                     eprintln!("Could not publish import failure: {error}");
                 }
             }

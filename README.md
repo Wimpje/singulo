@@ -85,6 +85,22 @@ cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
 Five focused Rust tests, not an extensive framework. Manually smoke-test import/re-import, matching, viewing, layout changes/undo, recycling on disposable data, and an interrupted operation.
 
+### Large collections
+
+The catalog is designed for 100,000+ records: source/companion lookups are indexed, library pages are fetched in SQL, counts are maintained incrementally, and recovery exports are streamed rather than loading all metadata into memory. Folder-name collision checks cache each destination directory once per import instead of rescanning it for every photo.
+
+Metadata extraction batches up to 64 files per ExifTool process. Exact duplicates are checked before image decoding. Verified staging files are linked into their final location on supporting filesystems (APFS/NTFS); filesystems without hard links retain the verified-copy fallback. Database changes are grouped per file without relaxing durable writes. UI progress updates are limited to four per second, and image/hash dependencies are optimized even in development builds.
+
+These changes remove repeated whole-library work, not the necessary cost of reading originals, decoding new photos, verifying copies, or comparing an entire video. External HDD/USB speed and RAW/video content still determine throughput. Pause/cancel before restarting the app to pick up an update; the first open of an existing catalog builds its new indexes.
+
+An optional synthetic 100k-catalog check is separate from the five basic tests:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml catalog_handles_100k_records -- --ignored --nocapture
+```
+
+On the development Mac, this check measured a deep library page at approximately 16 ms, an indexed companion link at 3 ms, and a streamed backup at 0.6 seconds. These are catalog timings on synthetic records, **not** a promise of 100k-photo import speed or performance on an external disk. A separate 16-file metadata check measured about 1.67 seconds with individual processes versus 0.12 seconds batched.
+
 ### App icon
 
 The original stacked-photo artwork is in [static/app-icon.svg](static/app-icon.svg). Native Windows/macOS icons in [src-tauri/icons](src-tauri/icons) and the PNG favicon are generated from it with Tauri's icon command.

@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -15,6 +15,137 @@ struct Operation {
     occurrence: Option<Occurrence>,
     stage: String,
     old_path: Option<String>,
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "Explicit 100k-record scale check; not part of the basic test suite"]
+    fn catalog_handles_100k_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut archive = Archive::open(directory.path()).unwrap();
+        let item = Item {
+            id: "seed".into(),
+            path: "2023/07/18/photo.jpg".into(),
+            original_name: "photo.jpg".into(),
+            state: "active".into(),
+            keeper: None,
+            media: Media {
+                kind: "photo".into(),
+                date: Some("2023-07-18T14:32:10".into()),
+                date_source: "capture metadata".into(),
+                warnings: vec![],
+                width: 4000,
+                height: 3000,
+                hash: "seed".into(),
+                bytes: 4_000_000,
+                signature: None,
+                metadata: serde_json::json!({"EXIF:Orientation":1}),
+            },
+            settings: Settings::default(),
+            albums: vec!["Holiday".into()],
+        };
+        let occurrence = Occurrence {
+            id: "seed".into(),
+            item: "seed".into(),
+            source: "/fixture/photo.jpg".into(),
+            root: "/fixture".into(),
+            album: "Holiday".into(),
+            relative: "photo.jpg".into(),
+            hash: "seed".into(),
+            identity: "fixture".into(),
+            status: "pending".into(),
+            bytes: 4_000_000,
+        };
+        let start = Instant::now();
+        archive.transaction(|archive| {
+            archive.connection.execute(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+                 INSERT INTO items SELECT printf('photo-%06d',x),printf('hash-%06d',x),'active',
+                 json_set(?1,'$.id',printf('photo-%06d',x),'$.media.hash',printf('hash-%06d',x),
+                     '$.originalName',printf('photo-%06d.jpg',x)) FROM n",
+                [json(&item)?]).map_err(|e| e.to_string())?;
+            archive.connection.execute(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+                 INSERT INTO occurrences SELECT printf('source-%06d',x),printf('/fixture/photo-%06d.jpg',x),printf('hash-%06d',x),
+                 json_set(?1,'$.id',printf('source-%06d',x),'$.item',printf('photo-%06d',x),
+                     '$.source',printf('/fixture/photo-%06d.jpg',x),'$.hash',printf('hash-%06d',x)) FROM n",
+                [json(&occurrence)?]).map_err(|e| e.to_string())?;
+            Ok(())
+        }).unwrap();
+        let seed_time = start.elapsed();
+        // Exercise migration of a pre-existing large catalog, not just a new one.
+        archive
+            .connection
+            .execute_batch("PRAGMA user_version=1")
+            .unwrap();
+        drop(archive);
+        let start = Instant::now();
+        let mut archive = Archive::open(directory.path()).unwrap();
+        let migration_time = start.elapsed();
+        assert_eq!(
+            archive.totals("active").unwrap(),
+            (100_000, 400_000_000_000, 100_000)
+        );
+        let start = Instant::now();
+        let page = archive.page("", "all", 99_900).unwrap();
+        assert_eq!(page.len(), 60);
+        assert_eq!(page[0].original_name, "photo-099901.jpg");
+        let page_time = start.elapsed();
+        assert_eq!(archive.page("photo-000001", "all", 0).unwrap().len(), 1);
+        let mut sidecar = occurrence;
+        sidecar.id = "xmp".into();
+        sidecar.source = "/fixture/photo-000001.xmp".into();
+        sidecar.item = "photo-000002".into();
+        sidecar.hash = "xmp".into();
+        let start = Instant::now();
+        archive.record_occurrence(&sidecar).unwrap();
+        let link_time = start.elapsed();
+        assert!(
+            archive
+                .companions("photo-000001")
+                .unwrap()
+                .contains(&sidecar.item)
+        );
+        assert_eq!(
+            archive
+                .occurrence_id(Path::new(&sidecar.source), "xmp")
+                .unwrap()
+                .as_deref(),
+            Some("xmp")
+        );
+        assert_eq!(archive.item_occurrences(&sidecar.item).unwrap().len(), 2);
+        assert_eq!(archive.totals("active").unwrap().0, 100_000);
+        let plan: String = archive
+            .connection
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT item FROM source_groups WHERE group_key=?1",
+                ["/fixture/photo-000001"],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("source_group_key"), "{plan}");
+        let start = Instant::now();
+        archive.backup().unwrap();
+        let backup_time = start.elapsed();
+        let export: serde_json::Value = serde_json::from_reader(
+            File::open(
+                directory
+                    .path()
+                    .join(".photo-dedupe/recovery/metadata-latest.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(export["items"].as_array().unwrap().len(), 100_000);
+        assert_eq!(export["occurrences"].as_array().unwrap().len(), 100_001);
+        println!(
+            "100k catalog: seed={seed_time:?}, migration={migration_time:?}, deep page={page_time:?}, indexed companion link={link_time:?}, streamed backup={backup_time:?}"
+        );
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -30,6 +161,7 @@ pub struct Archive {
     pub id: String,
     connection: Connection,
     _lock: File,
+    import_names: std::collections::HashMap<PathBuf, std::collections::HashSet<String>>,
 }
 
 fn json<T: Serialize + ?Sized>(value: &T) -> Result<String> {
@@ -111,6 +243,15 @@ impl Archive {
         };
         let connection =
             Connection::open(private.join("catalog.sqlite")).map_err(|e| e.to_string())?;
+        connection
+            .create_scalar_function(
+                "unicode_lower",
+                1,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+                |context| Ok(context.get::<String>(0)?.to_lowercase()),
+            )
+            .map_err(|e| e.to_string())?;
         connection.execute_batch(
             "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
              CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -123,7 +264,27 @@ impl Archive {
              CREATE TABLE IF NOT EXISTS companions (owner TEXT NOT NULL, child TEXT NOT NULL, UNIQUE(owner,child));
              CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-             PRAGMA user_version=1;"
+             CREATE INDEX IF NOT EXISTS occurrence_item ON occurrences(json_extract(data,'$.item'));
+             CREATE INDEX IF NOT EXISTS companion_child ON companions(child);
+             CREATE INDEX IF NOT EXISTS library_order ON items(state,json_extract(data,'$.media.date') DESC,json_extract(data,'$.originalName'));
+             CREATE INDEX IF NOT EXISTS library_visible ON items(state,json_extract(data,'$.media.date') DESC,json_extract(data,'$.originalName'))
+                 WHERE json_extract(data,'$.media.kind')!='sidecar';
+             CREATE TABLE IF NOT EXISTS source_groups (source TEXT PRIMARY KEY, item TEXT NOT NULL, group_key TEXT NOT NULL, content_id TEXT);
+             CREATE INDEX IF NOT EXISTS source_group_key ON source_groups(group_key);
+             CREATE INDEX IF NOT EXISTS source_content_id ON source_groups(content_id);
+             CREATE TABLE IF NOT EXISTS totals (state TEXT PRIMARY KEY, count INTEGER NOT NULL, bytes INTEGER NOT NULL, visible INTEGER NOT NULL);
+             INSERT OR IGNORE INTO totals SELECT state,COUNT(*),SUM(json_extract(data,'$.media.bytes')),
+                 SUM(json_extract(data,'$.media.kind')!='sidecar') FROM items GROUP BY state;
+             CREATE TRIGGER IF NOT EXISTS item_totals_insert AFTER INSERT ON items BEGIN
+                 INSERT INTO totals VALUES(NEW.state,1,json_extract(NEW.data,'$.media.bytes'),json_extract(NEW.data,'$.media.kind')!='sidecar')
+                 ON CONFLICT(state) DO UPDATE SET count=count+1,bytes=bytes+excluded.bytes,visible=visible+excluded.visible;
+             END;
+             CREATE TRIGGER IF NOT EXISTS item_totals_update AFTER UPDATE ON items BEGIN
+                 UPDATE totals SET count=count-1,bytes=bytes-json_extract(OLD.data,'$.media.bytes'),
+                     visible=visible-(json_extract(OLD.data,'$.media.kind')!='sidecar') WHERE state=OLD.state;
+                 INSERT INTO totals VALUES(NEW.state,1,json_extract(NEW.data,'$.media.bytes'),json_extract(NEW.data,'$.media.kind')!='sidecar')
+                 ON CONFLICT(state) DO UPDATE SET count=count+1,bytes=bytes+excluded.bytes,visible=visible+excluded.visible;
+             END;"
         ).map_err(|e| e.to_string())?;
         let settings = connection
             .query_row("SELECT value FROM config WHERE key='settings'", [], |row| {
@@ -135,13 +296,31 @@ impl Archive {
             .transpose()?
             .unwrap_or_default();
         paths::validate(&settings)?;
-        Ok(Self {
+        let mut archive = Self {
             root,
             settings,
             id,
             connection,
             _lock: lock,
-        })
+            import_names: std::collections::HashMap::new(),
+        };
+        let version: u32 = archive
+            .connection
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if version < 2 {
+            archive.transaction(|archive| {
+                for occurrence in archive.occurrences()? {
+                    archive.index_source(&occurrence)?;
+                }
+                archive
+                    .connection
+                    .execute_batch("PRAGMA user_version=2;")
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })?;
+        }
+        Ok(archive)
     }
 
     pub fn check(&self) -> Result<()> {
@@ -151,6 +330,66 @@ impl Archive {
             return Err("The destination is no longer the selected archive.".into());
         }
         Ok(())
+    }
+
+    pub fn begin_import(&mut self) {
+        self.import_names.clear();
+    }
+
+    pub fn unique_import_path(&mut self, wanted: &Path, id: &str) -> Result<PathBuf> {
+        let target = paths::inside(&self.root, wanted)?;
+        let parent = target
+            .parent()
+            .ok_or("Missing output parent.")?
+            .to_path_buf();
+        if !self.import_names.contains_key(&parent) {
+            let mut names = std::collections::HashSet::new();
+            if parent.exists() {
+                for entry in fs::read_dir(&parent).map_err(|e| e.to_string())? {
+                    names.insert(
+                        entry
+                            .map_err(|e| e.to_string())?
+                            .file_name()
+                            .to_string_lossy()
+                            .to_lowercase(),
+                    );
+                }
+            }
+            self.import_names.insert(parent.clone(), names);
+        }
+        let names = self
+            .import_names
+            .get_mut(&parent)
+            .ok_or("Missing directory name cache.")?;
+        let name = wanted
+            .file_name()
+            .ok_or("Missing output filename.")?
+            .to_string_lossy()
+            .to_lowercase();
+        let result = if names.contains(&name) || target.exists() {
+            let stem = wanted
+                .file_stem()
+                .ok_or("Missing output stem.")?
+                .to_string_lossy();
+            let ext = wanted
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_default();
+            wanted.with_file_name(format!("{stem}__{id}{ext}"))
+        } else {
+            wanted.to_path_buf()
+        };
+        if result != wanted && paths::inside(&self.root, &result)?.exists() {
+            return Err("Collision at generated output filename.".into());
+        }
+        names.insert(
+            result
+                .file_name()
+                .ok_or("Missing output filename.")?
+                .to_string_lossy()
+                .to_lowercase(),
+        );
+        Ok(result)
     }
 
     pub fn save_settings(&mut self, settings: Settings) -> Result<()> {
@@ -187,6 +426,133 @@ impl Archive {
         parse(&data)
     }
 
+    fn transaction<T>(&mut self, action: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if !self.connection.is_autocommit() {
+            return action(self);
+        }
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| e.to_string())?;
+        match action(self) {
+            Ok(value) => {
+                if let Err(error) = self.connection.execute_batch("COMMIT") {
+                    self.connection
+                        .execute_batch("ROLLBACK")
+                        .map_err(|rollback| {
+                            format!("Commit failed: {error}; rollback failed: {rollback}")
+                        })?;
+                    return Err(format!("Catalog commit failed: {error}"));
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                self.connection
+                    .execute_batch("ROLLBACK")
+                    .map_err(|rollback| format!("{error}; rollback failed: {rollback}"))?;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn totals(&self, state: &str) -> Result<(usize, u64, usize)> {
+        self.check()?;
+        let (count, bytes, visible): (i64, i64, i64) = self
+            .connection
+            .query_row(
+                "SELECT count,bytes,visible FROM totals WHERE state=?1",
+                [state],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or((0, 0, 0));
+        Ok((
+            count.try_into().map_err(|_| "Invalid catalog count.")?,
+            bytes
+                .try_into()
+                .map_err(|_| "Invalid catalog byte total.")?,
+            visible
+                .try_into()
+                .map_err(|_| "Invalid catalog visible count.")?,
+        ))
+    }
+
+    pub fn page(&self, search: &str, filter: &str, offset: usize) -> Result<Vec<Item>> {
+        self.check()?;
+        let state = if filter == "undo" { "undo" } else { "active" };
+        let condition = match filter {
+            "unknown" => "AND json_extract(data,'$.media.date') IS NULL",
+            "estimated" => "AND json_extract(data,'$.media.dateSource') LIKE 'estimated%'",
+            "video" => "AND json_extract(data,'$.media.kind')='video'",
+            _ => "",
+        };
+        let mut query = self.connection.prepare_cached(&format!(
+            "SELECT data FROM items WHERE state=?1 AND json_extract(data,'$.media.kind')!='sidecar' {condition}
+             AND (?2='' OR instr(unicode_lower(json_extract(data,'$.originalName')),?2)>0
+                 OR instr(json_extract(data,'$.media.date'),?2)>0
+                 OR EXISTS (SELECT 1 FROM json_each(data,'$.albums') WHERE instr(unicode_lower(value),?2)>0))
+             ORDER BY json_extract(data,'$.media.date') DESC,json_extract(data,'$.originalName') LIMIT 60 OFFSET ?3"
+        )).map_err(|e| e.to_string())?;
+        query
+            .query_map(
+                params![
+                    state,
+                    search.to_lowercase(),
+                    i64::try_from(offset).map_err(|_| "Library offset is too large.")?
+                ],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(|e| e.to_string())?
+            .map(|r| parse(&r.map_err(|e| e.to_string())?))
+            .collect()
+    }
+
+    pub fn occurrence_id(&self, source: &Path, hash: &str) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT id FROM occurrences WHERE source=?1 AND hash=?2",
+                params![source.to_string_lossy(), hash],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn item_occurrences(&self, item: &str) -> Result<Vec<Occurrence>> {
+        let mut query = self
+            .connection
+            .prepare_cached("SELECT data FROM occurrences WHERE json_extract(data,'$.item')=?1")
+            .map_err(|e| e.to_string())?;
+        query
+            .query_map([item], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .map(|r| parse(&r.map_err(|e| e.to_string())?))
+            .collect()
+    }
+
+    fn group_key(source: &Path) -> String {
+        source.with_extension("").to_string_lossy().into_owned()
+    }
+
+    fn index_source(&self, occurrence: &Occurrence) -> Result<()> {
+        let item = self.item(&occurrence.item)?;
+        let content_id =
+            media::value(&item.media.metadata, "ContentIdentifier").and_then(|v| v.as_str());
+        self.connection.execute("INSERT INTO source_groups VALUES(?1,?2,?3,?4)
+            ON CONFLICT(source) DO UPDATE SET item=excluded.item,group_key=excluded.group_key,content_id=excluded.content_id",
+            params![occurrence.source,occurrence.item,Self::group_key(Path::new(&occurrence.source)),content_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn sidecar_owner(&self, source: &Path) -> Result<Option<Item>> {
+        let id: Option<String> = self.connection.query_row(
+            "SELECT s.item FROM source_groups s JOIN items i ON i.id=s.item WHERE s.group_key=?1
+             AND json_extract(i.data,'$.media.kind')!='sidecar' LIMIT 1",
+            [Self::group_key(source)], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+        id.map(|id| self.item(&id)).transpose()
+    }
+
     pub fn exact(&self, hash: &str) -> Result<Option<Item>> {
         let mut query = self.connection.prepare("SELECT data FROM items WHERE hash=?1 AND state!='purged' ORDER BY state='active' DESC")
             .map_err(|e| e.to_string())?;
@@ -216,6 +582,10 @@ impl Archive {
     }
 
     pub fn record_occurrence(&mut self, occurrence: &Occurrence) -> Result<()> {
+        self.transaction(|archive| archive.record_occurrence_inner(occurrence))
+    }
+
+    fn record_occurrence_inner(&mut self, occurrence: &Occurrence) -> Result<()> {
         self.connection
             .execute(
                 "INSERT INTO occurrences(id,source,hash,data) VALUES(?1,?2,?3,?4)
@@ -236,10 +606,22 @@ impl Archive {
                 _ => None,
             }));
         }
+        let mut changed = false;
         for label in labels {
-            if !item.albums.contains(&label) { item.albums.push(label); }
+            if !item.albums.contains(&label) {
+                item.albums.push(label);
+                changed = true;
+            }
         }
-        self.store(&item)?;
+        if changed {
+            self.connection
+                .execute(
+                    "UPDATE items SET data=?1 WHERE id=?2",
+                    params![json(&item)?, item.id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        self.index_source(occurrence)?;
         self.link_companions(occurrence)
     }
 
@@ -268,28 +650,23 @@ impl Archive {
     }
 
     fn link_companions(&mut self, occurrence: &Occurrence) -> Result<()> {
-        let path = Path::new(&occurrence.source);
-        let stem = path.file_stem();
-        for other in self.occurrences()? {
-            if other.item == occurrence.item {
-                continue;
-            }
-            let other_path = Path::new(&other.source);
-            let current_item = self.item(&occurrence.item)?;
-            let other_item = self.item(&other.item)?;
-            let content_id = media::value(&current_item.media.metadata, "ContentIdentifier");
-            let same_content = content_id.is_some()
-                && content_id == media::value(&other_item.media.metadata, "ContentIdentifier");
-            if (other_path.parent() == path.parent() && other_path.file_stem() == stem)
-                || same_content
-            {
-                self.connection
-                    .execute(
-                        "INSERT OR IGNORE INTO companions VALUES(?1,?2)",
-                        params![other.item, occurrence.item],
-                    )
-                    .map_err(|e| e.to_string())?;
-            }
+        let item = self.item(&occurrence.item)?;
+        let content_id =
+            media::value(&item.media.metadata, "ContentIdentifier").and_then(|v| v.as_str());
+        self.connection
+            .execute(
+                "INSERT OR IGNORE INTO companions
+             SELECT item,?1 FROM source_groups WHERE group_key=?2 AND item!=?1",
+                params![
+                    occurrence.item,
+                    Self::group_key(Path::new(&occurrence.source))
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        if let Some(content_id) = content_id {
+            self.connection.execute(
+                "INSERT OR IGNORE INTO companions SELECT item,?1 FROM source_groups WHERE content_id=?2 AND item!=?1",
+                params![occurrence.item,content_id]).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -320,8 +697,10 @@ impl Archive {
         let mut query = self
             .connection
             .prepare(&format!(
-                "SELECT DISTINCT items.data FROM items JOIN buckets ON items.id=buckets.item
-             WHERE buckets.bucket IN ({buckets}) AND items.state='active' LIMIT 200"
+                "SELECT items.data FROM items JOIN
+                 (SELECT item,COUNT(*) AS matches FROM buckets WHERE bucket IN ({buckets})
+                  GROUP BY item HAVING COUNT(*)>=2 ORDER BY matches DESC LIMIT 200) hits ON items.id=hits.item
+                 WHERE items.state='active'"
             ))
             .map_err(|e| e.to_string())?;
         let rows = query
@@ -411,17 +790,45 @@ impl Archive {
         fs::create_dir_all(target.parent().ok_or("Missing target folder.")?)
             .map_err(|e| e.to_string())?;
         if !target.exists() {
-            copy_new(&stage, &target, &operation.item.media.hash)?;
+            match fs::hard_link(&stage, &target) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Unsupported | std::io::ErrorKind::PermissionDenied
+                    ) || error.raw_os_error().is_some_and(|code| {
+                        if cfg!(windows) {
+                            matches!(code, 1 | 50)
+                        } else {
+                            matches!(code, 18 | 38 | 45 | 95)
+                        }
+                    }) =>
+                {
+                    copy_new(&stage, &target, &operation.item.media.hash)?;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "Could not place verified copy without overwriting: {error}"
+                    ));
+                }
+            }
+            #[cfg(unix)]
+            File::open(target.parent().ok_or("Missing target folder.")?)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| format!("Could not flush final archive directory: {e}"))?;
         } else if media::hash(&target)? != operation.item.media.hash {
             return Err(format!(
                 "Interrupted operation has a conflicting or incomplete target at {}. Both staging and source are retained; resolve this file before recovery.",
                 target.display()
             ));
         }
-        self.store(&operation.item)?;
-        if let Some(occurrence) = &operation.occurrence {
-            self.record_occurrence(occurrence)?;
-        }
+        self.transaction(|archive| {
+            archive.store(&operation.item)?;
+            if let Some(occurrence) = &operation.occurrence {
+                archive.record_occurrence(occurrence)?;
+            }
+            Ok(())
+        })?;
         if let Some(old) = &operation.old_path {
             let old = paths::inside(&self.root, Path::new(old))?;
             if old != target && old.exists() {
@@ -990,19 +1397,46 @@ impl Archive {
             fs::remove_file(&backup).map_err(|e| e.to_string())?;
         }
         fs::rename(temporary, backup).map_err(|e| e.to_string())?;
-        let export = serde_json::json!({
-            "version":1, "archiveId":self.id, "settings":self.settings,
-            "items":self.all()?, "occurrences":self.occurrences()?
-        });
         let temporary = directory.join(format!("metadata-{}.json", Uuid::new_v4()));
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&temporary)
             .map_err(|e| e.to_string())?;
-        file.write_all(json(&export)?.as_bytes())
-            .map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
+        let mut writer = BufWriter::new(file);
+        write!(
+            writer,
+            "{{\"version\":1,\"archiveId\":{},\"settings\":{},\"items\":[",
+            json(&self.id)?,
+            json(&self.settings)?
+        )
+        .map_err(|e| e.to_string())?;
+        for (index, table) in ["items", "occurrences"].into_iter().enumerate() {
+            if index != 0 {
+                writer
+                    .write_all(b"],\"occurrences\":[")
+                    .map_err(|e| e.to_string())?;
+            }
+            let mut query = self
+                .connection
+                .prepare(&format!("SELECT data FROM {table}"))
+                .map_err(|e| e.to_string())?;
+            let mut rows = query.query([]).map_err(|e| e.to_string())?;
+            let mut first = true;
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                if !first {
+                    writer.write_all(b",").map_err(|e| e.to_string())?;
+                }
+                first = false;
+                let data: String = row.get(0).map_err(|e| e.to_string())?;
+                writer
+                    .write_all(data.as_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        writer.write_all(b"]}").map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())?;
+        writer.get_ref().sync_all().map_err(|e| e.to_string())?;
         let target = directory.join("metadata-latest.json");
         if target.exists() {
             fs::remove_file(&target).map_err(|e| e.to_string())?;

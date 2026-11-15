@@ -125,6 +125,7 @@ pub struct MoveRow {
 pub struct AppState {
     pub archive: Mutex<Option<crate::archive::Archive>>,
     pub progress: Mutex<Progress>,
+    pub progress_updated: Mutex<std::time::Instant>,
     pub busy: AtomicBool,
     pub importing: AtomicBool,
     pub cancel: AtomicBool,
@@ -143,6 +144,7 @@ impl Default for AppState {
         Self {
             archive: Mutex::new(None),
             progress: Mutex::new(Progress::default()),
+            progress_updated: Mutex::new(std::time::Instant::now()),
             busy: AtomicBool::new(false),
             importing: AtomicBool::new(false),
             cancel: AtomicBool::new(false),

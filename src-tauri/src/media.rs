@@ -40,7 +40,11 @@ pub fn tool(app: &tauri::AppHandle, name: &str) -> Result<PathBuf> {
     ))
 }
 
-pub fn execute(mut command: Command, timeout: u64) -> Result<Vec<u8>> {
+pub fn execute(command: Command, timeout: u64) -> Result<Vec<u8>> {
+    execute_output(command, timeout, false)
+}
+
+fn execute_output(mut command: Command, timeout: u64, metadata_batch: bool) -> Result<Vec<u8>> {
     let output = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
     let errors = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
     command
@@ -68,6 +72,8 @@ pub fn execute(mut command: Command, timeout: u64) -> Result<Vec<u8>> {
             return Err("Media processing timed out; the original has not been changed.".into());
         }
     };
+    // ExifTool returns 1 for mixed batches and can omit failed files from JSON.
+    // Preserve valid dates, log stderr, and let callers report omitted files.
     if !status.success() {
         let mut message = String::new();
         errors
@@ -76,7 +82,11 @@ pub fn execute(mut command: Command, timeout: u64) -> Result<Vec<u8>> {
             .take(8192)
             .read_to_string(&mut message)
             .map_err(|e| e.to_string())?;
-        return Err(format!("Media tool failed ({status}): {}", message.trim()));
+        if metadata_batch && status.code() == Some(1) {
+            eprintln!("Metadata batch reported errors: {}", message.trim());
+        } else {
+            return Err(format!("Media tool failed ({status}): {}", message.trim()));
+        }
     }
     if output
         .as_file()
@@ -332,28 +342,63 @@ pub fn distance(left: &str, right: &str) -> Option<u32> {
     Some((u64::from_str_radix(left, 16).ok()? ^ u64::from_str_radix(right, 16).ok()?).count_ones())
 }
 
-pub fn inspect(app: &tauri::AppHandle, path: &Path) -> Result<Media> {
+pub fn metadata_batch(
+    app: &tauri::AppHandle,
+    paths: &[PathBuf],
+) -> Result<std::collections::HashMap<PathBuf, serde_json::Value>> {
+    let mut command = Command::new(tool(app, "exiftool")?);
+    command.args([
+        "-config",
+        "",
+        "-json",
+        "-G1",
+        "-n",
+        "-api",
+        "LargeFileSupport=1",
+        "-DateTimeOriginal",
+        "-SubSecDateTimeOriginal",
+        "-CreationDate",
+        "-CreateDate",
+        "-MediaCreateDate",
+        "-OffsetTimeOriginal",
+        "-FileType",
+        "-ImageWidth",
+        "-ImageHeight",
+        "-Orientation",
+        "-ContentIdentifier",
+        "-BitsPerSample",
+        "-ProfileDescription",
+        "-Error",
+        "-Warning",
+        "--",
+    ]);
+    command.args(paths);
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&execute_output(command, 180, true)?)
+        .map_err(|e| format!("Invalid metadata batch response: {e}"))?;
+    let mut result = std::collections::HashMap::new();
+    for row in rows {
+        let source = value(&row, "SourceFile")
+            .and_then(|v| v.as_str())
+            .ok_or("Metadata result has no source filename.")?;
+        result.insert(PathBuf::from(source), row);
+    }
+    Ok(result)
+}
+
+pub fn inspect(
+    app: &tauri::AppHandle,
+    path: &Path,
+    hash: String,
+    metadata: Result<serde_json::Value>,
+) -> Result<Media> {
     let kind = kind(path).ok_or("Unsupported media extension.")?;
     let before = identity(path)?;
     let stat = fs::metadata(path).map_err(|e| e.to_string())?;
-    let hash = hash(path)?;
     let mut warnings = Vec::new();
     let metadata = if kind == "sidecar" {
         serde_json::json!({})
     } else {
-        let result = (|| {
-            let mut command = Command::new(tool(app, "exiftool")?);
-            command
-                .args(["-json", "-G1", "-n", "-api", "LargeFileSupport=1", "--"])
-                .arg(path);
-            let bytes = execute(command, 60)?;
-            let rows: Vec<serde_json::Value> =
-                serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-            rows.into_iter()
-                .next()
-                .ok_or_else(|| "Metadata tool returned no result.".to_string())
-        })();
-        match result {
+        match metadata {
             Ok(metadata) => metadata,
             Err(error) => {
                 warnings.push(format!("Metadata unavailable: {error}"));
@@ -361,6 +406,11 @@ pub fn inspect(app: &tauri::AppHandle, path: &Path) -> Result<Media> {
             }
         }
     };
+    for tag in ["Error", "Warning"] {
+        if let Some(warning) = value(&metadata, tag) {
+            warnings.push(format!("Metadata {tag}: {warning}"));
+        }
+    }
     let birth = stat.created().ok().map(|d| {
         DateTime::<Local>::from(d)
             .format("%Y-%m-%dT%H:%M:%S")
