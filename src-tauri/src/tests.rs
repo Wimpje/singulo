@@ -89,11 +89,11 @@ fn exact_duplicates_keep_provenance_and_require_present_keeper() {
         ["Holiday", "Old backup"]
     );
     assert_eq!(archive.totals("active").unwrap(), (1, 4, 1));
-    assert_eq!(archive.page("old backup", "all", 0).unwrap().len(), 1);
+    assert_eq!(archive.page("old backup", "all", None, 0).unwrap().len(), 1);
     let mut occurrence = archive.item_occurrences("original").unwrap().remove(0);
     occurrence.album = "Été".into();
     archive.record_occurrence(&occurrence).unwrap();
-    assert_eq!(archive.page("été", "all", 0).unwrap().len(), 1);
+    assert_eq!(archive.page("été", "all", None, 0).unwrap().len(), 1);
     let wanted = Path::new("2023/07/18/New.jpg");
     assert_eq!(archive.unique_import_path(wanted, "first").unwrap(), wanted);
     assert_eq!(

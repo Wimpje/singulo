@@ -196,13 +196,31 @@ async fn library(
     app: tauri::AppHandle,
     search: String,
     filter: String,
+    month: Option<String>,
     offset: usize,
 ) -> Result<Vec<Item>> {
     read(app, move |app| {
         let state = app.state::<AppState>();
         let archive = state.archive.lock().map_err(|e| e.to_string())?;
         let archive = archive.as_ref().ok_or("Choose an archive first.")?;
-        archive.page(&search, &filter, offset)
+        archive.page(&search, &filter, month.as_deref(), offset)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn library_months(
+    app: tauri::AppHandle,
+    search: String,
+    filter: String,
+) -> Result<Vec<archive::LibraryMonth>> {
+    read(app, move |app| {
+        let state = app.state::<AppState>();
+        let archive = state.archive.lock().map_err(|e| e.to_string())?;
+        archive
+            .as_ref()
+            .ok_or("Choose an archive first.")?
+            .months(&search, &filter)
     })
     .await
 }
@@ -671,6 +689,7 @@ pub fn run() {
             save_settings,
             path_examples,
             library,
+            library_months,
             item_details,
             preview_image,
             video_preview,

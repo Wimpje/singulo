@@ -12,6 +12,8 @@
   } from "$lib/api";
 
   type Tab = "home" | "library" | "review" | "settings";
+  type LibraryMonth = { month: string; count: number };
+  const pageSize = 60;
   let native = $state(false);
   let mode = $state("main");
   let tab = $state<Tab>("home");
@@ -27,7 +29,10 @@
   let tools = $state<ToolStatus[]>([]);
   let search = $state("");
   let filter = $state("all");
-  let hasMore = $state(false);
+  let months = $state<LibraryMonth[]>([]);
+  let month = $state("");
+  let page = $state(0);
+  let libraryLoading = $state(false);
   let examples = $state<string[]>([]);
   let configError = $state("");
   let selected = $state<Details | null>(null);
@@ -53,6 +58,9 @@
   const busy = $derived(working || ["scanning", "importing", "paused"].includes(snapshot.progress.status));
   const percent = $derived(snapshot.progress.total ? Math.round(snapshot.progress.done / snapshot.progress.total * 100) : 0);
   const viewerIndex = $derived(selected ? items.findIndex((item) => item.id === selected?.item.id) : -1);
+  const monthCount = $derived(months.find((entry) => entry.month === month)?.count ?? 0);
+  const years = $derived([...new Set(months.map((entry) => entry.month === "unknown" ? "unknown" : entry.month.slice(0, 4)))]);
+  const year = $derived(month === "unknown" ? "unknown" : month.slice(0, 4));
   const presets = [
     ["{yyyy}/{mm}/{dd}", "Year / month / day"],
     ["{yyyy}/{mm}", "Year / month"],
@@ -75,10 +83,15 @@
       if (mode === "main") {
         [reviews, jobs] = await Promise.all([api<Review[]>("review_list"), api<Job[]>("job_history")]);
       }
-      await loadItems(false, preservePages);
+      await loadLibrary(preservePages);
     } else {
       items = [];
-      hasMore = false;
+      months = [];
+      month = "";
+      page = 0;
+      lastQuery = "";
+      libraryLoading = false;
+      searchSeq += 1;
     }
   }
 
@@ -88,28 +101,49 @@
     finally { mutating = false; }
   }
 
-  async function loadItems(more = false, preservePages = false) {
-    if (!snapshot.root) { items = []; hasMore = false; return; }
+  async function loadLibrary(preservePage = false, seq = ++searchSeq) {
     const key = `${search}\0${filter}`;
-    if (more) {
-      const result = await api<Item[]>("library", { search, filter, offset: items.length });
-      items = [...items, ...result];
-      hasMore = result.length === 60;
-      lastQuery = key;
-      return;
-    }
-    const targetCount = preservePages ? Math.max(60, items.length) : 60;
-    const collected: Item[] = [];
-    let moreAvailable = false;
-    for (let offset = 0; offset < targetCount; offset += 60) {
-      const batch = await api<Item[]>("library", { search, filter, offset });
-      collected.push(...batch);
-      moreAvailable = batch.length === 60;
-      if (!moreAvailable) break;
-    }
-    items = collected;
-    hasMore = moreAvailable;
+    const currentSearch = search;
+    const currentFilter = filter;
+    const result = await api<LibraryMonth[]>("library_months", { search: currentSearch, filter: currentFilter });
+    if (seq !== searchSeq) return;
+    const nextMonth = result.some((entry) => entry.month === month) ? month : result[0]?.month ?? "";
+    const count = result.find((entry) => entry.month === nextMonth)?.count ?? 0;
+    const nextPage = preservePage && key === lastQuery && nextMonth === month
+      ? Math.min(page, Math.max(0, Math.ceil(count / pageSize) - 1)) : 0;
+    const nextItems = nextMonth
+      ? await api<Item[]>("library", { search: currentSearch, filter: currentFilter, month: nextMonth, offset: nextPage * pageSize })
+      : [];
+    if (seq !== searchSeq) return;
+    months = result;
+    month = nextMonth;
+    page = nextPage;
+    items = nextItems;
     lastQuery = key;
+    libraryLoading = false;
+  }
+
+  async function changeMonth(nextMonth: string) {
+    if (nextMonth === month || working) return;
+    await run(async () => {
+      const seq = ++searchSeq;
+      const result = await api<Item[]>("library", { search, filter, month: nextMonth, offset: 0 });
+      if (seq !== searchSeq) return;
+      month = nextMonth;
+      page = 0;
+      items = result;
+    });
+  }
+
+  async function changePage(nextPage: number) {
+    if (working || nextPage < 0 || nextPage * pageSize >= monthCount) return;
+    await run(async () => {
+      const seq = ++searchSeq;
+      const result = await api<Item[]>("library", { search, filter, month, offset: nextPage * pageSize });
+      if (seq !== searchSeq) return;
+      page = nextPage;
+      items = result;
+    });
   }
 
   async function chooseArchive() {
@@ -149,12 +183,24 @@
 
   async function navigatePhoto(direction: -1 | 1) {
     if (working || viewerIndex < 0) return;
-    const index = viewerIndex + direction;
-    if (index >= items.length && hasMore) {
-      await run(async () => { await loadItems(true); });
-    }
-    const item = items[index];
-    if (item) await selectItem(item.id);
+    const absoluteIndex = page * pageSize + viewerIndex + direction;
+    if (absoluteIndex < 0 || absoluteIndex >= monthCount) return;
+    await run(async () => {
+      const nextPage = Math.floor(absoluteIndex / pageSize);
+      const seq = ++searchSeq;
+      const nextItems = nextPage === page ? items
+        : await api<Item[]>("library", { search, filter, month, offset: nextPage * pageSize });
+      const item = nextItems[absoluteIndex % pageSize];
+      if (!item) throw new Error("The photo list changed. Refresh the library and try again.");
+      const detail = await api<Details>("item_details", { id: item.id });
+      if (seq !== searchSeq) return;
+      items = nextItems;
+      page = nextPage;
+      selected = detail;
+      dateEntry = detail.item.media.date?.slice(0, 10) ?? "";
+      videoSource = "";
+      secondVideoSource = "";
+    });
   }
 
   function viewerKey(event: KeyboardEvent) {
@@ -165,7 +211,7 @@
       closeDetails();
       return;
     }
-    if (mode === "viewer" && selected && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+    if (selected && !comparing && !currentReview && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
       event.preventDefault();
       void navigatePhoto(event.key === "ArrowLeft" ? -1 : 1);
     }
@@ -292,19 +338,21 @@
     const term = search;
     const selectedFilter = filter;
     const key = `${term}\0${selectedFilter}`;
-    if (!loaded || !native || !snapshot.root || key === lastQuery) return;
+    if (!loaded || !native || !snapshot.root) return;
+    if (key === lastQuery) { libraryLoading = false; return; }
     const seq = ++searchSeq;
+    libraryLoading = true;
     const timer = setTimeout(() => {
-      api<Item[]>("library", { search: term, filter: selectedFilter, offset: 0 })
-        .then((value) => {
+      if (seq !== searchSeq) return;
+      void loadLibrary(false, seq)
+        .catch((reason: unknown) => {
           if (seq !== searchSeq) return;
-          lastQuery = key;
-          items = value;
-          hasMore = value.length === 60;
-        })
-        .catch((reason: unknown) => { if (seq === searchSeq) error = message(reason); });
+          items = []; months = []; month = ""; page = 0; lastQuery = "";
+          libraryLoading = false;
+          error = message(reason);
+        });
     }, 220);
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); searchSeq += 1; };
   });
 
   onMount(() => {
@@ -356,6 +404,42 @@
 <svelte:head><title>Family Archive</title><meta name="description" content="A safe home for family photos and videos" /></svelte:head>
 <svelte:window onkeydown={viewerKey} />
 
+{#snippet datePicker()}
+  {#if months.length}
+    <div class="date-picker">
+      <label>Year
+        <select aria-label="Choose year" value={year} disabled={working || libraryLoading} onchange={(event) => {
+          const value = event.currentTarget.value;
+          const entry = months.find((candidate) => value === "unknown" ? candidate.month === "unknown" : candidate.month.startsWith(`${value}-`));
+          if (entry) void changeMonth(entry.month);
+        }}>
+          {#each years as value}<option value={value}>{value === "unknown" ? "Unknown date" : value}</option>{/each}
+        </select>
+      </label>
+      {#if year !== "unknown"}
+        <label>Month
+          <select aria-label="Choose month" value={month} disabled={working || libraryLoading} onchange={(event) => changeMonth(event.currentTarget.value)}>
+            {#each months.filter((entry) => entry.month.startsWith(`${year}-`)) as entry}
+              <option value={entry.month}>{entry.month.slice(5, 7)} ({entry.count.toLocaleString()})</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+      <span>{monthCount.toLocaleString()} memories</span>
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet pageControls()}
+  {#if monthCount > pageSize}
+    <div class="page-controls">
+      <button class="secondary" disabled={working || libraryLoading || page === 0} onclick={() => changePage(page - 1)}>Previous page</button>
+      <span>Page {page + 1} of {Math.ceil(monthCount / pageSize)}</span>
+      <button class="secondary" disabled={working || libraryLoading || (page + 1) * pageSize >= monthCount} onclick={() => changePage(page + 1)}>Next page</button>
+    </div>
+  {/if}
+{/snippet}
+
 {#if mode === "drop"}
   <main class="mini" class:dropping>
     <div class="mini-heading"><span class="brand-symbol">FA</span><strong>Family Archive</strong></div>
@@ -381,8 +465,8 @@
         <button class="secondary" disabled={working} onclick={closeDetails}>Back to thumbnails</button>
         <span>{selected.item.originalName}</span>
         <div class="button-row">
-          <button class="secondary" disabled={working || viewerIndex <= 0} onclick={() => navigatePhoto(-1)}>Previous</button>
-          <button class="secondary" disabled={working || viewerIndex < 0 || (viewerIndex === items.length - 1 && !hasMore)} onclick={() => navigatePhoto(1)}>Next</button>
+          <button class="secondary" disabled={working || viewerIndex < 0 || page * pageSize + viewerIndex <= 0} onclick={() => navigatePhoto(-1)}>Previous</button>
+          <button class="secondary" disabled={working || viewerIndex < 0 || page * pageSize + viewerIndex >= monthCount - 1} onclick={() => navigatePhoto(1)}>Next</button>
         </div>
       </div>
       <section class="viewer-stage" aria-label={selected.item.originalName}>
@@ -403,9 +487,10 @@
         <input class="search" aria-label="Search photos and original folders" bind:value={search} placeholder="Search photos, dates or original folders..." />
         <select aria-label="Filter viewer" bind:value={filter}><option value="all">All memories</option><option value="video">Videos</option><option value="unknown">Unknown dates</option><option value="estimated">Estimated dates</option></select>
       </div>
+      {@render datePicker()}
       {#if items.length}
-        <div class="photo-grid">{#each items as item (item.id)}<button class="photo-card" onclick={() => selectItem(item.id)}><Preview {item} /><div class="photo-info"><strong>{item.originalName}</strong><span>{item.media.date?.slice(0, 10) ?? "Date unknown"}</span><small>{item.albums.join(" / ")}</small></div></button>{/each}</div>
-        {#if hasMore}<button class="secondary load-more" disabled={working} onclick={() => run(async () => { await loadItems(true); })}>Load more photos</button>{/if}
+        <div class="photo-grid">{#each items as item (item.id)}<button class="photo-card" disabled={working || libraryLoading} onclick={() => selectItem(item.id)}><Preview {item} /><div class="photo-info"><strong>{item.originalName}</strong><span>{item.media.date?.slice(0, 10) ?? "Date unknown"}</span><small>{item.albums.join(" / ")}</small></div></button>{/each}</div>
+        {@render pageControls()}
       {:else}
         <div class="empty"><h2>{snapshot.root ? "No photos to show yet." : "Open your archive in the main app."}</h2><p>{search ? "No matching memories. Try another search." : "Imported photos and videos will appear here."}</p></div>
       {/if}
@@ -460,9 +545,10 @@
       {:else if tab === "library"}
         <div class="page-heading"><div><p class="eyebrow">ALL THE GOOD MOMENTS</p><h1>Your photo library.</h1><p class="subtitle">Search a date, a filename, or an original folder like "Holiday Germany".</p></div><button class="primary" disabled={!native || !snapshot.root} onclick={() => importFolders()}>Add folders +</button></div>
         <div class="library-toolbar"><input class="search" aria-label="Search photos and original folders" bind:value={search} placeholder="Search memories or original folders..." /><select aria-label="Filter library" bind:value={filter}><option value="all">All memories</option><option value="video">Videos</option><option value="unknown">Unknown dates</option><option value="estimated">Estimated dates</option><option value="undo">Retained undo copies</option></select></div>
+        {@render datePicker()}
         {#if items.length}
-          <div class="photo-grid">{#each items as item (item.id)}<button class="photo-card" onclick={() => selectItem(item.id)}><Preview {item} /><div class="photo-info"><strong>{item.originalName}</strong><span>{item.media.date?.slice(0, 10) ?? "Date unknown"}{item.media.dateSource.startsWith("estimated") ? " / estimated" : ""}</span><small>{item.albums.join(" / ")}</small></div></button>{/each}</div>
-          {#if hasMore}<button class="secondary load-more" disabled={working} onclick={() => run(async () => { await loadItems(true); })}>Load more memories</button>{/if}
+          <div class="photo-grid">{#each items as item (item.id)}<button class="photo-card" disabled={working || libraryLoading} onclick={() => selectItem(item.id)}><Preview {item} /><div class="photo-info"><strong>{item.originalName}</strong><span>{item.media.date?.slice(0, 10) ?? "Date unknown"}{item.media.dateSource.startsWith("estimated") ? " / estimated" : ""}</span><small>{item.albums.join(" / ")}</small></div></button>{/each}</div>
+          {@render pageControls()}
         {:else}<div class="empty"><h2>{snapshot.root ? "Your memories will appear here." : "Start with an archive folder."}</h2><p>{search ? "No matches. Try another filename, date or original folder." : "Import folders from the overview to fill your library."}</p><button class="secondary" onclick={() => tab = "home"}>Go to overview</button></div>{/if}
       {:else if tab === "review"}
         <div class="page-heading"><div><p class="eyebrow">SIMILAR DOESN'T ALWAYS MEAN THE SAME</p><h1>A second look.</h1><p class="subtitle">Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.</p></div><div class="review-actions"><span class="pill">{reviews.length} to review</span>{#if reviews.length}<button class="primary" disabled={working || busy} onclick={() => compare(reviews[0])}>Review next match</button>{/if}</div></div>
@@ -630,6 +716,10 @@
   .history-row strong { display: block; font-size: 12px; margin-bottom: 5px; }
   .history-row small { color: #8c987f; }
   .library-toolbar { display: flex; gap: 13px; margin: 0 0 25px; }
+  .date-picker { display: flex; align-items: end; flex-wrap: wrap; gap: 14px; margin: 0 0 22px; color: #526747; font-size: 12px; }
+  .date-picker label { display: grid; gap: 5px; }
+  .date-picker span { padding-bottom: 12px; }
+  .page-controls { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 16px; margin: 25px 0; color: #526747; font-size: 12px; }
   .search { flex: 1; }
   .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 18px; }
   .photo-card { border: 1px solid #e0e3d8; padding: 8px; border-radius: 12px; background: #fffdf8; text-align: left; min-width: 0; color: #334c2e; }
@@ -639,7 +729,6 @@
   .photo-info strong { font-size: 12px; font-weight: 600; }
   .photo-info span { font-size: 10px; color: #879779; margin: 6px 0; }
   .photo-info small { font-size: 9px; color: #a1aa96; }
-  .load-more { display: flex; margin: 25px auto; }
   .empty { padding: 80px 20px; text-align: center; color: #748468; background: #f0f2e9; border-radius: 13px; border: 1px dashed #d8dfcd; }
   .empty h2 { font-family: Georgia, serif; font-weight: 400; color: #4a6641; margin-bottom: 12px; }
   .empty p { font-size: 12px; }

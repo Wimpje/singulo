@@ -17,6 +17,122 @@ struct Operation {
     old_path: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct LibraryMonth {
+    month: String,
+    count: i64,
+}
+
+const LIBRARY_SEARCH: &str =
+    "AND (?2='' OR instr(unicode_lower(json_extract(data,'$.originalName')),?2)>0
+    OR instr(json_extract(data,'$.media.date'),?2)>0
+    OR EXISTS (SELECT 1 FROM json_each(data,'$.albums') WHERE instr(unicode_lower(value),?2)>0))";
+
+fn library_filter(filter: &str) -> (&str, &str) {
+    let state = if filter == "undo" { "undo" } else { "active" };
+    let condition = match filter {
+        "unknown" => "AND json_extract(data,'$.media.date') IS NULL",
+        "estimated" => "AND json_extract(data,'$.media.dateSource') LIKE 'estimated%'",
+        "video" => "AND json_extract(data,'$.media.kind')='video'",
+        _ => "",
+    };
+    (state, condition)
+}
+
+#[cfg(test)]
+mod library_tests {
+    use super::*;
+
+    #[test]
+    fn months_and_pages_respect_filters_and_keep_ties_stable() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = Archive::open(directory.path()).unwrap();
+        let mut item = Item {
+            id: String::new(),
+            path: "photo.jpg".into(),
+            original_name: "same.jpg".into(),
+            state: "active".into(),
+            keeper: None,
+            media: Media {
+                kind: "photo".into(),
+                date: Some("2023-07-18T14:32:10".into()),
+                date_source: "capture metadata".into(),
+                warnings: vec![],
+                width: 1,
+                height: 1,
+                hash: "hash".into(),
+                bytes: 1,
+                signature: None,
+                metadata: serde_json::json!({}),
+            },
+            settings: Settings::default(),
+            albums: vec!["Holiday".into()],
+        };
+        let insert = |item: &Item| {
+            archive
+                .connection
+                .execute(
+                    "INSERT INTO items(id,hash,state,data) VALUES (?1,?2,?3,?4)",
+                    params![item.id, item.media.hash, item.state, json(item).unwrap()],
+                )
+                .unwrap();
+        };
+        for index in 0..65 {
+            item.id = format!("photo-{index:03}");
+            insert(&item);
+        }
+        item.id = "june-video".into();
+        item.media.date = Some("2023-06-02".into());
+        item.media.kind = "video".into();
+        insert(&item);
+        item.id = "undated".into();
+        item.media.date = None;
+        item.media.kind = "photo".into();
+        insert(&item);
+        item.id = "sidecar".into();
+        item.media.kind = "sidecar".into();
+        insert(&item);
+        item.id = "undo".into();
+        item.state = "undo".into();
+        item.media.kind = "photo".into();
+        insert(&item);
+
+        let months = archive.months("", "all").unwrap();
+        assert_eq!(
+            months
+                .iter()
+                .map(|m| (m.month.as_str(), m.count))
+                .collect::<Vec<_>>(),
+            [("2023-07", 65), ("2023-06", 1), ("unknown", 1)]
+        );
+        assert_eq!(
+            archive.months("holiday", "video").unwrap()[0].month,
+            "2023-06"
+        );
+        assert!(archive.months("missing", "all").unwrap().is_empty());
+        assert_eq!(archive.months("", "undo").unwrap()[0].count, 1);
+        assert_eq!(
+            archive
+                .page("", "unknown", Some("unknown"), 0)
+                .unwrap()
+                .len(),
+            1
+        );
+        let first = archive.page("", "all", Some("2023-07"), 0).unwrap();
+        let second = archive.page("", "all", Some("2023-07"), 60).unwrap();
+        assert_eq!(first.len(), 60);
+        assert_eq!(second.len(), 5);
+        assert_eq!(first[59].id, "photo-059");
+        assert_eq!(second[0].id, "photo-060");
+        assert!(
+            archive
+                .page("", "all", Some("2023-07"), 120)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
 #[cfg(test)]
 mod performance_tests {
     use super::*;
@@ -91,11 +207,24 @@ mod performance_tests {
             (100_000, 400_000_000_000, 100_000)
         );
         let start = Instant::now();
-        let page = archive.page("", "all", 99_900).unwrap();
+        let page = archive.page("", "all", None, 99_900).unwrap();
         assert_eq!(page.len(), 60);
         assert_eq!(page[0].original_name, "photo-099901.jpg");
         let page_time = start.elapsed();
-        assert_eq!(archive.page("photo-000001", "all", 0).unwrap().len(), 1);
+        assert_eq!(
+            archive.page("photo-000001", "all", None, 0).unwrap().len(),
+            1
+        );
+        let start = Instant::now();
+        let months = archive.months("", "all").unwrap();
+        assert_eq!((months[0].month.as_str(), months[0].count), ("2023-07", 100_000));
+        let months_time = start.elapsed();
+        let start = Instant::now();
+        let month_page = archive.page("", "all", Some("2023-07"), 99_900).unwrap();
+        assert_eq!(month_page.len(), 60);
+        assert_eq!(month_page[0].original_name, "photo-099901.jpg");
+        let month_page_time = start.elapsed();
+        eprintln!("100k month grouping: {months_time:?}; deep month page: {month_page_time:?}");
         let mut sidecar = occurrence;
         sidecar.id = "xmp".into();
         sidecar.source = "/fixture/photo-000001.xmp".into();
@@ -295,6 +424,8 @@ impl Archive {
              CREATE INDEX IF NOT EXISTS companion_child ON companions(child);
              CREATE INDEX IF NOT EXISTS library_order ON items(state,json_extract(data,'$.media.date') DESC,json_extract(data,'$.originalName'));
              CREATE INDEX IF NOT EXISTS library_visible ON items(state,json_extract(data,'$.media.date') DESC,json_extract(data,'$.originalName'))
+                 WHERE json_extract(data,'$.media.kind')!='sidecar';
+             CREATE INDEX IF NOT EXISTS library_month ON items(state,coalesce(substr(json_extract(data,'$.media.date'),1,7),'unknown'),json_extract(data,'$.media.date') DESC,json_extract(data,'$.originalName'),id)
                  WHERE json_extract(data,'$.media.kind')!='sidecar';
              CREATE TABLE IF NOT EXISTS source_groups (source TEXT PRIMARY KEY, item TEXT NOT NULL, group_key TEXT NOT NULL, content_id TEXT);
              CREATE INDEX IF NOT EXISTS source_group_key ON source_groups(group_key);
@@ -551,27 +682,52 @@ impl Archive {
         ))
     }
 
-    pub fn page(&self, search: &str, filter: &str, offset: usize) -> Result<Vec<Item>> {
+    pub fn months(&self, search: &str, filter: &str) -> Result<Vec<LibraryMonth>> {
         self.check()?;
-        let state = if filter == "undo" { "undo" } else { "active" };
-        let condition = match filter {
-            "unknown" => "AND json_extract(data,'$.media.date') IS NULL",
-            "estimated" => "AND json_extract(data,'$.media.dateSource') LIKE 'estimated%'",
-            "video" => "AND json_extract(data,'$.media.kind')='video'",
-            _ => "",
+        let (state, condition) = library_filter(filter);
+        let mut query = self.connection.prepare_cached(&format!(
+            "SELECT coalesce(substr(json_extract(data,'$.media.date'),1,7),'unknown') AS month, count(*)
+             FROM items WHERE state=?1 AND json_extract(data,'$.media.kind')!='sidecar' {condition} {LIBRARY_SEARCH}
+             GROUP BY month ORDER BY month='unknown', month DESC"
+        )).map_err(|e| e.to_string())?;
+        query
+            .query_map(params![state, search.to_lowercase()], |row| {
+                Ok(LibraryMonth {
+                    month: row.get(0)?,
+                    count: row.get(1)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn page(
+        &self,
+        search: &str,
+        filter: &str,
+        month: Option<&str>,
+        offset: usize,
+    ) -> Result<Vec<Item>> {
+        self.check()?;
+        let (state, condition) = library_filter(filter);
+        let month_condition = if month.is_some() {
+            "AND coalesce(substr(json_extract(data,'$.media.date'),1,7),'unknown')=?3"
+        } else {
+            "AND ?3 IS NULL"
         };
         let mut query = self.connection.prepare_cached(&format!(
             "SELECT data FROM items WHERE state=?1 AND json_extract(data,'$.media.kind')!='sidecar' {condition}
-             AND (?2='' OR instr(unicode_lower(json_extract(data,'$.originalName')),?2)>0
-                 OR instr(json_extract(data,'$.media.date'),?2)>0
-                 OR EXISTS (SELECT 1 FROM json_each(data,'$.albums') WHERE instr(unicode_lower(value),?2)>0))
-             ORDER BY json_extract(data,'$.media.date') DESC,json_extract(data,'$.originalName') LIMIT 60 OFFSET ?3"
+             {LIBRARY_SEARCH}
+             {month_condition}
+             ORDER BY json_extract(data,'$.media.date') DESC,json_extract(data,'$.originalName'),id LIMIT 60 OFFSET ?4"
         )).map_err(|e| e.to_string())?;
         query
             .query_map(
                 params![
                     state,
                     search.to_lowercase(),
+                    month,
                     i64::try_from(offset).map_err(|_| "Library offset is too large.")?
                 ],
                 |r| r.get::<_, String>(0),
