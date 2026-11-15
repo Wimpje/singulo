@@ -1,0 +1,153 @@
+use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, atomic::AtomicBool};
+
+pub type Result<T> = std::result::Result<T, String>;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    pub template: String,
+    pub filenames: String,
+    pub unknown_folder: String,
+    pub automatic_matches: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            template: "{yyyy}/{mm}/{dd}".into(),
+            filenames: "original".into(),
+            unknown_folder: "unknown".into(),
+            automatic_matches: true,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Media {
+    pub kind: String,
+    pub date: Option<String>,
+    pub date_source: String,
+    pub warnings: Vec<String>,
+    pub width: u32,
+    pub height: u32,
+    pub hash: String,
+    pub bytes: u64,
+    pub signature: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Item {
+    pub id: String,
+    pub path: String,
+    pub original_name: String,
+    pub state: String,
+    pub keeper: Option<String>,
+    pub media: Media,
+    pub settings: Settings,
+    pub albums: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Progress {
+    pub status: String,
+    pub current: String,
+    pub done: usize,
+    pub total: usize,
+    pub copied: usize,
+    pub duplicates: usize,
+    pub errors: Vec<String>,
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self {
+            status: "idle".into(),
+            current: String::new(),
+            done: 0,
+            total: 0,
+            copied: 0,
+            duplicates: 0,
+            errors: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snapshot {
+    pub root: Option<String>,
+    pub settings: Settings,
+    pub progress: Progress,
+    pub active_count: usize,
+    pub undo_count: usize,
+    pub active_bytes: u64,
+    pub undo_bytes: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Occurrence {
+    pub id: String,
+    pub item: String,
+    pub source: String,
+    pub root: String,
+    pub album: String,
+    pub relative: String,
+    pub hash: String,
+    pub identity: String,
+    pub status: String,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupRow {
+    pub id: String,
+    pub source: String,
+    pub bytes: u64,
+    pub eligible: bool,
+    pub reason: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveRow {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+}
+
+pub struct AppState {
+    pub archive: Mutex<Option<crate::archive::Archive>>,
+    pub progress: Mutex<Progress>,
+    pub busy: AtomicBool,
+    pub importing: AtomicBool,
+    pub cancel: AtomicBool,
+    pub pause: AtomicBool,
+    pub queue: Mutex<std::collections::VecDeque<QueuedJob>>,
+}
+
+pub struct QueuedJob {
+    pub id: String,
+    pub roots: Vec<String>,
+    pub settings: Settings,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            archive: Mutex::new(None),
+            progress: Mutex::new(Progress::default()),
+            busy: AtomicBool::new(false),
+            importing: AtomicBool::new(false),
+            cancel: AtomicBool::new(false),
+            pause: AtomicBool::new(false),
+            queue: Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+}

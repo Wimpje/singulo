@@ -1,0 +1,136 @@
+import { invoke } from "@tauri-apps/api/core";
+
+export interface Settings {
+  template: string;
+  filenames: "original" | "date";
+  unknownFolder: string;
+  automaticMatches: boolean;
+}
+
+export interface Media {
+  kind: string;
+  date: string | null;
+  dateSource: string;
+  warnings: string[];
+  width: number;
+  height: number;
+  hash: string;
+  bytes: number;
+  signature: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface Item {
+  id: string;
+  path: string;
+  originalName: string;
+  state: string;
+  keeper: string | null;
+  media: Media;
+  settings: Settings;
+  albums: string[];
+}
+
+export interface Progress {
+  status: string;
+  current: string;
+  done: number;
+  total: number;
+  copied: number;
+  duplicates: number;
+  errors: string[];
+}
+
+export interface Snapshot {
+  root: string | null;
+  settings: Settings;
+  progress: Progress;
+  activeCount: number;
+  undoCount: number;
+  activeBytes: number;
+  undoBytes: number;
+}
+
+export interface Occurrence {
+  id: string;
+  source: string;
+  relative: string;
+  root: string;
+  album: string;
+  status: string;
+}
+
+export interface Details {
+  item: Item;
+  sources: Occurrence[];
+  companions: string[];
+}
+
+export interface CleanupRow {
+  id: string;
+  source: string;
+  bytes: number;
+  eligible: boolean;
+  reason: string;
+}
+
+export interface MoveRow {
+  id: string;
+  from: string;
+  to: string;
+}
+
+export interface Review {
+  item: string;
+  candidate: string;
+  reason: string;
+}
+
+export interface Job {
+  id: string;
+  roots: string[];
+  progress: Partial<Progress>;
+}
+
+export interface ToolStatus {
+  name: string;
+  available: boolean;
+  detail: string;
+}
+
+export const defaults: Settings = {
+  template: "{yyyy}/{mm}/{dd}",
+  filenames: "original",
+  unknownFolder: "unknown",
+  automaticMatches: true,
+};
+
+export const emptySnapshot: Snapshot = {
+  root: null, settings: defaults,
+  progress: { status: "idle", current: "", done: 0, total: 0, copied: 0, duplicates: 0, errors: [] },
+  activeCount: 0, undoCount: 0, activeBytes: 0, undoBytes: 0,
+};
+
+export const api = <T>(command: string, args?: Record<string, unknown>): Promise<T> => invoke<T>(command, args);
+export const bytes = (value: number): string => {
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = value / 1024;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1; }
+  return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[index]}`;
+};
+export const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
+
+let running = 0;
+const waiting: Array<() => void> = [];
+export async function thumbnail(id: string, large: boolean): Promise<string> {
+  if (running >= 2) await new Promise<void>((resolve) => waiting.push(resolve));
+  running += 1;
+  try {
+    return await api<string>("preview_image", { id, large });
+  } finally {
+    running -= 1;
+    waiting.shift()?.();
+  }
+}
