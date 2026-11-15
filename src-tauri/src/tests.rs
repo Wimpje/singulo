@@ -153,16 +153,48 @@ fn cleanup_requires_unchanged_source_and_exact_archived_bytes() {
 
 #[test]
 fn photo_comparison_preserves_meaningful_variants() {
-    let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(128, 128, |x, y| {
-        Rgb([(x * 2) as u8, (y * 2) as u8, ((x + y) % 256) as u8])
+    let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(200, 160, |x, y| {
+        Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
     }));
     let preview = |image: &DynamicImage| {
         let (w, h) = image.dimensions();
         media::Preview::new(image, w, h)
     };
     assert!(media::photo_equivalent(&preview(&image), &preview(&image)));
-    let crop = image.crop_imm(10, 10, 100, 100);
+    let crop = image.crop_imm(10, 8, 180, 144);
     assert!(!media::photo_equivalent(&preview(&image), &preview(&crop)));
+    // Mild crop/edit still qualifies for Similarity Review
+    let brightened = DynamicImage::ImageRgb8(ImageBuffer::from_fn(200, 160, |x, y| {
+        Rgb([
+            ((x % 256) as u8).saturating_add(12),
+            ((y % 256) as u8).saturating_add(12),
+            (((x + y) % 256) as u8).saturating_add(12),
+        ])
+    }));
+    assert!(media::visually_similar(&preview(&image), &preview(&brightened)));
+
+    // Two unrelated mostly-white UI screenshots (landscape cart vs portrait file list)
+    // must never be flagged as visually similar for review.
+    let cart = DynamicImage::ImageRgb8(ImageBuffer::from_fn(831, 398, |x, y| {
+        if !(35..355).contains(&y) {
+            Rgb([24, 42, 35])
+        } else if (48..72).contains(&x) && (y % 75) < 28 {
+            Rgb([95, 70, 55])
+        } else {
+            Rgb([255, 255, 255])
+        }
+    }));
+    let file_list = DynamicImage::ImageRgb8(ImageBuffer::from_fn(296, 500, |x, y| {
+        if (28..48).contains(&x) && (y % 38) < 22 {
+            Rgb([60, 130, 180])
+        } else if (56..170).contains(&x) && (y % 38).abs_diff(12) < 4 {
+            Rgb([40, 40, 40])
+        } else {
+            Rgb([255, 255, 255])
+        }
+    }));
+    assert!(!media::visually_similar(&preview(&cart), &preview(&file_list)));
+    assert!(!media::aspect_compatible(831, 398, 296, 500));
 }
 
 #[test]

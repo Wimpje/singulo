@@ -539,43 +539,73 @@ fn import_one(
             media.width < candidate.media.width && media.height < candidate.media.height;
         let auto =
             matched.is_none() && settings.automatic_matches && !protected && (dominates || dominated);
-        let comparison: Result<bool> = if auto {
-            if media.kind == "video" {
-                media::video_equivalent(app, source, &path)
+        let mut candidate_preview =
+            |candidate: &Item, path: &Path| -> Result<media::Preview> {
+                if let Some(cached) = candidate_cache.get(&candidate.id) {
+                    return Ok(cached.clone());
+                }
+                let decoded = media::preview(
+                    app,
+                    path,
+                    &candidate.media.kind,
+                    &candidate.media.metadata,
+                )?;
+                if candidate_cache.len() >= 128 {
+                    candidate_cache.clear();
+                }
+                candidate_cache.insert(candidate.id.clone(), decoded.clone());
+                Ok(decoded)
+            };
+        let (equivalent, plausible): (bool, bool) = if media.kind == "video" {
+            let eq = if auto {
+                match media::video_equivalent(app, source, &path) {
+                    Ok(eq) => eq,
+                    Err(error) => {
+                        media.warnings.push(format!(
+                            "Automatic comparison unavailable; original retained for review: {error}"
+                        ));
+                        false
+                    }
+                }
             } else {
-                (|| {
-                    let left = preview.as_ref().ok_or("Incoming preview is unavailable.")?;
-                    if let Some(right) = candidate_cache.get(&candidate.id) {
-                        return Ok(media::photo_equivalent(left, right));
-                    }
-                    let right = media::preview(
-                        app,
-                        &path,
-                        &candidate.media.kind,
-                        &candidate.media.metadata,
-                    )?;
-                    let eq = media::photo_equivalent(left, &right);
-                    if candidate_cache.len() >= 128 {
-                        candidate_cache.clear();
-                    }
-                    candidate_cache.insert(candidate.id.clone(), right);
-                    Ok(eq)
-                })()
+                false
+            };
+            if eq {
+                (true, true)
+            } else if let Some(left) = preview.as_ref() {
+                let sim = candidate_preview(&candidate, &path)
+                    .map(|right| media::visually_similar(left, &right))
+                    .unwrap_or(true);
+                (false, sim)
+            } else {
+                (false, true)
             }
         } else {
-            Ok(false)
-        };
-        let equivalent = match comparison {
-            Ok(equivalent) => equivalent,
-            Err(error) => {
-                media.warnings.push(format!(
-                    "Automatic comparison unavailable; original retained for review: {error}"
-                ));
-                false
+            match preview
+                .as_ref()
+                .ok_or_else(|| "Incoming preview is unavailable.".to_string())
+                .and_then(|left| candidate_preview(&candidate, &path).map(|right| (left, right)))
+            {
+                Ok((left, right)) => {
+                    let eq = auto && media::photo_equivalent(left, &right);
+                    let sim = eq || media::visually_similar(left, &right);
+                    (eq, sim)
+                }
+                Err(error) => {
+                    if auto {
+                        media.warnings.push(format!(
+                            "Automatic comparison unavailable; original retained for review: {error}"
+                        ));
+                    }
+                    (false, true)
+                }
             }
         };
         if equivalent {
             matched = Some((candidate, dominates));
+            continue;
+        }
+        if !plausible {
             continue;
         }
         review.push((candidate.id, if protected {

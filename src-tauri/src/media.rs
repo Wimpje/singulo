@@ -555,11 +555,8 @@ fn pixel_variance(pixels: &image::RgbImage) -> f64 {
 
 impl Preview {
     pub fn new(image: &DynamicImage, width: u32, height: u32) -> Self {
-        let pixels = image
-            .resize_exact(COMPARE, COMPARE, image::imageops::FilterType::Triangle)
-            .to_rgb8();
-        // Solid/blank frames (e.g. black video intros) all hash to 0 and match unrelated files.
-        let signature = (pixel_variance(&pixels) >= 16.0).then(|| signature(image));
+        let pixels = image.thumbnail_exact(COMPARE, COMPARE).to_rgb8();
+        let signature = signature_from_pixels(&pixels);
         Self {
             alpha: image.color().has_alpha(),
             signature,
@@ -570,17 +567,62 @@ impl Preview {
     }
 }
 
-pub fn signature(image: &DynamicImage) -> String {
-    let small = image
-        .resize_exact(9, 8, image::imageops::FilterType::Triangle)
-        .to_luma8();
-    let mut hash = 0u64;
-    for y in 0..8 {
-        for x in 0..8 {
-            hash = (hash << 1) | u64::from(small.get_pixel(x, y)[0] > small.get_pixel(x + 1, y)[0]);
+/// Area-averages the 512x512 preview into an 8x8 luma grid and encodes 32 horizontal + 32 vertical
+/// block gradients. Requires minimum image variance and non-degenerate bit balance so mostly-blank
+/// UI screenshots, white documents, and black fade-in frames do not collide with unrelated images.
+fn signature_from_pixels(pixels: &image::RgbImage) -> Option<String> {
+    if pixel_variance(pixels) < 16.0 {
+        return None;
+    }
+    let mut grid = [[0.0f64; 8]; 8];
+    let raw = pixels.as_raw();
+    let stride = COMPARE as usize * 3;
+    for (gy, row) in grid.iter_mut().enumerate() {
+        for (gx, cell) in row.iter_mut().enumerate() {
+            let mut sum = 0u64;
+            for y in gy * 64..(gy + 1) * 64 {
+                let row_start = y * stride + gx * 64 * 3;
+                for px in raw[row_start..row_start + 64 * 3].as_chunks::<3>().0 {
+                    sum += 299 * u64::from(px[0]) + 587 * u64::from(px[1]) + 114 * u64::from(px[2]);
+                }
+            }
+            *cell = sum as f64 / (64.0 * 64.0 * 1000.0);
         }
     }
-    format!("{hash:016x}")
+    let mut hash = 0u64;
+    for row in &grid {
+        for x in 0..4 {
+            let left = (row[x * 2] + row[x * 2 + 1]) * 0.5;
+            let right = (row[((x + 1) * 2) % 8] + row[((x + 1) * 2 + 1) % 8]) * 0.5;
+            hash = (hash << 1) | u64::from(left > right + 0.5);
+        }
+    }
+    for y in 0..4 {
+        let next_y = ((y + 1) * 2) % 8;
+        for ((&t0, &t1), (&b0, &b1)) in grid[y * 2]
+            .iter()
+            .zip(&grid[y * 2 + 1])
+            .zip(grid[next_y].iter().zip(&grid[next_y + 1]))
+        {
+            let top = (t0 + t1) * 0.5;
+            let bottom = (b0 + b1) * 0.5;
+            hash = (hash << 1) | u64::from(top > bottom + 0.5);
+        }
+    }
+    let ones = hash.count_ones();
+    if !(6..=58).contains(&ones) {
+        return None;
+    }
+    Some(format!("{hash:016x}"))
+}
+
+pub fn aspect_compatible(w1: u32, h1: u32, w2: u32, h2: u32) -> bool {
+    if w1 == 0 || h1 == 0 || w2 == 0 || h2 == 0 {
+        return true;
+    }
+    let r1 = f64::from(w1) / f64::from(h1);
+    let r2 = f64::from(w2) / f64::from(h2);
+    r1.max(r2) / r1.min(r2) <= 1.25
 }
 
 pub fn distance(left: &str, right: &str) -> Option<u32> {
@@ -768,6 +810,75 @@ pub fn photo_equivalent(left: &Preview, right: &Preview) -> bool {
         }
     }
     true
+}
+
+/// Second-stage visual check before bothering the user in Similarity Review.
+/// Keeps genuine bursts, edits, tone-mapped RAW/JPEGs, and modest crops while filtering out
+/// coincidental dHash collisions (such as two unrelated white UI screenshots).
+pub fn visually_similar(left: &Preview, right: &Preview) -> bool {
+    if !aspect_compatible(left.width, left.height, right.width, right.height) {
+        return false;
+    }
+    let (a, b) = (left.pixels.as_raw(), right.pixels.as_raw());
+    let stride = COMPARE as usize * 3;
+    let mut close_tiles = 0u32;
+    let mut total_mse = 0.0f64;
+    let mut sa = 0.0f64;
+    let mut sb = 0.0f64;
+    let mut saa = 0.0f64;
+    let mut sbb = 0.0f64;
+    let mut sab = 0.0f64;
+    for ty in 0..8 {
+        for tx in 0..8 {
+            let mut tile_err = 0.0f64;
+            let mut tile_a = 0.0f64;
+            let mut tile_b = 0.0f64;
+            for y in ty * 64..(ty + 1) * 64 {
+                let start = y * stride + tx * 64 * 3;
+                for (pa, pb) in a[start..start + 64 * 3]
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .zip(b[start..start + 64 * 3].as_chunks::<3>().0)
+                {
+                    for (&ca, &cb) in pa.iter().zip(pb) {
+                        let d = f64::from(ca) - f64::from(cb);
+                        tile_err += d * d;
+                    }
+                    tile_a += 0.299 * f64::from(pa[0])
+                        + 0.587 * f64::from(pa[1])
+                        + 0.114 * f64::from(pa[2]);
+                    tile_b += 0.299 * f64::from(pb[0])
+                        + 0.587 * f64::from(pb[1])
+                        + 0.114 * f64::from(pb[2]);
+                }
+            }
+            let mse = tile_err / (64.0 * 64.0 * 3.0);
+            total_mse += mse;
+            if mse <= 350.0 {
+                close_tiles += 1;
+            }
+            let ma = tile_a / (64.0 * 64.0);
+            let mb = tile_b / (64.0 * 64.0);
+            sa += ma;
+            sb += mb;
+            saa += ma * ma;
+            sbb += mb * mb;
+            sab += ma * mb;
+        }
+    }
+    let avg_mse = total_mse / 64.0;
+    let n = 64.0;
+    let var_a = (saa - sa * sa / n).max(0.0);
+    let var_b = (sbb - sb * sb / n).max(0.0);
+    let denom = (var_a * var_b).sqrt();
+    let corr = if denom > 1e-6 {
+        (sab - sa * sb / n) / denom
+    } else {
+        0.0
+    };
+    (close_tiles >= 44 && avg_mse <= 500.0 && corr >= 0.72)
+        || (corr >= 0.88 && avg_mse <= 900.0 && close_tiles >= 32)
 }
 
 pub fn video_equivalent(app: &tauri::AppHandle, left: &Path, right: &Path) -> Result<bool> {

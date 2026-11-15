@@ -857,6 +857,12 @@ impl Archive {
         for row in rows {
             let item: Item = parse(&row.map_err(|e| e.to_string())?)?;
             if item.media.kind == incoming.kind
+                && media::aspect_compatible(
+                    incoming.width,
+                    incoming.height,
+                    item.media.width,
+                    item.media.height,
+                )
                 && item
                     .media
                     .signature
