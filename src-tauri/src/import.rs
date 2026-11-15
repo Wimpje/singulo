@@ -166,11 +166,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                 // Disk reads and catalog writes stay on this thread so external drives read
                 // sequentially; exact duplicates skip ExifTool and decoding entirely.
                 let checked: Result<Option<(String, String)>> = (|| {
-                    let identity = media::identity(path)?;
-                    let hash = media::hash(path)?;
-                    if media::identity(path)? != identity {
-                        return Err("Source changed during hashing; retry it.".into());
-                    }
+                    let (identity, hash) = media::hash_with_identity(path)?;
                     let mut guard = shared.archive.lock().map_err(|e| e.to_string())?;
                     let archive = guard.as_mut().ok_or("Archive is not open.")?;
                     if let Some(exact) = archive.exact_cached(&hash)? {

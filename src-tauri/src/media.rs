@@ -102,6 +102,10 @@ fn execute_output(mut command: Command, timeout: u64, metadata_batch: bool) -> R
 
 pub fn hash(path: &Path) -> Result<String> {
     let mut file = File::open(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+    hash_reader(&mut file)
+}
+
+fn hash_reader(file: &mut File) -> Result<String> {
     let mut digest = Sha256::new();
     let mut buffer = [0; 128 * 1024];
     loop {
@@ -114,11 +118,35 @@ pub fn hash(path: &Path) -> Result<String> {
     Ok(hex::encode(digest.finalize()))
 }
 
-pub fn identity(path: &Path) -> Result<String> {
-    let metadata = path.symlink_metadata().map_err(|e| e.to_string())?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("Only regular, non-symlink files can be imported or cleaned up.".into());
+/// Reads and hashes a source file while tolerating one metadata shift caused by
+/// cloud-backed placeholders (OneDrive / iCloud FileProvider) hydrating on first read.
+pub fn hash_with_identity(path: &Path) -> Result<(String, String)> {
+    for attempt in 0..2 {
+        let before = identity(path)?;
+        let mut file =
+            File::open(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        let opened = identity_from_metadata(&file.metadata().map_err(|e| e.to_string())?)?;
+        let hash = hash_reader(&mut file)?;
+        let after = identity(path)?;
+        if after == before && after == opened {
+            return Ok((after, hash));
+        }
+        // If FileProvider hydrated the placeholder on open/read, `after` now reflects
+        // the materialized local file; one immediate re-verify confirms stability.
+        if attempt == 0 && after == opened {
+            let mut verify =
+                File::open(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+            let verify_hash = hash_reader(&mut verify)?;
+            let settled = identity(path)?;
+            if settled == after && verify_hash == hash {
+                return Ok((settled, hash));
+            }
+        }
     }
+    Err("Source changed during hashing; retry it.".into())
+}
+
+fn identity_from_metadata(metadata: &fs::Metadata) -> Result<String> {
     let modified = metadata
         .modified()
         .map_err(|e| e.to_string())?
@@ -145,6 +173,14 @@ pub fn identity(path: &Path) -> Result<String> {
             .as_nanos();
         Ok(format!("{created}:{}:{modified}", metadata.len()))
     }
+}
+
+pub fn identity(path: &Path) -> Result<String> {
+    let metadata = path.symlink_metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("Only regular, non-symlink files can be imported or cleaned up.".into());
+    }
+    identity_from_metadata(&metadata)
 }
 
 pub fn kind(path: &Path) -> Option<&'static str> {
