@@ -44,6 +44,39 @@ mod library_tests {
     use super::*;
 
     #[test]
+    fn review_list_contains_thumbnails_for_both_active_items() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut archive = Archive::open(directory.path()).unwrap();
+        for (id, name, kind, state) in [
+            ("first", "first.jpg", "photo", "active"),
+            ("second", "second.mov", "video", "active"),
+            ("undo", "undo.jpg", "photo", "undo"),
+        ] {
+            let data = serde_json::json!({
+                "originalName": name,
+                "media": {"kind": kind, "bytes": 1}
+            });
+            archive.connection.execute(
+                "INSERT INTO items(id,hash,state,data) VALUES (?1,?1,?2,?3)",
+                params![id, state, data.to_string()],
+            ).unwrap();
+        }
+        archive.add_review("first", "second", "Similar").unwrap();
+        archive.add_review("first", "undo", "Inactive").unwrap();
+        let reviews = archive.reviews().unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0]["item"], "first");
+        assert_eq!(reviews[0]["candidate"], "second");
+        assert_eq!(reviews[0]["reason"], "Similar");
+        assert_eq!(reviews[0]["itemPreview"], serde_json::json!({
+            "id": "first", "originalName": "first.jpg", "media": {"kind": "photo"}
+        }));
+        assert_eq!(reviews[0]["candidatePreview"], serde_json::json!({
+            "id": "second", "originalName": "second.mov", "media": {"kind": "video"}
+        }));
+    }
+
+    #[test]
     fn months_and_pages_respect_filters_and_keep_ties_stable() {
         let directory = tempfile::tempdir().unwrap();
         let archive = Archive::open(directory.path()).unwrap();
@@ -1050,12 +1083,17 @@ impl Archive {
         let mut query = self
             .connection
             .prepare(
-                "SELECT r.item,r.candidate,r.reason FROM reviews r JOIN items i ON i.id=r.item
+                "SELECT r.item,r.candidate,r.reason,
+                 json_extract(i.data,'$.originalName'),json_extract(i.data,'$.media.kind'),
+                 json_extract(c.data,'$.originalName'),json_extract(c.data,'$.media.kind')
+                 FROM reviews r JOIN items i ON i.id=r.item
              JOIN items c ON c.id=r.candidate WHERE i.state='active' AND c.state='active'",
             )
             .map_err(|e| e.to_string())?;
         query.query_map([], |r| Ok(serde_json::json!({
-            "item": r.get::<_,String>(0)?, "candidate": r.get::<_,String>(1)?, "reason": r.get::<_,String>(2)?
+            "item": r.get::<_,String>(0)?, "candidate": r.get::<_,String>(1)?, "reason": r.get::<_,String>(2)?,
+            "itemPreview": {"id": r.get::<_,String>(0)?, "originalName": r.get::<_,String>(3)?, "media": {"kind": r.get::<_,String>(4)?}},
+            "candidatePreview": {"id": r.get::<_,String>(1)?, "originalName": r.get::<_,String>(5)?, "media": {"kind": r.get::<_,String>(6)?}}
         }))).map_err(|e| e.to_string())?.map(|r| r.map_err(|e| e.to_string())).collect()
     }
 

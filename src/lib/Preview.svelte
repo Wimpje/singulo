@@ -1,8 +1,8 @@
 <script lang="ts">
   import { isTauri } from "@tauri-apps/api/core";
-  import { message, thumbnail, type Item } from "./api";
+  import { message, thumbnail, type PreviewItem } from "./api";
 
-  let { item, large = false }: { item: Item; large?: boolean } = $props();
+  let { item, large = false }: { item: PreviewItem; large?: boolean } = $props();
   let element = $state<HTMLDivElement>();
   let source = $state("");
   let error = $state("");

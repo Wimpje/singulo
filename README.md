@@ -1,13 +1,15 @@
-# Family Archive
+# Photo Archive
 
-A small, offline desktop app for bringing family photos and videos together. Built with Tauri 2, Rust and Svelte.
+A small, offline desktop app for organizing pictures and videos. Built with Tauri 2, Rust and Svelte.
 
 ## Use it
 
 1. Choose a dedicated archive folder, usually on an external disk.
 2. Drop source folders onto the main app or its floating, always-on-top drop window.
 3. Browse the library or separate viewer. Search original folder names such as **Holiday Germany**; folder history survives deduplication.
-4. Compare uncertain matches in **Similarity review**. Use **Review next match** to work through them one by one; after keeping or dismissing a match, the next one opens automatically. You can opt out of the keeper confirmation there. Keep both when they are different edits, crops, burst frames or RAW/JPEG companions.
+4. Compare uncertain matches in **Similarity review**. The overview shows thumbnails of both files. Use **Review next match** to work through them one by one; after keeping or dismissing a match, the next one opens automatically. You can opt out of the keeper confirmation there. Keep both when they are different edits, crops, burst frames or RAW/JPEG companions.
+
+Keeping one copy moves the other to archive undo. A picture with related RAW/JPEG, sidecar or Live Photo files cannot be moved to undo on its own. If only one picture has related files, you can keep it and move the other to undo. If both have related files, choose **Keep both / dismiss match**; both remain active and the review is cleared.
 
 The library and separate viewer let you choose a year and month (or unknown dates) and show up to 60 thumbnails per page. Search and filters apply across the archive; the year and month choices show matching photos. The separate viewer is browsing-only, without import or settings controls. Click a thumbnail for a large photo, use Previous/Next or the arrow keys to browse across pages within the selected month, and Escape to return to thumbnails. Videos have a Play video button.
 

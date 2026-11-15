@@ -31,6 +31,8 @@ export interface Item {
   albums: string[];
 }
 
+export type PreviewItem = Pick<Item, "id" | "originalName"> & { media: Pick<Media, "kind"> };
+
 export interface Progress {
   status: string;
   current: string;
@@ -84,6 +86,8 @@ export interface Review {
   item: string;
   candidate: string;
   reason: string;
+  itemPreview: PreviewItem;
+  candidatePreview: PreviewItem;
 }
 
 export interface Job {

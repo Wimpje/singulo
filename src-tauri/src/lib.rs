@@ -664,9 +664,9 @@ fn show_window(app: tauri::AppHandle, kind: String) -> Result<()> {
         WebviewUrl::App(format!("/?window={kind}").into()),
     )
     .title(if kind == "drop" {
-        "Drop into Family Archive"
+        "Drop into Photo Archive"
     } else {
-        "Family Archive Viewer"
+        "Photo Archive Viewer"
     })
     .inner_size(
         if kind == "drop" { 310.0 } else { 1100.0 },
@@ -724,5 +724,5 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("Failed to start Family Archive");
+        .expect("Failed to start Photo Archive");
 }

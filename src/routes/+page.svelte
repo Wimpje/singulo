@@ -237,7 +237,7 @@
     await run(async () => {
       if (keeper && !skipKeeperConfirmation && !await confirm("Keep the chosen file active and move the other original into archive undo? Meaningful edits and RAW/JPEG pairs should be kept together.", { title: "Confirm your keeper", kind: "warning" })) return;
       await mutate(async () => {
-        await api("resolve_review", { ...review, keeper });
+        await api("resolve_review", { item: review.item, candidate: review.candidate, keeper });
         selected = null; comparing = null; currentReview = null;
         await refresh(true);
         if (reviews.length) await loadComparison(reviews[0]);
@@ -401,7 +401,7 @@
   });
 </script>
 
-<svelte:head><title>Family Archive</title><meta name="description" content="A safe home for family photos and videos" /></svelte:head>
+<svelte:head><title>Photo Archive</title><meta name="description" content="An offline archive for pictures and videos" /></svelte:head>
 <svelte:window onkeydown={viewerKey} />
 
 {#snippet datePicker()}
@@ -425,7 +425,7 @@
           </select>
         </label>
       {/if}
-      <span>{monthCount.toLocaleString()} memories</span>
+      <span>{monthCount.toLocaleString()} pictures and videos</span>
     </div>
   {/if}
 {/snippet}
@@ -442,7 +442,7 @@
 
 {#if mode === "drop"}
   <main class="mini" class:dropping>
-    <div class="mini-heading"><span class="brand-symbol">FA</span><strong>Family Archive</strong></div>
+    <div class="mini-heading"><span class="brand-symbol">PA</span><strong>Photo Archive</strong></div>
     <button class="mini-drop" disabled={!native} onclick={() => snapshot.root ? importFolders() : chooseArchive()}>
       <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5" /><path d="M4 15v5h16v-5" /></svg>
       <strong>{dropping ? "Drop to copy safely" : "Drop photo folders here"}</strong>
@@ -455,7 +455,7 @@
 {:else if mode === "viewer"}
   <main class="viewer-shell">
     <header class="viewer-header">
-      <div><strong>Family Archive Viewer</strong><small>{snapshot.root?.split(/[\\/]/).pop() ?? "No archive open"}</small></div>
+      <div><strong>Photo Archive Viewer</strong><small>{snapshot.root?.split(/[\\/]/).pop() ?? "No archive open"}</small></div>
       <button class="secondary" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>Open main app</button>
     </header>
     {#if error}<div class="banner error" role="alert">{error}</div>{/if}
@@ -484,22 +484,22 @@
       {#if selected.item.media.warnings.length}<details><summary>Photo information</summary>{#each selected.item.media.warnings as warning}<p class="muted">{warning}</p>{/each}</details>{/if}
     {:else}
       <div class="library-toolbar">
-        <input class="search" aria-label="Search photos and original folders" bind:value={search} placeholder="Search photos, dates or original folders..." />
-        <select aria-label="Filter viewer" bind:value={filter}><option value="all">All memories</option><option value="video">Videos</option><option value="unknown">Unknown dates</option><option value="estimated">Estimated dates</option></select>
+        <input class="search" aria-label="Search pictures and original folders" bind:value={search} placeholder="Search pictures, dates or original folders..." />
+        <select aria-label="Filter viewer" bind:value={filter}><option value="all">All pictures and videos</option><option value="video">Videos</option><option value="unknown">Unknown dates</option><option value="estimated">Estimated dates</option></select>
       </div>
       {@render datePicker()}
       {#if items.length}
         <div class="photo-grid">{#each items as item (item.id)}<button class="photo-card" disabled={working || libraryLoading} onclick={() => selectItem(item.id)}><Preview {item} /><div class="photo-info"><strong>{item.originalName}</strong><span>{item.media.date?.slice(0, 10) ?? "Date unknown"}</span><small>{item.albums.join(" / ")}</small></div></button>{/each}</div>
         {@render pageControls()}
       {:else}
-        <div class="empty"><h2>{snapshot.root ? "No photos to show yet." : "Open your archive in the main app."}</h2><p>{search ? "No matching memories. Try another search." : "Imported photos and videos will appear here."}</p></div>
+        <div class="empty"><h2>{snapshot.root ? "No pictures to show yet." : "Open your archive in the main app."}</h2><p>{search ? "No matching pictures. Try another search." : "Imported pictures and videos will appear here."}</p></div>
       {/if}
     {/if}
   </main>
 {:else}
   <div class="app-shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-symbol"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m3 19 6-10 4 5 3-8 5 13H3Z" /><circle cx="7" cy="5" r="1.5" /></svg></span><div><strong>Family Archive</strong><small>Every memory, together.</small></div></div>
+      <div class="brand"><span class="brand-symbol"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m3 19 6-10 4 5 3-8 5 13H3Z" /><circle cx="7" cy="5" r="1.5" /></svg></span><div><strong>Photo Archive</strong><small>Pictures and videos.</small></div></div>
       <div class="nav-caption">YOUR ARCHIVE</div>
       <nav aria-label="Main navigation">
         <button class:active={tab === "home"} onclick={() => tab = "home"}><span class="nav-icon">01</span> Overview</button>
@@ -511,19 +511,19 @@
         <div class="safety-note"><span class="safe-dot"></span><strong>Local. Private. Yours.</strong><p>Your photos never leave your disks. Importing doesn't change the originals.</p></div>
         <button class="secondary full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "drop" }); })}>Open floating drop window</button>
         <button class="text-button full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "viewer" }); })}>Open separate viewer</button>
-        <small class="version">FAMILY ARCHIVE / 0.1</small>
+        <small class="version">PHOTO ARCHIVE / 0.1</small>
       </div>
     </aside>
 
     <main class="content">
-      <header class="topbar"><span>{tab === "home" ? "Your collection, simplified" : tab === "library" ? "Browse your memories" : tab === "review" ? "You're in control" : "Make it your own"}</span><div class="status"><span class="safe-dot"></span>{busy ? "Working on your archive" : "Offline by design"}</div></header>
+      <header class="topbar"><span>{tab === "home" ? "Your collection" : tab === "library" ? "Browse your pictures" : tab === "review" ? "Review similar pictures" : "Archive settings"}</span><div class="status"><span class="safe-dot"></span>{busy ? "Working on your archive" : "Offline by design"}</div></header>
       {#if !native}<div class="banner warning"><strong>Desktop preview</strong> Folder imports and photo previews work in the Tauri desktop app. Run <code>npm run desktop</code> to use them.</div>{/if}
       {#if error}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>Dismiss</button></div>{/if}
       {#if notice}<div class="banner success" role="status">{notice}</div>{/if}
       {#if snapshot.progress.errors.length}<details class="banner error"><summary>{snapshot.progress.errors.length} import/recovery issue(s) need attention</summary>{#each snapshot.progress.errors as issue}<p>{issue}</p>{/each}</details>{/if}
 
       {#if tab === "home"}
-        <div class="page-heading"><div><p class="eyebrow">LESS CLUTTER. MORE MEMORIES.</p><h1>A home for every memory.</h1><p class="subtitle">Bring scattered folders together. We'll organize the dates<br class="wide-only" /> and help you keep the best copies.</p></div><span class="hero-mark" aria-hidden="true"><svg width="60" height="60" viewBox="0 0 60 60" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="7" y="12" width="37" height="35" rx="4" transform="rotate(-10 7 12)" /><rect x="15" y="10" width="37" height="35" rx="4" fill="#f5f3ec" /><circle cx="26" cy="21" r="3" /><path d="m16 39 12-12 8 8 7-7 8 11" /></svg></span></div>
+        <div class="page-heading"><div><p class="eyebrow">PICTURE ARCHIVE</p><h1>Organize your pictures.</h1><p class="subtitle">Bring scattered folders together. We'll organize the dates<br class="wide-only" /> and help you keep the best copies.</p></div><span class="hero-mark" aria-hidden="true"><svg width="60" height="60" viewBox="0 0 60 60" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="7" y="12" width="37" height="35" rx="4" transform="rotate(-10 7 12)" /><rect x="15" y="10" width="37" height="35" rx="4" fill="#f5f3ec" /><circle cx="26" cy="21" r="3" /><path d="m16 39 12-12 8 8 7-7 8 11" /></svg></span></div>
         <section class="destination">
           <span class="disk-icon"><svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="3" /><path d="M3 14h18M7 17h1m3 0h1" /></svg></span>
           <div><small>ARCHIVE DESTINATION</small><strong>{snapshot.root ?? "Choose a folder on your external disk"}</strong><span>{snapshot.root ? "Photos stay as ordinary files, with original folder history." : "A dedicated archive folder keeps things tidy."}</span></div>
@@ -539,21 +539,21 @@
             {#if busy}<div class="button-row"><button class="secondary" onclick={() => run(async () => { await api("control_import", { action: snapshot.progress.status === "paused" ? "resume" : "pause" }); })}>{snapshot.progress.status === "paused" ? "Resume" : "Pause"}</button><button class="text-button" onclick={() => run(async () => { await api("control_import", { action: "cancel" }); })}>Cancel import</button></div>{/if}
           </section>
         {/if}
-        <div class="stats"><div class="stat"><small>MEMORIES TOGETHER</small><strong>{snapshot.activeCount.toLocaleString()}</strong><span>photos & videos in your archive</span></div><div class="stat"><small>ARCHIVE SIZE</small><strong>{bytes(snapshot.activeBytes)}</strong><span>verified original files</span></div><div class="stat"><small>SAFELY RETAINED</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>undo copies / {bytes(snapshot.undoBytes)}</span></div></div>
+        <div class="stats"><div class="stat"><small>PICTURES AND VIDEOS</small><strong>{snapshot.activeCount.toLocaleString()}</strong><span>in your archive</span></div><div class="stat"><small>ARCHIVE SIZE</small><strong>{bytes(snapshot.activeBytes)}</strong><span>verified original files</span></div><div class="stat"><small>SAFELY RETAINED</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>undo copies / {bytes(snapshot.undoBytes)}</span></div></div>
         <section class="next-steps"><div><h3>A little less clutter?</h3><p>Once copies are verified, review source files for cleanup.<br />Nothing leaves your source folders without your say-so.</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={startCleanup}>Review source cleanup</button></section>
         {#if jobs.length}<section class="history"><div class="section-line"><h3>Recent imports</h3><small>Original folder names stay searchable</small></div>{#each jobs.slice(0, 5) as job}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{job.progress.status ?? "queued"} / {job.progress.copied ?? 0} copied / {job.progress.duplicates ?? 0} exact duplicates</small></div><button class="text-button" disabled={busy} onclick={() => importFolders(job.roots)}>Retry folders</button></div>{/each}</section>{/if}
       {:else if tab === "library"}
-        <div class="page-heading"><div><p class="eyebrow">ALL THE GOOD MOMENTS</p><h1>Your photo library.</h1><p class="subtitle">Search a date, a filename, or an original folder like "Holiday Germany".</p></div><button class="primary" disabled={!native || !snapshot.root} onclick={() => importFolders()}>Add folders +</button></div>
-        <div class="library-toolbar"><input class="search" aria-label="Search photos and original folders" bind:value={search} placeholder="Search memories or original folders..." /><select aria-label="Filter library" bind:value={filter}><option value="all">All memories</option><option value="video">Videos</option><option value="unknown">Unknown dates</option><option value="estimated">Estimated dates</option><option value="undo">Retained undo copies</option></select></div>
+        <div class="page-heading"><div><p class="eyebrow">PICTURE LIBRARY</p><h1>Your picture library.</h1><p class="subtitle">Search a date, a filename, or an original folder like "Holiday Germany".</p></div><button class="primary" disabled={!native || !snapshot.root} onclick={() => importFolders()}>Add folders +</button></div>
+        <div class="library-toolbar"><input class="search" aria-label="Search pictures and original folders" bind:value={search} placeholder="Search pictures or original folders..." /><select aria-label="Filter library" bind:value={filter}><option value="all">All pictures and videos</option><option value="video">Videos</option><option value="unknown">Unknown dates</option><option value="estimated">Estimated dates</option><option value="undo">Retained undo copies</option></select></div>
         {@render datePicker()}
         {#if items.length}
           <div class="photo-grid">{#each items as item (item.id)}<button class="photo-card" disabled={working || libraryLoading} onclick={() => selectItem(item.id)}><Preview {item} /><div class="photo-info"><strong>{item.originalName}</strong><span>{item.media.date?.slice(0, 10) ?? "Date unknown"}{item.media.dateSource.startsWith("estimated") ? " / estimated" : ""}</span><small>{item.albums.join(" / ")}</small></div></button>{/each}</div>
           {@render pageControls()}
-        {:else}<div class="empty"><h2>{snapshot.root ? "Your memories will appear here." : "Start with an archive folder."}</h2><p>{search ? "No matches. Try another filename, date or original folder." : "Import folders from the overview to fill your library."}</p><button class="secondary" onclick={() => tab = "home"}>Go to overview</button></div>{/if}
+        {:else}<div class="empty"><h2>{snapshot.root ? "Your pictures will appear here." : "Start with an archive folder."}</h2><p>{search ? "No matches. Try another filename, date or original folder." : "Import folders from the overview to fill your library."}</p><button class="secondary" onclick={() => tab = "home"}>Go to overview</button></div>{/if}
       {:else if tab === "review"}
         <div class="page-heading"><div><p class="eyebrow">SIMILAR DOESN'T ALWAYS MEAN THE SAME</p><h1>A second look.</h1><p class="subtitle">Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.</p></div><div class="review-actions"><span class="pill">{reviews.length} to review</span>{#if reviews.length}<button class="primary" disabled={working || busy} onclick={() => compare(reviews[0])}>Review next match</button>{/if}</div></div>
         <label class="check-setting review-confirm-setting"><input type="checkbox" bind:checked={skipKeeperConfirmation} onchange={updateSkipKeeperConfirmation} /><span><strong>Skip confirmation when keeping a copy</strong><small>Applies on this computer. The other original still goes to archive undo.</small></span></label>
-        {#if reviews.length}<div class="review-list">{#each reviews as review}<div class="review-row"><div class="review-symbol">2</div><div><strong>Two similar memories</strong><p>{review.reason}</p></div><button class="secondary" disabled={working || busy} onclick={() => compare(review)}>Compare files</button></div>{/each}</div>{:else}<div class="empty"><span class="empty-check" aria-hidden="true">OK</span><h2>Nothing needs a second look.</h2><p>Uncertain matches will appear here. Exact duplicates are handled automatically.</p></div>{/if}
+        {#if reviews.length}<div class="review-list">{#each reviews as review}<div class="review-row"><div class="review-thumbnails"><Preview item={review.itemPreview} /><Preview item={review.candidatePreview} /></div><div class="review-description"><strong>Two similar pictures</strong><p>{review.reason}</p></div><button class="secondary" disabled={working || busy} onclick={() => compare(review)}>Compare files</button></div>{/each}</div>{:else}<div class="empty"><span class="empty-check" aria-hidden="true">OK</span><h2>Nothing needs a second look.</h2><p>Uncertain matches will appear here. Exact duplicates are handled automatically.</p></div>{/if}
       {:else}
         <div class="page-heading"><div><p class="eyebrow">SIMPLE SETTINGS, YOUR WAY</p><h1>A place for everything.</h1><p class="subtitle">Archive settings travel with your disk. Changes apply to future imports.</p></div></div>
         <section class="settings-card"><h3>Folder organization</h3><label>Choose a layout<select bind:value={config.template}>{#each presets as [value, label]}<option {value}>{label}</option>{/each}{#if !presets.some(([value]) => value === config.template)}<option value={config.template}>Custom layout</option>{/if}</select></label><details class="advanced"><summary>Advanced folder template</summary><label>Template<input bind:value={config.template} placeholder={"Family/{yyyy}/{mm}"} /></label><p>Supported: <code>{"{yyyy}"}</code> <code>{"{mm}"}</code> <code>{"{dd}"}</code> <code>{"{media_type}"}</code>. Safe literal folder names are welcome.</p></details>
@@ -566,7 +566,7 @@
         <button class="text-button" disabled={!native || !snapshot.root || busy} onclick={() => run(async () => { moves = await api<MoveRow[]>("rollback_preview"); undoingMoves = true; })}>Preview undo of last reorganization</button>
         <section class="settings-card"><h3>Media tools</h3><p class="muted">RAW and video formats depend on the bundled decoders. Unsupported originals can still be archived without a preview.</p><div class="tool-list">{#each tools as tool}<div><span class:unavailable={!tool.available} class="safe-dot"></span><strong>{tool.name}</strong><small title={tool.detail}>{tool.available ? "Available" : tool.detail}</small></div>{/each}</div></section>
       {/if}
-      <footer>Made for memories, not more maintenance. <span>Sources stay safe until you explicitly clean them up.</span></footer>
+      <footer>Photo Archive. <span>Sources stay safe until you explicitly clean them up.</span></footer>
     </main>
   </div>
 {/if}
@@ -574,9 +574,17 @@
 {#if selected && mode !== "viewer"}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="modal-backdrop" onclick={(event) => { if (!working && event.target === event.currentTarget) closeDetails(); }}>
-    <dialog open class="modal detail-modal" class:comparison={!!comparing} aria-modal="true" aria-label={comparing ? "Compare similar memories" : selected.item.originalName} tabindex="-1">
-      <div class="modal-top"><div><small>{comparing ? "COMPARE THE ORIGINALS" : "YOUR MEMORY"}</small><h2>{comparing ? "Which copy would you keep?" : selected.item.originalName}</h2></div><button class="secondary" onclick={closeDetails}>Close</button></div>
+    <dialog open class="modal detail-modal" class:comparison={!!comparing} aria-modal="true" aria-label={comparing ? "Compare similar pictures" : selected.item.originalName} tabindex="-1">
+      <div class="modal-top"><div><small>{comparing ? "COMPARE THE ORIGINALS" : "PICTURE DETAILS"}</small><h2>{comparing ? "Which copy would you keep?" : selected.item.originalName}</h2></div><button class="secondary" onclick={closeDetails}>Close</button></div>
       {#if error}<div class="banner error" role="alert">{error}</div>{/if}
+      {#if comparing}
+        <p class="muted">Keeping one picture moves the other to archive undo. Keep both / dismiss match leaves both active and clears this review.</p>
+        {#if selected.companions.length && comparing.companions.length}
+          <p class="banner warning">Both pictures have related files and cannot be moved to undo on their own. Choose Keep both / dismiss match to finish this review without moving either picture.</p>
+        {:else if selected.companions.length || comparing.companions.length}
+          <p class="banner warning">The picture with related files cannot be moved to undo on its own. To move the other picture to undo, choose Keep this copy active for the picture with related files. Or choose Keep both / dismiss match.</p>
+        {/if}
+      {/if}
       <div class="detail-columns">
         {#each [selected, ...(comparing ? [comparing] : [])] as detail, index (detail.item.id)}
           <div class="detail-column">
@@ -585,10 +593,14 @@
               {#if index === 0 && videoSource}<video bind:this={firstVideo} src={videoSource} controls onerror={() => error = "This video proxy could not be played. Check the bundled decoder/encoder."}><track kind="captions" /></video>{:else if index === 1 && secondVideoSource}<video bind:this={secondVideo} src={secondVideoSource} controls onerror={() => error = "The comparison video could not be played."}><track kind="captions" /></video>{:else}<button class="secondary full" disabled={working} onclick={() => playVideo(detail.item, index === 1)}>Prepare playable video preview</button>{/if}
             {/if}
             <h3>{detail.item.originalName}</h3><div class="detail-facts"><span>{detail.item.media.width} x {detail.item.media.height}</span><span>{bytes(detail.item.media.bytes)}</span><span>{detail.item.media.kind.toUpperCase()}</span></div><p class="detail-date">{detail.item.media.date ?? "Date unknown"} <small>{detail.item.media.dateSource}</small></p><code class="file-path">{detail.item.path}</code>
-            {#if detail.companions.length}<p class="banner warning">Has associated RAW/JPEG, sidecar or Live Photo files. Keep the set together.</p>{/if}
+            {#if detail.companions.length}<p class="banner warning">Related RAW/JPEG, sidecar or Live Photo files detected. This picture cannot be moved to archive undo on its own.</p>{/if}
             <details><summary>Original folders & import history</summary>{#each detail.sources as source}<p class="source-history"><strong>{source.album}</strong><code>{source.relative}</code><small>{source.status.startsWith("staged:") ? "Cleanup recovery needed" : source.status === "trashed" ? "Source moved to OS trash" : "Source retained"}</small></p>{/each}</details>
             {#if detail.item.media.warnings.length}<details><summary>Metadata & quality notes</summary>{#each detail.item.media.warnings as warning}<p class="muted">{warning}</p>{/each}</details>{/if}
-            {#if comparing}<button class="primary full" disabled={working || !!detail.companions.length} onclick={() => resolve(detail.item.id)}>Keep this copy active</button>{/if}
+            {#if comparing}
+              {@const other = index === 0 ? comparing : selected}
+              <button class="primary full" disabled={working || !!other.companions.length} onclick={() => resolve(detail.item.id)}>Keep this copy active</button>
+              {#if other.companions.length}<p class="muted">Unavailable because the other picture has related files and cannot be moved to undo on its own.</p>{/if}
+            {/if}
           </div>
         {/each}
       </div>
@@ -738,10 +750,15 @@
   .review-confirm-setting { margin: 0 0 20px; }
   .review-list { display: flex; flex-direction: column; gap: 14px; }
   .review-row { display: flex; align-items: center; gap: 19px; padding: 23px; background: #fffdf8; border: 1px solid #dfe4d6; border-radius: 12px; }
-  .review-row div:nth-child(2) { flex: 1; }
+  .review-description { flex: 1; min-width: 0; }
   .review-row strong { font-size: 13px; }
   .review-row p { font-size: 11px; line-height: 1.6; color: #8b977f; margin: 7px 0 0; }
-  .review-symbol { width: 43px; height: 43px; display: grid; place-items: center; background: #ecf0e2; color: #8aa071; border-radius: 10px; font-family: Georgia, serif; font-size: 26px; }
+  .review-thumbnails { display: flex; gap: 6px; flex-shrink: 0; }
+  .review-thumbnails :global(.preview) { width: 72px; height: 72px; }
+  .review-thumbnails :global(.placeholder) { padding: 4px; gap: 2px; }
+  .review-thumbnails :global(.placeholder svg) { width: 20px; height: 20px; }
+  .review-thumbnails :global(.placeholder span), .review-thumbnails :global(.placeholder small) { font-size: 8px; max-height: 22px; overflow: hidden; }
+  .review-thumbnails :global(.type) { right: 3px; bottom: 3px; padding: 2px 3px; font-size: 8px; }
   .settings-card { background: #fffdf8; border: 1px solid #dfe3d6; border-radius: 12px; padding: 27px; margin-bottom: 20px; }
   .settings-card h3 { margin-bottom: 21px; }
   .settings-card label { display: flex; flex-direction: column; gap: 8px; font-size: 11px; color: #788a69; }
