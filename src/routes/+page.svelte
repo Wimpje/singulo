@@ -158,11 +158,14 @@
   }
 
   function viewerKey(event: KeyboardEvent) {
-    if (mode !== "viewer" || !selected || working) return;
+    if (working) return;
     const target = event.target;
     if (target instanceof HTMLElement && (target.isContentEditable || target.closest("input, select, textarea, video"))) return;
-    if (event.key === "Escape") closeDetails();
-    else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    if (event.key === "Escape" && selected) {
+      closeDetails();
+      return;
+    }
+    if (mode === "viewer" && selected && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
       event.preventDefault();
       void navigatePhoto(event.key === "ArrowLeft" ? -1 : 1);
     }
@@ -483,7 +486,8 @@
 {/if}
 
 {#if selected && mode !== "viewer"}
-  <div class="modal-backdrop">
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={(event) => { if (!working && event.target === event.currentTarget) closeDetails(); }}>
     <dialog open class="modal detail-modal" class:comparison={!!comparing} aria-modal="true" aria-label={comparing ? "Compare similar memories" : selected.item.originalName} tabindex="-1">
       <div class="modal-top"><div><small>{comparing ? "COMPARE THE ORIGINALS" : "YOUR MEMORY"}</small><h2>{comparing ? "Which copy would you keep?" : selected.item.originalName}</h2></div><button class="secondary" onclick={closeDetails}>Close</button></div>
       {#if error}<div class="banner error" role="alert">{error}</div>{/if}
