@@ -33,6 +33,7 @@
   let selected = $state<Details | null>(null);
   let comparing = $state<Details | null>(null);
   let currentReview = $state<Review | null>(null);
+  let skipKeeperConfirmation = $state(false);
   let dateEntry = $state("");
   let videoSource = $state("");
   let secondVideoSource = $state("");
@@ -167,29 +168,37 @@
     }
   }
 
+  async function loadComparison(review: Review) {
+    [selected, comparing] = await Promise.all([
+      api<Details>("item_details", { id: review.item }),
+      api<Details>("item_details", { id: review.candidate }),
+    ]);
+    currentReview = review;
+    videoSource = "";
+    secondVideoSource = "";
+  }
+
   async function compare(review: Review) {
-    await run(async () => {
-      [selected, comparing] = await Promise.all([
-        api<Details>("item_details", { id: review.item }),
-        api<Details>("item_details", { id: review.candidate }),
-      ]);
-      currentReview = review;
-      videoSource = "";
-      secondVideoSource = "";
-    });
+    await run(async () => { await loadComparison(review); });
   }
 
   async function resolve(keeper: string | null) {
     const review = currentReview;
     if (!review) return;
     await run(async () => {
-      if (keeper && !await confirm("Keep the chosen file active and move the other original into archive undo? Meaningful edits and RAW/JPEG pairs should be kept together.", { title: "Confirm your keeper", kind: "warning" })) return;
+      if (keeper && !skipKeeperConfirmation && !await confirm("Keep the chosen file active and move the other original into archive undo? Meaningful edits and RAW/JPEG pairs should be kept together.", { title: "Confirm your keeper", kind: "warning" })) return;
       await mutate(async () => {
         await api("resolve_review", { ...review, keeper });
         selected = null; comparing = null; currentReview = null;
         await refresh(true);
+        if (reviews.length) await loadComparison(reviews[0]);
+        else notice = "All similar matches have been reviewed.";
       });
     });
+  }
+
+  function updateSkipKeeperConfirmation() {
+    window.localStorage.setItem("photo-dedupe.skipKeeperConfirmation", String(skipKeeperConfirmation));
   }
 
   async function playVideo(item: Item, second = false) {
@@ -298,6 +307,7 @@
   onMount(() => {
     native = isTauri();
     mode = native ? getCurrentWindow().label : new URLSearchParams(window.location.search).get("window") ?? "main";
+    skipKeeperConfirmation = window.localStorage.getItem("photo-dedupe.skipKeeperConfirmation") === "true";
     if (mode === "viewer") tab = "library";
     if (!native) return;
     const removers: UnlistenFn[] = [];
@@ -452,7 +462,8 @@
           {#if hasMore}<button class="secondary load-more" disabled={working} onclick={() => run(async () => { await loadItems(true); })}>Load more memories</button>{/if}
         {:else}<div class="empty"><h2>{snapshot.root ? "Your memories will appear here." : "Start with an archive folder."}</h2><p>{search ? "No matches. Try another filename, date or original folder." : "Import folders from the overview to fill your library."}</p><button class="secondary" onclick={() => tab = "home"}>Go to overview</button></div>{/if}
       {:else if tab === "review"}
-        <div class="page-heading"><div><p class="eyebrow">SIMILAR DOESN'T ALWAYS MEAN THE SAME</p><h1>A second look.</h1><p class="subtitle">Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.</p></div><span class="pill">{reviews.length} to review</span></div>
+        <div class="page-heading"><div><p class="eyebrow">SIMILAR DOESN'T ALWAYS MEAN THE SAME</p><h1>A second look.</h1><p class="subtitle">Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.</p></div><div class="review-actions"><span class="pill">{reviews.length} to review</span>{#if reviews.length}<button class="primary" disabled={working || busy} onclick={() => compare(reviews[0])}>Review next match</button>{/if}</div></div>
+        <label class="check-setting review-confirm-setting"><input type="checkbox" bind:checked={skipKeeperConfirmation} onchange={updateSkipKeeperConfirmation} /><span><strong>Skip confirmation when keeping a copy</strong><small>Applies on this computer. The other original still goes to archive undo.</small></span></label>
         {#if reviews.length}<div class="review-list">{#each reviews as review}<div class="review-row"><div class="review-symbol">2</div><div><strong>Two similar memories</strong><p>{review.reason}</p></div><button class="secondary" disabled={working || busy} onclick={() => compare(review)}>Compare files</button></div>{/each}</div>{:else}<div class="empty"><span class="empty-check" aria-hidden="true">OK</span><h2>Nothing needs a second look.</h2><p>Uncertain matches will appear here. Exact duplicates are handled automatically.</p></div>{/if}
       {:else}
         <div class="page-heading"><div><p class="eyebrow">SIMPLE SETTINGS, YOUR WAY</p><h1>A place for everything.</h1><p class="subtitle">Archive settings travel with your disk. Changes apply to future imports.</p></div></div>
@@ -630,6 +641,8 @@
   .empty p { font-size: 12px; }
   .empty-check { display: inline-grid; place-items: center; background: #e0ebd4; border-radius: 50%; width: 50px; height: 50px; margin-bottom: 19px; font-size: 11px; }
   .pill { border-radius: 30px; background: #e6eddc; padding: 9px 14px; color: #6b8654; font-size: 11px; white-space: nowrap; }
+  .review-actions { display: flex; align-items: center; gap: 12px; }
+  .review-confirm-setting { margin: 0 0 20px; }
   .review-list { display: flex; flex-direction: column; gap: 14px; }
   .review-row { display: flex; align-items: center; gap: 19px; padding: 23px; background: #fffdf8; border: 1px solid #dfe4d6; border-radius: 12px; }
   .review-row div:nth-child(2) { flex: 1; }
