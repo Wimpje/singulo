@@ -48,6 +48,7 @@
   let loaded = $state(false);
   const busy = $derived(working || ["scanning", "importing", "paused"].includes(snapshot.progress.status));
   const percent = $derived(snapshot.progress.total ? Math.round(snapshot.progress.done / snapshot.progress.total * 100) : 0);
+  const viewerIndex = $derived(selected ? items.findIndex((item) => item.id === selected?.item.id) : -1);
   const presets = [
     ["{yyyy}/{mm}/{dd}", "Year / month / day"],
     ["{yyyy}/{mm}", "Year / month"],
@@ -67,7 +68,9 @@
   async function refresh() {
     snapshot = await api<Snapshot>("snapshot");
     if (snapshot.root) {
-      [reviews, jobs] = await Promise.all([api<Review[]>("review_list"), api<Job[]>("job_history")]);
+      if (mode === "main") {
+        [reviews, jobs] = await Promise.all([api<Review[]>("review_list"), api<Job[]>("job_history")]);
+      }
       await loadItems();
     }
   }
@@ -110,6 +113,27 @@
       videoSource = "";
       secondVideoSource = "";
     });
+  }
+
+  async function navigatePhoto(direction: -1 | 1) {
+    if (working || viewerIndex < 0) return;
+    const index = viewerIndex + direction;
+    if (index >= items.length && hasMore) {
+      await run(async () => { await loadItems(true); });
+    }
+    const item = items[index];
+    if (item) await selectItem(item.id);
+  }
+
+  function viewerKey(event: KeyboardEvent) {
+    if (mode !== "viewer" || !selected || working) return;
+    const target = event.target;
+    if (target instanceof HTMLElement && (target.isContentEditable || target.closest("input, select, textarea, video"))) return;
+    if (event.key === "Escape") closeDetails();
+    else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      void navigatePhoto(event.key === "ArrowLeft" ? -1 : 1);
+    }
   }
 
   async function compare(review: Review) {
@@ -230,20 +254,22 @@
   });
 
   onMount(() => {
-    mode = new URLSearchParams(window.location.search).get("window") ?? "main";
-    if (mode === "viewer") tab = "library";
     native = isTauri();
+    mode = native ? getCurrentWindow().label : new URLSearchParams(window.location.search).get("window") ?? "main";
+    if (mode === "viewer") tab = "library";
     if (!native) return;
     const removers: UnlistenFn[] = [];
     let disposed = false;
     const register = (unsubscribe: UnlistenFn) => { if (disposed) unsubscribe(); else removers.push(unsubscribe); };
     void run(async () => {
       const current = getCurrentWindow();
-      register(await current.onDragDropEvent((event) => {
-        if (event.payload.type === "over") dropping = true;
-        else if (event.payload.type === "leave") dropping = false;
-        else if (event.payload.type === "drop") { dropping = false; void importFolders(event.payload.paths); }
-      }));
+      if (mode !== "viewer") {
+        register(await current.onDragDropEvent((event) => {
+          if (event.payload.type === "over") dropping = true;
+          else if (event.payload.type === "leave") dropping = false;
+          else if (event.payload.type === "drop") { dropping = false; void importFolders(event.payload.paths); }
+        }));
+      }
       register(await listen<Progress>("progress", (event) => {
         snapshot.progress = event.payload;
       }));
@@ -257,7 +283,7 @@
         if (path) snapshot = await api<Snapshot>("open_archive", { path });
       }
       config = { ...snapshot.settings };
-      tools = await api<ToolStatus[]>("tool_status");
+      if (mode === "main") tools = await api<ToolStatus[]>("tool_status");
       await refresh();
       loaded = true;
     });
@@ -266,6 +292,7 @@
 </script>
 
 <svelte:head><title>Family Archive</title><meta name="description" content="A safe home for family photos and videos" /></svelte:head>
+<svelte:window onkeydown={viewerKey} />
 
 {#if mode === "drop"}
   <main class="mini" class:dropping>
@@ -278,6 +305,49 @@
     <div class="mini-bottom"><small>{busy ? `${snapshot.progress.status} ${percent}%` : "Originals kept safe"}</small><button class="text-button" onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>Open app</button></div>
     <label class="mini-pin"><input type="checkbox" bind:checked={onTop} onchange={() => run(async () => { await getCurrentWindow().setAlwaysOnTop(onTop); })} /> Always on top</label>
     {#if error}<p class="mini-error">{error}</p>{/if}
+  </main>
+{:else if mode === "viewer"}
+  <main class="viewer-shell">
+    <header class="viewer-header">
+      <div><strong>Family Archive Viewer</strong><small>{snapshot.root?.split(/[\\/]/).pop() ?? "No archive open"}</small></div>
+      <button class="secondary" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>Open main app</button>
+    </header>
+    {#if error}<div class="banner error" role="alert">{error}</div>{/if}
+    {#if !native}<div class="banner warning">Photo previews are available in the desktop app.</div>{/if}
+    {#if selected}
+      <div class="viewer-navigation">
+        <button class="secondary" disabled={working} onclick={closeDetails}>Back to thumbnails</button>
+        <span>{selected.item.originalName}</span>
+        <div class="button-row">
+          <button class="secondary" disabled={working || viewerIndex <= 0} onclick={() => navigatePhoto(-1)}>Previous</button>
+          <button class="secondary" disabled={working || viewerIndex < 0 || (viewerIndex === items.length - 1 && !hasMore)} onclick={() => navigatePhoto(1)}>Next</button>
+        </div>
+      </div>
+      <section class="viewer-stage" aria-label={selected.item.originalName}>
+        {#if videoSource}
+          <video src={videoSource} controls onerror={() => error = "This video proxy could not be played. Check the bundled media tools."}><track kind="captions" /></video>
+        {:else}
+          <Preview item={selected.item} large />
+        {/if}
+      </section>
+      <div class="viewer-caption">
+        <div><strong>{selected.item.media.date?.slice(0, 10) ?? "Date unknown"}</strong><small>{selected.item.albums.join(" / ")}</small><small>{selected.item.media.dateSource} / {selected.item.media.width} x {selected.item.media.height} / {bytes(selected.item.media.bytes)}</small></div>
+        {#if selected.item.media.kind === "video" && !videoSource}<button class="secondary" disabled={working} onclick={() => selected && playVideo(selected.item)}>Play video</button>{/if}
+        <small>Arrow keys to browse / Escape for thumbnails</small>
+      </div>
+      {#if selected.item.media.warnings.length}<details><summary>Photo information</summary>{#each selected.item.media.warnings as warning}<p class="muted">{warning}</p>{/each}</details>{/if}
+    {:else}
+      <div class="library-toolbar">
+        <input class="search" aria-label="Search photos and original folders" bind:value={search} placeholder="Search photos, dates or original folders..." />
+        <select aria-label="Filter viewer" bind:value={filter}><option value="all">All memories</option><option value="video">Videos</option><option value="unknown">Unknown dates</option><option value="estimated">Estimated dates</option></select>
+      </div>
+      {#if items.length}
+        <div class="photo-grid">{#each items as item (item.id)}<button class="photo-card" onclick={() => selectItem(item.id)}><Preview {item} /><div class="photo-info"><strong>{item.originalName}</strong><span>{item.media.date?.slice(0, 10) ?? "Date unknown"}</span><small>{item.albums.join(" / ")}</small></div></button>{/each}</div>
+        {#if hasMore}<button class="secondary load-more" disabled={working} onclick={() => run(async () => { await loadItems(true); })}>Load more photos</button>{/if}
+      {:else}
+        <div class="empty"><h2>{snapshot.root ? "No photos to show yet." : "Open your archive in the main app."}</h2><p>{search ? "No matching memories. Try another search." : "Imported photos and videos will appear here."}</p></div>
+      {/if}
+    {/if}
   </main>
 {:else}
   <div class="app-shell">
@@ -352,7 +422,7 @@
   </div>
 {/if}
 
-{#if selected}
+{#if selected && mode !== "viewer"}
   <div class="modal-backdrop">
     <dialog open class="modal detail-modal" class:comparison={!!comparing} aria-modal="true" aria-label={comparing ? "Compare similar memories" : selected.item.originalName} tabindex="-1">
       <div class="modal-top"><div><small>{comparing ? "COMPARE THE ORIGINALS" : "YOUR MEMORY"}</small><h2>{comparing ? "Which copy would you keep?" : selected.item.originalName}</h2></div><button class="secondary" onclick={closeDetails}>Close</button></div>
@@ -409,6 +479,19 @@
   :global(details) { margin: 15px 0; }
   :global(summary) { cursor: pointer; font-size: 12px; font-weight: 600; }
   .app-shell { display: flex; min-height: 100vh; }
+  .viewer-shell { min-height: 100vh; padding: 0 28px 24px; }
+  .viewer-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px 0; margin-bottom: 20px; border-bottom: 1px solid #dfe3d8; }
+  .viewer-header strong { display: block; font-size: 16px; }
+  .viewer-header small { display: block; color: #85917c; margin-top: 6px; }
+  .viewer-navigation { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+  .viewer-navigation > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .viewer-navigation .button-row { margin: 0; flex-wrap: nowrap; }
+  .viewer-stage { background: #172721; border-radius: 12px; overflow: hidden; }
+  .viewer-stage :global(.preview.large) { height: max(320px, calc(100vh - 260px)); }
+  .viewer-stage video { display: block; margin: 0; height: max(320px, calc(100vh - 260px)); max-height: none; object-fit: contain; }
+  .viewer-caption { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-top: 18px; }
+  .viewer-caption strong, .viewer-caption small { display: block; }
+  .viewer-caption small { color: #85917c; margin-top: 5px; }
   .sidebar { width: 235px; flex-shrink: 0; background: #fdfcf8; border-right: 1px solid #e2e5dc; display: flex; flex-direction: column; padding: 30px 19px 24px; position: sticky; top: 0; height: 100vh; }
   .brand { display: flex; align-items: center; gap: 10px; margin: 0 4px 48px; }
   .brand-symbol { display: grid; place-items: center; width: 41px; height: 41px; background: #274b38; color: #f2e9c9; border-radius: 11px; flex-shrink: 0; }

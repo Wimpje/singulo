@@ -9,6 +9,8 @@ A small, offline desktop app for bringing family photos and videos together. Bui
 3. Browse the library or separate viewer. Search original folder names such as **Holiday Germany**; folder history survives deduplication.
 4. Compare uncertain matches in **Similarity review**. Keep both when they are different edits, crops, burst frames or RAW/JPEG companions.
 
+The separate viewer is browsing-only, without import or settings controls. Click a thumbnail for a large photo, use Previous/Next or the arrow keys to browse, and Escape to return to thumbnails. Videos have a Play video button.
+
 Imports **copy**, never delete or modify sources. Exact duplicates share one verified archived copy. Conservative visual matching can keep a clearly higher-resolution equivalent active; other original bytes remain in **archive undo** until you explicitly purge them. Resolution and visual comparisons are quality estimates, not a promise of photographic quality.
 
 ### Dates and folder layout

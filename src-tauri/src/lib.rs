@@ -641,7 +641,7 @@ fn show_window(app: tauri::AppHandle, kind: String) -> Result<()> {
     let builder = WebviewWindowBuilder::new(
         &app,
         &kind,
-        WebviewUrl::App(format!("index.html?window={kind}").into()),
+        WebviewUrl::App(format!("/?window={kind}").into()),
     )
     .title(if kind == "drop" {
         "Drop into Family Archive"
