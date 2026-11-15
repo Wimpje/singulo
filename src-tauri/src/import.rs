@@ -21,6 +21,34 @@ pub fn update(app: &tauri::AppHandle, progress: &Progress) -> Result<()> {
     app.emit("progress", progress).map_err(|e| e.to_string())
 }
 
+pub fn validate_roots(raw_roots: &[String], archive_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut roots = Vec::<PathBuf>::new();
+    for root in raw_roots {
+        let root = Path::new(root);
+        if root
+            .symlink_metadata()
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            return Err("Dropped roots must not be symlinks.".into());
+        }
+        let root = paths::canonical(root).map_err(|e| format!("Cannot open source folder: {e}"))?;
+        if !root.is_dir() {
+            return Err("Drop folders rather than individual files.".into());
+        }
+        if root.starts_with(archive_root) || archive_root.starts_with(&root) {
+            return Err("Source and destination folders must not overlap.".into());
+        }
+        if roots.iter().any(|existing| root.starts_with(existing)) {
+            continue;
+        }
+        roots.retain(|existing| !existing.starts_with(&root));
+        roots.push(root);
+    }
+    Ok(roots)
+}
+
 pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
     let state = app.state::<AppState>();
     let archive_root = {
@@ -40,32 +68,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         ..Progress::default()
     };
     update(app, &progress)?;
-    let mut roots = Vec::<PathBuf>::new();
-    for root in &job.roots {
-        let root = Path::new(root);
-        if root
-            .symlink_metadata()
-            .map_err(|e| e.to_string())?
-            .file_type()
-            .is_symlink()
-        {
-            return Err("Dropped roots must not be symlinks.".into());
-        }
-        let root = root
-            .canonicalize()
-            .map_err(|e| format!("Cannot open source folder: {e}"))?;
-        if !root.is_dir() {
-            return Err("Drop folders rather than individual files.".into());
-        }
-        if root.starts_with(&archive_root) || archive_root.starts_with(&root) {
-            return Err("Source and destination folders must not overlap.".into());
-        }
-        if roots.iter().any(|existing| root.starts_with(existing)) {
-            continue;
-        }
-        roots.retain(|existing| !existing.starts_with(&root));
-        roots.push(root);
-    }
+    let roots = validate_roots(&job.roots, &archive_root)?;
     let mut files = Vec::new();
     for root in &roots {
         for entry in WalkDir::new(root)
@@ -127,6 +130,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         }
         drop(done_tx);
         let mut queue = VecDeque::<Entry>::new();
+        let mut candidate_cache = HashMap::<String, media::Preview>::new();
         let mut base = 0;
         let receive = |queue: &mut VecDeque<Entry>, base: usize, (index, result)| {
             if let Some(entry) = queue.get_mut(index - base) {
@@ -137,20 +141,12 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
             if shared.cancel.load(Ordering::Relaxed) {
                 break;
             }
-            let paths = batch
-                .iter()
-                .filter(|(_, path)| media::kind(path) != Some("sidecar"))
-                .map(|(_, path)| path.clone())
-                .collect::<Vec<_>>();
-            let mut identities = HashMap::new();
-            for path in &paths {
-                identities.insert(path.clone(), media::identity(path));
+            enum Prepped<'b> {
+                Finished(&'b Path, &'b Path, Result<bool>),
+                NeedsInspect(&'b Path, &'b Path, String, String),
             }
-            let metadata = if paths.is_empty() {
-                Ok(HashMap::new())
-            } else {
-                media::metadata_batch(app, &paths)
-            };
+            let mut prepped = Vec::with_capacity(batch.len());
+            let mut metadata_paths = Vec::new();
             for (root, path) in batch {
                 if shared.cancel.load(Ordering::Relaxed) {
                     break;
@@ -168,29 +164,22 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                 progress.current = path.to_string_lossy().into();
                 update(app, &progress)?;
                 // Disk reads and catalog writes stay on this thread so external drives read
-                // sequentially; only CPU-heavy decoding is handed to the workers.
-                let prepared = (|| {
+                // sequentially; exact duplicates skip ExifTool and decoding entirely.
+                let checked: Result<Option<(String, String)>> = (|| {
                     let identity = media::identity(path)?;
-                    if let Some(before) = identities.get(path)
-                        && before.as_ref().map_err(Clone::clone)? != &identity
-                    {
-                        return Err(
-                            "Source changed during batch metadata extraction; retry it.".into()
-                        );
-                    }
                     let hash = media::hash(path)?;
                     if media::identity(path)? != identity {
                         return Err("Source changed during hashing; retry it.".into());
                     }
                     let mut guard = shared.archive.lock().map_err(|e| e.to_string())?;
                     let archive = guard.as_mut().ok_or("Archive is not open.")?;
-                    if let Some(exact) = archive.exact(&hash)? {
+                    if let Some(exact) = archive.exact_cached(&hash)? {
                         if media::identity(path)? != identity {
                             return Err(
                                 "Source changed before duplicate confirmation; retry it.".into()
                             );
                         }
-                        let occurrence = occurrence(
+                        let occ = occurrence(
                             archive,
                             root,
                             path,
@@ -199,40 +188,94 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                             exact.media.bytes,
                             exact.id,
                         )?;
-                        archive.record_occurrence(&occurrence)?;
+                        archive.record_occurrence(&occ)?;
                         return Ok(None);
                     }
-                    let row = match &metadata {
-                        Ok(rows) => rows
-                            .get(path)
-                            .cloned()
-                            .ok_or_else(|| "Metadata batch omitted this file.".to_string()),
-                        Err(error) => Err(error.clone()),
-                    };
-                    Ok(Some((identity, hash, row)))
+                    Ok(Some((identity, hash)))
                 })();
+                match checked {
+                    Err(error) => prepped.push(Prepped::Finished(root, path, Err(error))),
+                    Ok(None) => prepped.push(Prepped::Finished(root, path, Ok(true))),
+                    Ok(Some((identity, hash))) => {
+                        if media::kind(path) != Some("sidecar") {
+                            metadata_paths.push(path.clone());
+                        }
+                        prepped.push(Prepped::NeedsInspect(root, path, identity, hash));
+                    }
+                }
+                while let Ok(done) = done_rx.try_recv() {
+                    receive(&mut queue, base, done);
+                }
+                commit_ready(
+                    app,
+                    job,
+                    &mut queue,
+                    &mut base,
+                    &mut progress,
+                    &mut checkpoint,
+                    &mut candidate_cache,
+                )?;
+            }
+            if shared.cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let metadata = if metadata_paths.is_empty() {
+                Ok(HashMap::new())
+            } else {
+                media::metadata_batch(app, &metadata_paths)
+            };
+            for item in prepped {
+                if shared.cancel.load(Ordering::Relaxed) {
+                    break;
+                }
                 let index = base + queue.len();
-                let (stage, identity) = match prepared {
-                    Err(error) => (Stage::Finished(Err(error)), String::new()),
-                    Ok(None) => (Stage::Finished(Ok(true)), String::new()),
-                    Ok(Some((identity, hash, metadata))) => {
-                        task_tx
-                            .send(Task {
-                                index,
-                                path: path.clone(),
-                                hash,
-                                metadata,
-                            })
-                            .map_err(|_| "Decoder workers stopped unexpectedly.")?;
-                        (Stage::Inspecting, identity)
+                let entry = match item {
+                    Prepped::Finished(root, path, result) => Entry {
+                        root,
+                        path,
+                        identity: String::new(),
+                        stage: Stage::Finished(result),
+                    },
+                    Prepped::NeedsInspect(root, path, identity, hash) => {
+                        if media::identity(path).ok().as_ref() != Some(&identity) {
+                            Entry {
+                                root,
+                                path,
+                                identity: String::new(),
+                                stage: Stage::Finished(Err(
+                                    "Source changed during batch metadata extraction; retry it."
+                                        .into(),
+                                )),
+                            }
+                        } else {
+                            let row = if media::kind(path) == Some("sidecar") {
+                                Ok(serde_json::json!({}))
+                            } else {
+                                match &metadata {
+                                    Ok(rows) => rows.get(path).cloned().ok_or_else(|| {
+                                        "Metadata batch omitted this file.".to_string()
+                                    }),
+                                    Err(error) => Err(error.clone()),
+                                }
+                            };
+                            task_tx
+                                .send(Task {
+                                    index,
+                                    path: path.to_path_buf(),
+                                    hash,
+                                    metadata: row,
+                                })
+                                .map_err(|_| "Decoder workers stopped unexpectedly.")?;
+                            Entry {
+                                root,
+                                path,
+                                identity,
+                                stage: Stage::Inspecting,
+                            }
+                        }
                     }
                 };
-                queue.push_back(Entry {
-                    root,
-                    path,
-                    identity,
-                    stage,
-                });
+                queue.push_back(entry);
                 loop {
                     while let Ok(done) = done_rx.try_recv() {
                         receive(&mut queue, base, done);
@@ -244,6 +287,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                         &mut base,
                         &mut progress,
                         &mut checkpoint,
+                        &mut candidate_cache,
                     )?;
                     if queue.len() < workers * 4 || shared.cancel.load(Ordering::Relaxed) {
                         break;
@@ -268,6 +312,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                 &mut base,
                 &mut progress,
                 &mut checkpoint,
+                &mut candidate_cache,
             )?;
         }
         Ok(())
@@ -325,6 +370,7 @@ fn commit_ready(
     base: &mut usize,
     progress: &mut Progress,
     checkpoint: &mut Instant,
+    candidate_cache: &mut HashMap<String, media::Preview>,
 ) -> Result<()> {
     let state = app.state::<AppState>();
     while queue
@@ -346,6 +392,7 @@ fn commit_ready(
                     entry.path,
                     &entry.identity,
                     inspected,
+                    candidate_cache,
                 )
             }),
             Stage::Inspecting => unreachable!(),
@@ -402,6 +449,7 @@ fn occurrence(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn import_one(
     app: &tauri::AppHandle,
     archive: &mut Archive,
@@ -410,6 +458,7 @@ fn import_one(
     source: &Path,
     identity: &str,
     (mut media, preview): (Media, Option<media::Preview>),
+    candidate_cache: &mut HashMap<String, media::Preview>,
 ) -> Result<bool> {
     archive.check()?;
     let album = root
@@ -436,7 +485,7 @@ fn import_one(
         status: "pending".into(),
         bytes: media.bytes,
     };
-    if let Some(exact) = archive.exact(&media.hash)? {
+    if let Some(exact) = archive.exact_cached(&media.hash)? {
         if media::identity(source)? != identity {
             return Err("Source changed before exact deduplication.".into());
         }
@@ -467,7 +516,7 @@ fn import_one(
     let mut review = Vec::new();
     for candidate in candidates {
         let path = paths::inside(&archive.root, Path::new(&candidate.path))?;
-        if !path.is_file() || media::hash(&path)? != candidate.media.hash {
+        if !archive.verified_file(&path, &candidate.media.hash)? {
             media.warnings.push(format!(
                 "Candidate {} is missing or changed; it did not suppress this import.",
                 candidate.original_name
@@ -492,20 +541,29 @@ fn import_one(
             media.width > candidate.media.width && media.height > candidate.media.height;
         let dominated =
             media.width < candidate.media.width && media.height < candidate.media.height;
-        let auto = settings.automatic_matches && !protected && (dominates || dominated);
+        let auto =
+            matched.is_none() && settings.automatic_matches && !protected && (dominates || dominated);
         let comparison: Result<bool> = if auto {
             if media.kind == "video" {
                 media::video_equivalent(app, source, &path)
             } else {
                 (|| {
                     let left = preview.as_ref().ok_or("Incoming preview is unavailable.")?;
+                    if let Some(right) = candidate_cache.get(&candidate.id) {
+                        return Ok(media::photo_equivalent(left, right));
+                    }
                     let right = media::preview(
                         app,
                         &path,
                         &candidate.media.kind,
                         &candidate.media.metadata,
                     )?;
-                    Ok(media::photo_equivalent(left, &right))
+                    let eq = media::photo_equivalent(left, &right);
+                    if candidate_cache.len() >= 128 {
+                        candidate_cache.clear();
+                    }
+                    candidate_cache.insert(candidate.id.clone(), right);
+                    Ok(eq)
                 })()
             }
         } else {
@@ -522,7 +580,7 @@ fn import_one(
         };
         if equivalent {
             matched = Some((candidate, dominates));
-            break;
+            continue;
         }
         review.push((candidate.id, if protected {
             "Related scene or protected RAW/JPEG/edit/Live Photo variant. Keep both unless you are certain."
@@ -564,13 +622,29 @@ fn import_one(
         item.media.warnings.push("Automatically grouped after full-frame equivalence checks; the higher-resolution copy is active. Original bytes remain in archive undo.".into());
     }
     archive.place(source, item, Some(occurrence(id.clone())), None)?;
+    if !is_lower && let Some(p) = preview {
+        if candidate_cache.len() >= 128 {
+            candidate_cache.clear();
+        }
+        candidate_cache.insert(id.clone(), p);
+    }
     if let Some((old, dominates)) = matched
         && dominates
     {
+        candidate_cache.remove(&old.id);
         archive.move_to_undo(&old.id, &id)?;
+        archive.transfer_reviews(&old.id, &id)?;
+        archive.release_import_path(Path::new(&old.path));
+        if path != wanted && !paths::inside(&archive.root, &wanted)?.exists() {
+            archive.relocate(&id, wanted.clone(), "active", None)?;
+            archive.release_import_path(&path);
+            archive.record_import_path(&wanted);
+        }
     }
-    for (candidate, reason) in review {
-        archive.add_review(&id, &candidate, &reason)?;
+    if !is_lower {
+        for (candidate, reason) in review {
+            archive.add_review(&id, &candidate, &reason)?;
+        }
     }
     Ok(false)
 }

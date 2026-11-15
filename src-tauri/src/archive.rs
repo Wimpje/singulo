@@ -162,6 +162,7 @@ pub struct Archive {
     connection: Connection,
     _lock: File,
     import_names: std::collections::HashMap<PathBuf, std::collections::HashSet<String>>,
+    verified: std::sync::Mutex<std::collections::HashMap<PathBuf, (String, String)>>,
 }
 
 fn json<T: Serialize + ?Sized>(value: &T) -> Result<String> {
@@ -173,6 +174,8 @@ fn parse<T: serde::de::DeserializeOwned>(value: &str) -> Result<T> {
 }
 
 fn copy_new(source: &Path, destination: &Path, expected: &str) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
     let mut input = File::open(source).map_err(|e| e.to_string())?;
     let mut output = OpenOptions::new()
         .write(true)
@@ -184,14 +187,37 @@ fn copy_new(source: &Path, destination: &Path, expected: &str) -> Result<()> {
                 destination.display()
             )
         })?;
-    std::io::copy(&mut input, &mut output).map_err(|e| format!("Copy failed: {e}"))?;
-    output
-        .sync_all()
-        .map_err(|e| format!("Could not flush copied file: {e}"))?;
-    if media::hash(destination)? != expected {
-        return Err("Copied bytes failed verification; the source is untouched.".into());
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 128 * 1024];
+    let copied: Result<String> = (|| {
+        loop {
+            let count = input
+                .read(&mut buffer)
+                .map_err(|e| format!("Copy failed: {e}"))?;
+            if count == 0 {
+                break;
+            }
+            output
+                .write_all(&buffer[..count])
+                .map_err(|e| format!("Copy failed: {e}"))?;
+            digest.update(&buffer[..count]);
+        }
+        output
+            .sync_all()
+            .map_err(|e| format!("Could not flush copied file: {e}"))?;
+        Ok(hex::encode(digest.finalize()))
+    })();
+    match copied {
+        Ok(actual) if actual == expected => Ok(()),
+        Ok(_) => {
+            let _ = fs::remove_file(destination);
+            Err("Copied bytes failed verification; the source is untouched.".into())
+        }
+        Err(error) => {
+            let _ = fs::remove_file(destination);
+            Err(error)
+        }
     }
-    Ok(())
 }
 
 impl Archive {
@@ -199,7 +225,7 @@ impl Archive {
         if !root.is_dir() {
             return Err("Choose an existing destination folder.".into());
         }
-        let root = root.canonicalize().map_err(|e| e.to_string())?;
+        let root = paths::canonical(root)?;
         let private = root.join(".photo-dedupe");
         if private
             .symlink_metadata()
@@ -253,7 +279,7 @@ impl Archive {
             )
             .map_err(|e| e.to_string())?;
         connection.execute_batch(
-            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
              CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, hash TEXT NOT NULL, state TEXT NOT NULL, data TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS item_hash ON items(hash);
@@ -265,6 +291,7 @@ impl Archive {
              CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS occurrence_item ON occurrences(json_extract(data,'$.item'));
+             CREATE INDEX IF NOT EXISTS occurrence_status ON occurrences(json_extract(data,'$.status'));
              CREATE INDEX IF NOT EXISTS companion_child ON companions(child);
              CREATE INDEX IF NOT EXISTS library_order ON items(state,json_extract(data,'$.media.date') DESC,json_extract(data,'$.originalName'));
              CREATE INDEX IF NOT EXISTS library_visible ON items(state,json_extract(data,'$.media.date') DESC,json_extract(data,'$.originalName'))
@@ -303,19 +330,54 @@ impl Archive {
             connection,
             _lock: lock,
             import_names: std::collections::HashMap::new(),
+            verified: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         let version: u32 = archive
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        if version < 2 {
+        if version < 3 {
             archive.transaction(|archive| {
-                for occurrence in archive.occurrences()? {
-                    archive.index_source(&occurrence)?;
+                let rows: Vec<(String, String, Option<String>)> = {
+                    let mut query = archive
+                        .connection
+                        .prepare(
+                            "SELECT o.source, json_extract(o.data,'$.item'), json_extract(i.data,'$.media.metadata')
+                             FROM occurrences o JOIN items i ON i.id=json_extract(o.data,'$.item')",
+                        )
+                        .map_err(|e| e.to_string())?;
+                    query
+                        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                        .map_err(|e| e.to_string())?
+                        .collect::<std::result::Result<_, _>>()
+                        .map_err(|e| e.to_string())?
+                };
+                let mut stmt = archive
+                    .connection
+                    .prepare(
+                        "INSERT INTO source_groups VALUES(?1,?2,?3,?4)
+                         ON CONFLICT(source) DO UPDATE SET item=excluded.item,group_key=excluded.group_key,content_id=excluded.content_id",
+                    )
+                    .map_err(|e| e.to_string())?;
+                for (source, item, raw_meta) in rows {
+                    let meta: serde_json::Value = raw_meta
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or(serde_json::Value::Null);
+                    let content_id =
+                        media::value(&meta, "ContentIdentifier").and_then(|v| v.as_str());
+                    stmt.execute(params![
+                        source,
+                        item,
+                        Self::group_key(Path::new(&source)),
+                        content_id
+                    ])
+                    .map_err(|e| e.to_string())?;
                 }
+                drop(stmt);
                 archive
                     .connection
-                    .execute_batch("PRAGMA user_version=2;")
+                    .execute_batch("PRAGMA user_version=3;")
                     .map_err(|e| e.to_string())?;
                 Ok(())
             })?;
@@ -329,11 +391,36 @@ impl Archive {
         if id != self.id {
             return Err("The destination is no longer the selected archive.".into());
         }
+        self.connection
+            .query_row("SELECT 1", [], |_| Ok(()))
+            .map_err(|e| format!("Catalog connection is unavailable: {e}"))?;
         Ok(())
     }
 
     pub fn begin_import(&mut self) {
         self.import_names.clear();
+    }
+
+    pub fn release_import_path(&mut self, relative: &Path) {
+        if let Ok(target) = paths::inside(&self.root, relative)
+            && let Some(parent) = target.parent()
+            && let Some(name) = relative.file_name()
+            && let Some(names) = self.import_names.get_mut(parent)
+        {
+            names.remove(&name.to_string_lossy().to_lowercase());
+        }
+    }
+
+    pub fn record_import_path(&mut self, relative: &Path) {
+        if let Ok(target) = paths::inside(&self.root, relative)
+            && let Some(parent) = target.parent()
+            && let Some(name) = relative.file_name()
+        {
+            self.import_names
+                .entry(parent.to_path_buf())
+                .or_default()
+                .insert(name.to_string_lossy().to_lowercase());
+        }
     }
 
     pub fn unique_import_path(&mut self, wanted: &Path, id: &str) -> Result<PathBuf> {
@@ -403,19 +490,6 @@ impl Archive {
             .map_err(|e| e.to_string())?;
         self.settings = settings;
         self.backup()
-    }
-
-    pub fn all(&self) -> Result<Vec<Item>> {
-        self.check()?;
-        let mut query = self
-            .connection
-            .prepare("SELECT data FROM items ORDER BY rowid DESC")
-            .map_err(|e| e.to_string())?;
-        let rows = query
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        rows.map(|row| parse(&row.map_err(|e| e.to_string())?))
-            .collect()
     }
 
     pub fn item(&self, id: &str) -> Result<Item> {
@@ -531,7 +605,17 @@ impl Archive {
     }
 
     fn group_key(source: &Path) -> String {
-        source.with_extension("").to_string_lossy().into_owned()
+        let stripped = source.with_extension("");
+        let base = if source
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("xmp"))
+            && media::kind(&stripped).is_some()
+        {
+            stripped.with_extension("")
+        } else {
+            stripped
+        };
+        base.to_string_lossy().to_lowercase()
     }
 
     fn index_source(&self, occurrence: &Occurrence) -> Result<()> {
@@ -553,8 +637,55 @@ impl Archive {
         id.map(|id| self.item(&id)).transpose()
     }
 
+    pub fn verified_file(&self, path: &Path, expected_hash: &str) -> Result<bool> {
+        if !path.is_file() {
+            return Ok(false);
+        }
+        let id = media::identity(path)?;
+        if let Ok(cache) = self.verified.lock()
+            && cache
+                .get(path)
+                .is_some_and(|(cached_id, cached_hash)| cached_id == &id && cached_hash == expected_hash)
+        {
+            return Ok(true);
+        }
+        let actual = media::hash(path)?;
+        if media::identity(path)? == id
+            && let Ok(mut cache) = self.verified.lock()
+        {
+            if cache.len() > 200_000 {
+                cache.clear();
+            }
+            cache.insert(path.to_path_buf(), (id, actual.clone()));
+        }
+        Ok(actual == expected_hash)
+    }
+
+    fn record_verified(&self, path: &Path, hash: &str) {
+        if let Ok(id) = media::identity(path)
+            && let Ok(mut cache) = self.verified.lock()
+        {
+            if cache.len() > 200_000 {
+                cache.clear();
+            }
+            cache.insert(path.to_path_buf(), (id, hash.to_string()));
+        }
+    }
+
     pub fn exact(&self, hash: &str) -> Result<Option<Item>> {
-        let mut query = self.connection.prepare("SELECT data FROM items WHERE hash=?1 AND state!='purged' ORDER BY state='active' DESC")
+        self.exact_inner(hash, false)
+    }
+
+    pub fn exact_cached(&self, hash: &str) -> Result<Option<Item>> {
+        self.exact_inner(hash, true)
+    }
+
+    fn exact_inner(&self, hash: &str, cached: bool) -> Result<Option<Item>> {
+        let mut query = self
+            .connection
+            .prepare_cached(
+                "SELECT data FROM items WHERE hash=?1 AND state!='purged' ORDER BY state='active' DESC",
+            )
             .map_err(|e| e.to_string())?;
         let rows = query
             .query_map([hash], |r| r.get::<_, String>(0))
@@ -562,20 +693,36 @@ impl Archive {
         for row in rows {
             let item: Item = parse(&row.map_err(|e| e.to_string())?)?;
             let path = paths::inside(&self.root, Path::new(&item.path))?;
-            if path.is_file() && media::hash(&path)? == hash {
+            let matches = if cached {
+                self.verified_file(&path, hash)?
+            } else {
+                path.is_file() && media::hash(&path)? == hash
+            };
+            if matches {
+                if !cached {
+                    self.record_verified(&path, hash);
+                }
                 return Ok(Some(item));
             }
         }
         Ok(None)
     }
 
-    pub fn occurrences(&self) -> Result<Vec<Occurrence>> {
+    pub fn occurrence(&self, id: &str) -> Result<Occurrence> {
+        let data: String = self
+            .connection
+            .query_row("SELECT data FROM occurrences WHERE id=?1", [id], |r| r.get(0))
+            .map_err(|e| format!("Source occurrence not found: {e}"))?;
+        parse(&data)
+    }
+
+    fn occurrences_by_status(&self, status: &str) -> Result<Vec<Occurrence>> {
         let mut query = self
             .connection
-            .prepare("SELECT data FROM occurrences")
+            .prepare_cached("SELECT data FROM occurrences WHERE json_extract(data,'$.status')=?1")
             .map_err(|e| e.to_string())?;
         let rows = query
-            .query_map([], |r| r.get::<_, String>(0))
+            .query_map([status], |r| r.get::<_, String>(0))
             .map_err(|e| e.to_string())?;
         rows.map(|row| parse(&row.map_err(|e| e.to_string())?))
             .collect()
@@ -672,7 +819,7 @@ impl Archive {
     }
 
     pub fn companions(&self, id: &str) -> Result<Vec<String>> {
-        let mut query = self.connection.prepare(
+        let mut query = self.connection.prepare_cached(
             "SELECT child FROM companions WHERE owner=?1 UNION SELECT owner FROM companions WHERE child=?1"
         ).map_err(|e| e.to_string())?;
         query
@@ -756,6 +903,22 @@ impl Archive {
         Ok(())
     }
 
+    pub fn transfer_reviews(&mut self, from: &str, to: &str) -> Result<()> {
+        self.connection
+            .execute(
+                "INSERT OR IGNORE INTO reviews
+                 SELECT ?2, candidate, reason FROM reviews WHERE item=?1 AND candidate!=?2
+                 UNION ALL
+                 SELECT item, ?2, reason FROM reviews WHERE candidate=?1 AND item!=?2",
+                params![from, to],
+            )
+            .map_err(|e| e.to_string())?;
+        self.connection
+            .execute("DELETE FROM reviews WHERE item=?1 OR candidate=?1", [from])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn place(
         &mut self,
         source: &Path,
@@ -829,6 +992,7 @@ impl Archive {
             }
             Ok(())
         })?;
+        self.record_verified(&target, &operation.item.media.hash);
         if let Some(old) = &operation.old_path {
             let old = paths::inside(&self.root, Path::new(old))?;
             if old != target && old.exists() {
@@ -838,7 +1002,10 @@ impl Archive {
                         old.display()
                     ));
                 }
-                fs::remove_file(old).map_err(|e| e.to_string())?;
+                fs::remove_file(&old).map_err(|e| e.to_string())?;
+                if let Ok(mut cache) = self.verified.lock() {
+                    cache.remove(&old);
+                }
             }
         }
         if stage.exists() {
@@ -869,7 +1036,18 @@ impl Archive {
                 errors.push(error);
             }
         }
-        for mut occurrence in self.occurrences()? {
+        let staged_occurrences: Vec<Occurrence> = {
+            let mut query = self
+                .connection
+                .prepare("SELECT data FROM occurrences WHERE json_extract(data,'$.status') LIKE 'staged:%'")
+                .map_err(|e| e.to_string())?;
+            let rows = query
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.map(|r| parse(&r.map_err(|e| e.to_string())?))
+                .collect::<Result<Vec<_>>>()?
+        };
+        for mut occurrence in staged_occurrences {
             if let Some(stage) = occurrence.status.strip_prefix("staged:") {
                 let stage = PathBuf::from(stage);
                 if stage.exists() {
@@ -893,13 +1071,25 @@ impl Archive {
                 }
             }
         }
-        for mut item in self.all()? {
-            if item.state == "purge-pending" {
-                let path = paths::inside(&self.root, Path::new(&item.path))?;
-                item.state = if path.exists() { "undo" } else { "purged" }.into();
-                self.store(&item)?;
-                errors.push(format!("Reconciled interrupted archive purge for {}. Retained files require a new confirmation.", item.original_name));
-            }
+        let pending_purges: Vec<Item> = {
+            let mut query = self
+                .connection
+                .prepare("SELECT data FROM items WHERE state='purge-pending'")
+                .map_err(|e| e.to_string())?;
+            let rows = query
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.map(|r| parse(&r.map_err(|e| e.to_string())?))
+                .collect::<Result<Vec<_>>>()?
+        };
+        for mut item in pending_purges {
+            let path = paths::inside(&self.root, Path::new(&item.path))?;
+            item.state = if path.exists() { "undo" } else { "purged" }.into();
+            self.store(&item)?;
+            errors.push(format!(
+                "Reconciled interrupted archive purge for {}. Retained files require a new confirmation.",
+                item.original_name
+            ));
         }
         Ok(errors)
     }
@@ -917,7 +1107,12 @@ impl Archive {
         }
         let source = paths::inside(&self.root, Path::new(&item.path))?;
         let old = item.path.clone();
-        let path = paths::unique(&self.root, &wanted, &Uuid::new_v4().to_string())?;
+        let path = paths::unique_for(
+            &self.root,
+            &wanted,
+            &Uuid::new_v4().to_string(),
+            Some(Path::new(&old)),
+        )?;
         item.path = path.to_string_lossy().replace('\\', "/");
         item.state = state.into();
         item.keeper = keeper;
@@ -930,7 +1125,7 @@ impl Archive {
         }
         let keep = self.item(keeper)?;
         let keep_path = paths::inside(&self.root, Path::new(&keep.path))?;
-        if keep.state != "active" || media::hash(&keep_path)? != keep.media.hash {
+        if keep.state != "active" || !self.verified_file(&keep_path, &keep.media.hash)? {
             return Err("The chosen keeper is not a verified active copy.".into());
         }
         if !self.companions(id)?.is_empty() {
@@ -955,11 +1150,11 @@ impl Archive {
 
     pub fn cleanup_rows(&self) -> Result<Vec<CleanupRow>> {
         self.check()?;
-        self.occurrences()?
+        let mut archive_checked = std::collections::HashMap::<String, bool>::new();
+        self.occurrences_by_status("pending")?
             .into_iter()
-            .filter(|o| o.status == "pending")
             .map(|o| {
-                let check = self.cleanup_check(&o);
+                let check = self.cleanup_check_cached(&o, Some(&mut archive_checked));
                 Ok(CleanupRow {
                     id: o.id,
                     source: o.source,
@@ -973,15 +1168,18 @@ impl Archive {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn cleanup_check(&self, occurrence: &Occurrence) -> Result<()> {
+        self.cleanup_check_cached(occurrence, None)
+    }
+
+    fn cleanup_source_safe(&self, occurrence: &Occurrence) -> Result<()> {
         self.check()?;
         let source = Path::new(&occurrence.source);
-        let root = Path::new(&occurrence.root)
-            .canonicalize()
+        let root = paths::canonical(Path::new(&occurrence.root))
             .map_err(|e| format!("Source root unavailable: {e}"))?;
-        let canonical = source
-            .canonicalize()
-            .map_err(|e| format!("Source unavailable: {e}"))?;
+        let canonical =
+            paths::canonical(source).map_err(|e| format!("Source unavailable: {e}"))?;
         if !canonical.starts_with(&root) || canonical.starts_with(&self.root) {
             return Err("Source identity or selected root is unsafe.".into());
         }
@@ -1003,10 +1201,31 @@ impl Archive {
         if media::identity(source)? != occurrence.identity {
             return Err("Source changed since import.".into());
         }
+        Ok(())
+    }
+
+    fn cleanup_check_cached(
+        &self,
+        occurrence: &Occurrence,
+        archive_checked: Option<&mut std::collections::HashMap<String, bool>>,
+    ) -> Result<()> {
+        self.cleanup_source_safe(occurrence)?;
+        let source = Path::new(&occurrence.source);
         if media::hash(source)? != occurrence.hash {
             return Err("Source content no longer matches the imported original.".into());
         }
-        if self.exact(&occurrence.hash)?.is_none() {
+        let has_exact = match archive_checked {
+            Some(cache) => match cache.get(&occurrence.hash) {
+                Some(&ok) => ok,
+                None => {
+                    let ok = self.exact(&occurrence.hash)?.is_some();
+                    cache.insert(occurrence.hash.clone(), ok);
+                    ok
+                }
+            },
+            None => self.exact(&occurrence.hash)?.is_some(),
+        };
+        if !has_exact {
             return Err("No readable byte-identical archived original remains.".into());
         }
         if media::identity(source)? != occurrence.identity {
@@ -1031,15 +1250,11 @@ impl Archive {
     }
 
     pub fn cleanup_one(&mut self, id: &str) -> Result<PathBuf> {
-        let mut occurrence = self
-            .occurrences()?
-            .into_iter()
-            .find(|o| o.id == id)
-            .ok_or("Source occurrence not found.")?;
+        let mut occurrence = self.occurrence(id)?;
         if occurrence.status != "pending" {
             return Err("Source is not eligible for a new cleanup operation.".into());
         }
-        self.cleanup_check(&occurrence)?;
+        self.cleanup_source_safe(&occurrence)?;
         let source = PathBuf::from(&occurrence.source);
         let parent = source.parent().ok_or("Missing source parent.")?;
         let private = parent.join(format!(".photo-dedupe-cleanup-{}", Uuid::new_v4()));
@@ -1047,8 +1262,12 @@ impl Archive {
         let stage = private.join(source.file_name().ok_or("Missing filename.")?);
         occurrence.status = format!("staged:{}", stage.display());
         self.record_occurrence(&occurrence)?;
-        fs::rename(&source, &stage)
-            .map_err(|e| format!("Source staging failed; it was not trashed: {e}"))?;
+        if let Err(error) = fs::rename(&source, &stage) {
+            occurrence.status = "pending".into();
+            let _ = self.record_occurrence(&occurrence);
+            let _ = fs::remove_dir(&private);
+            return Err(format!("Source staging failed; it was not trashed: {error}"));
+        }
         let validation: Result<()> = (|| {
             if media::identity(&stage)? != occurrence.identity
                 || media::hash(&stage)? != occurrence.hash
@@ -1094,9 +1313,9 @@ impl Archive {
 
     pub fn remove_empty_subfolders(&self, roots: &[PathBuf]) -> Result<Vec<String>> {
         let mut errors = Vec::new();
-        let occurrences = self.occurrences()?;
+        let occurrences = self.occurrences_by_status("trashed")?;
         let mut directories = Vec::new();
-        for occurrence in occurrences.iter().filter(|o| o.status == "trashed") {
+        for occurrence in &occurrences {
             let root = PathBuf::from(&occurrence.root);
             if !roots.contains(&root) {
                 continue;
@@ -1153,13 +1372,33 @@ impl Archive {
         if media::hash(&path)? != item.media.hash {
             return Err("Undo original has changed; refusing to purge it.".into());
         }
-        self.backup()?;
         item.state = "purge-pending".into();
         self.store(&item)?;
-        if let Err(error) = fs::remove_file(path) {
+        if let Err(error) = fs::remove_file(&path) {
             item.state = "undo".into();
             self.store(&item)?;
             return Err(format!("Undo original was not purged: {error}"));
+        }
+        if let Ok(mut cache) = self.verified.lock() {
+            cache.remove(&path);
+        }
+        if let Some(parent) = path.parent()
+            && parent != self.root
+        {
+            let _ = fs::remove_dir(parent);
+        }
+        for cached in [
+            self.root
+                .join(".photo-dedupe/thumbnails")
+                .join(format!("{id}-small.jpg")),
+            self.root
+                .join(".photo-dedupe/thumbnails")
+                .join(format!("{id}-large.jpg")),
+            self.root
+                .join(".photo-dedupe/previews")
+                .join(format!("{id}.mp4")),
+        ] {
+            let _ = fs::remove_file(cached);
         }
         item.state = "purged".into();
         self.store(&item)?;
@@ -1167,48 +1406,217 @@ impl Archive {
     }
 
     pub fn move_preview(&self, ids: &[String]) -> Result<Vec<MoveRow>> {
-        let mut result = Vec::new();
-        let mut planned = std::collections::HashSet::new();
-        let mut ids = ids.to_vec();
-        for id in ids.clone() {
-            for companion in self.companions(&id)? {
-                if self.item(&companion)?.media.kind == "sidecar" && !ids.contains(&companion) {
-                    ids.push(companion);
+        self.check()?;
+        let mut items = Vec::<Item>::new();
+        if ids.is_empty() {
+            let mut query = self
+                .connection
+                .prepare("SELECT data FROM items WHERE state='active' ORDER BY rowid ASC")
+                .map_err(|e| e.to_string())?;
+            let rows = query
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                items.push(parse(&row.map_err(|e| e.to_string())?)?);
+            }
+        } else {
+            let mut seen = std::collections::HashSet::new();
+            let mut queue = ids.to_vec();
+            let mut index = 0;
+            while index < queue.len() {
+                let id = queue[index].clone();
+                index += 1;
+                if !seen.insert(id.clone()) {
+                    continue;
                 }
+                let item = self.item(&id)?;
+                if item.state != "active" {
+                    continue;
+                }
+                for companion in self.companions(&id)? {
+                    if !seen.contains(&companion)
+                        && let Ok(other) = self.item(&companion)
+                        && other.state == "active"
+                        && other.media.kind == "sidecar"
+                    {
+                        queue.push(companion);
+                    }
+                }
+                items.push(item);
             }
         }
-        for id in &ids {
-            let item = self.item(id)?;
-            if item.state != "active" {
-                continue;
+        items.sort_by_key(|item| item.media.kind == "sidecar");
+
+        let mut managed_identities = std::collections::HashSet::new();
+        for item in &items {
+            if let Ok(abs) = paths::inside(&self.root, Path::new(&item.path))
+                && let Ok(fid) = media::identity(&abs)
+            {
+                managed_identities.insert(fid);
             }
-            let wanted = paths::relative(&self.settings, &item.media, &item.original_name)?;
-            if wanted.to_string_lossy().replace('\\', "/") == item.path {
-                continue;
-            }
-            let mut to = paths::unique(&self.root, &wanted, id)?;
-            if !planned.insert(to.to_string_lossy().to_lowercase()) {
-                to = wanted.with_file_name(format!(
-                    "{}__{}",
-                    id,
-                    paths::safe_name(&item.original_name)
-                ));
-                if !planned.insert(to.to_string_lossy().to_lowercase()) {
+        }
+
+        let mut dir_unmanaged =
+            std::collections::HashMap::<PathBuf, std::collections::HashSet<String>>::new();
+        let unmanaged_conflict =
+            |dir_cache: &mut std::collections::HashMap<PathBuf, std::collections::HashSet<String>>,
+             wanted: &Path|
+             -> Result<bool> {
+                let target = paths::inside(&self.root, wanted)?;
+                let parent = target
+                    .parent()
+                    .ok_or("Missing output parent.")?
+                    .to_path_buf();
+                let name = target
+                    .file_name()
+                    .ok_or("Missing filename.")?
+                    .to_string_lossy()
+                    .to_lowercase();
+                if !dir_cache.contains_key(&parent) {
+                    let mut names = std::collections::HashSet::new();
+                    if parent.exists() {
+                        for entry in fs::read_dir(&parent).map_err(|e| e.to_string())? {
+                            let entry = entry.map_err(|e| e.to_string())?;
+                            let occupied = media::identity(&entry.path())
+                                .map(|fid| !managed_identities.contains(&fid))
+                                .unwrap_or(true);
+                            if occupied {
+                                names.insert(entry.file_name().to_string_lossy().to_lowercase());
+                            }
+                        }
+                    }
+                    dir_cache.insert(parent.clone(), names);
+                }
+                Ok(dir_cache
+                    .get(&parent)
+                    .is_some_and(|names| names.contains(&name)))
+            };
+
+        let mut planned = std::collections::HashSet::new();
+        let mut final_paths = std::collections::HashMap::<String, String>::new();
+        let mut result = Vec::new();
+
+        for item in items {
+            let wanted = if item.media.kind == "sidecar" {
+                let owner_target = self.companions(&item.id)?.into_iter().find_map(|cid| {
+                    if let Some(p) = final_paths.get(&cid) {
+                        return Some(p.clone());
+                    }
+                    self.item(&cid)
+                        .ok()
+                        .filter(|o| o.state == "active" && o.media.kind != "sidecar")
+                        .map(|o| o.path)
+                });
+                if let Some(owner_path) = owner_target {
+                    PathBuf::from(owner_path).with_extension("xmp")
+                } else {
+                    paths::relative(&self.settings, &item.media, &item.original_name)?
+                }
+            } else {
+                paths::relative(&self.settings, &item.media, &item.original_name)?
+            };
+
+            let wanted_str = wanted.to_string_lossy().replace('\\', "/");
+            let wanted_key = wanted_str.to_lowercase();
+            let to_path = if !planned.contains(&wanted_key)
+                && !unmanaged_conflict(&mut dir_unmanaged, &wanted)?
+            {
+                wanted
+            } else {
+                let suffixed = paths::suffixed(&wanted, &item.id)?;
+                let suffixed_key = suffixed.to_string_lossy().replace('\\', "/").to_lowercase();
+                if planned.contains(&suffixed_key)
+                    || unmanaged_conflict(&mut dir_unmanaged, &suffixed)?
+                {
                     return Err("Reorganization has an unresolved collision.".into());
                 }
+                suffixed
+            };
+            let to = to_path.to_string_lossy().replace('\\', "/");
+            planned.insert(to.to_lowercase());
+            final_paths.insert(item.id.clone(), to.clone());
+            if to != item.path {
+                result.push(MoveRow {
+                    id: item.id,
+                    from: item.path,
+                    to,
+                });
             }
-            result.push(MoveRow {
-                id: id.clone(),
-                from: item.path,
-                to: to.to_string_lossy().replace('\\', "/"),
-            });
         }
         Ok(result)
     }
 
+    fn execute_moves(
+        &mut self,
+        moves: &[MoveRow],
+        settings_for: impl Fn(&str) -> Result<Settings>,
+    ) -> Result<()> {
+        let mut moving_identities = std::collections::HashSet::new();
+        for row in moves {
+            let item = self.item(&row.id)?;
+            if item.path != row.from {
+                return Err(
+                    "Library changed since the reorganization preview; preview again.".into(),
+                );
+            }
+            let source = paths::inside(&self.root, Path::new(&row.from))?;
+            if media::hash(&source)? != item.media.hash {
+                return Err("Archived original changed since import.".into());
+            }
+            moving_identities.insert(media::identity(&source)?);
+        }
+        let mut parked = std::collections::HashMap::<String, String>::new();
+        for row in moves {
+            let target = paths::inside(&self.root, Path::new(&row.to))?;
+            if target.exists() {
+                let target_id = media::identity(&target).unwrap_or_default();
+                if !moving_identities.contains(&target_id) {
+                    return Err("A target appeared after preview; preview again.".into());
+                }
+            }
+        }
+        // Park any source whose target is currently occupied by a moving item (chains, swaps, or case-only renames).
+        let occupied_targets: std::collections::HashSet<String> = moves
+            .iter()
+            .filter_map(|row| {
+                paths::inside(&self.root, Path::new(&row.to))
+                    .ok()
+                    .filter(|t| t.exists())
+                    .map(|_| row.id.clone())
+            })
+            .collect();
+        if !occupied_targets.is_empty() {
+            for row in moves {
+                let target = paths::inside(&self.root, Path::new(&row.to))?;
+                let from_clash = moves
+                    .iter()
+                    .any(|other| other.to.eq_ignore_ascii_case(&row.from));
+                if target.exists() || from_clash {
+                    let mut item = self.item(&row.id)?;
+                    let source = paths::inside(&self.root, Path::new(&row.from))?;
+                    let temp = format!(".photo-dedupe/staging/reloc-{}-{}", row.id, Uuid::new_v4());
+                    item.path = temp.clone();
+                    self.place(&source, item, None, Some(row.from.clone()))?;
+                    parked.insert(row.id.clone(), temp);
+                }
+            }
+        }
+        for row in moves {
+            let mut item = self.item(&row.id)?;
+            let current_from = parked
+                .get(&row.id)
+                .cloned()
+                .unwrap_or_else(|| row.from.clone());
+            let source = paths::inside(&self.root, Path::new(&current_from))?;
+            item.path = row.to.clone();
+            item.settings = settings_for(&row.id)?;
+            self.place(&source, item, None, Some(current_from))?;
+        }
+        Ok(())
+    }
+
     pub fn reorganize(&mut self, preview: &[MoveRow]) -> Result<()> {
         self.check()?;
-        self.backup()?;
         let manifest = self.root.join(".photo-dedupe/recovery").join(format!(
             "reorganization-{}-{}.json",
             chrono::Utc::now().timestamp_micros(),
@@ -1233,24 +1641,8 @@ impl Archive {
         )
         .map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
-        for row in preview {
-            let mut item = self.item(&row.id)?;
-            if item.path != row.from {
-                return Err(
-                    "Library changed since the reorganization preview; preview again.".into(),
-                );
-            }
-            if paths::inside(&self.root, Path::new(&row.to))?.exists() {
-                return Err("A target appeared after preview; preview again.".into());
-            }
-            let source = paths::inside(&self.root, Path::new(&row.from))?;
-            if media::hash(&source)? != item.media.hash {
-                return Err("Archived original changed since import.".into());
-            }
-            item.path = row.to.clone();
-            item.settings = self.settings.clone();
-            self.place(&source, item, None, Some(row.from.clone()))?;
-        }
+        let target_settings = self.settings.clone();
+        self.execute_moves(preview, |_| Ok(target_settings.clone()))?;
         self.backup()
     }
 
@@ -1280,8 +1672,8 @@ impl Archive {
 
     pub fn rollback_preview(&self) -> Result<Vec<MoveRow>> {
         let (_, record) = self.latest_reorganization()?;
-        let mut result = Vec::new();
-        for row in record.moves.iter().rev() {
+        let mut moving_identities = std::collections::HashSet::new();
+        for row in &record.moves {
             let current = self.item(&row.id)?;
             if current.path == row.from {
                 continue;
@@ -1289,11 +1681,26 @@ impl Archive {
             if current.path != row.to || current.state != "active" {
                 return Err("A reorganized item has changed since the operation. Restore conflicts manually rather than overwriting.".into());
             }
-            if paths::inside(&self.root, Path::new(&row.from))?.exists() {
-                return Err(format!(
-                    "Rollback conflict at {}. Nothing will be overwritten.",
-                    row.from
-                ));
+            let current_abs = paths::inside(&self.root, Path::new(&current.path))?;
+            if let Ok(fid) = media::identity(&current_abs) {
+                moving_identities.insert(fid);
+            }
+        }
+        let mut result = Vec::new();
+        for row in record.moves.iter().rev() {
+            let current = self.item(&row.id)?;
+            if current.path == row.from {
+                continue;
+            }
+            let dest = paths::inside(&self.root, Path::new(&row.from))?;
+            if dest.exists() {
+                let fid = media::identity(&dest).unwrap_or_default();
+                if !moving_identities.contains(&fid) {
+                    return Err(format!(
+                        "Rollback conflict at {}. Nothing will be overwritten.",
+                        row.from
+                    ));
+                }
             }
             result.push(MoveRow {
                 id: row.id.clone(),
@@ -1310,20 +1717,14 @@ impl Archive {
             return Err("Rollback has changed since the preview. Preview again.".into());
         }
         let (path, mut record) = self.latest_reorganization()?;
-        self.backup()?;
-        for row in &expected {
-            let mut item = self.item(&row.id)?;
-            let source = paths::inside(&self.root, Path::new(&row.from))?;
-            item.path = row.to.clone();
-            item.settings = record
-                .originals
+        let originals = record.originals.clone();
+        self.execute_moves(&expected, |id| {
+            originals
                 .iter()
-                .find(|i| i.id == row.id)
-                .ok_or("Missing original layout in recovery manifest.")?
-                .settings
-                .clone();
-            self.place(&source, item, None, Some(row.from.clone()))?;
-        }
+                .find(|i| i.id == id)
+                .map(|i| i.settings.clone())
+                .ok_or_else(|| "Missing original layout in recovery manifest.".into())
+        })?;
         record.undone = true;
         let temporary = path.with_extension("pending");
         let mut file = OpenOptions::new()
@@ -1340,27 +1741,69 @@ impl Archive {
     }
 
     pub fn correct_date(&mut self, id: &str, date: &str) -> Result<()> {
+        let mut visited = std::collections::HashSet::new();
+        self.correct_date_inner(id, date, None, &mut visited)?;
+        self.backup()
+    }
+
+    fn correct_date_inner(
+        &mut self,
+        id: &str,
+        date: &str,
+        owner_path: Option<&str>,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> Result<()> {
+        if !visited.insert(id.to_string()) {
+            return Ok(());
+        }
         let mut item = self.item(id)?;
         if item.state != "active" {
+            if owner_path.is_some() {
+                return Ok(());
+            }
             return Err("Restore this original before correcting its date.".into());
         }
         let selected =
             media::valid_date(date).ok_or("Enter a valid non-default date, not in the future.")?;
+        let full_date = if selected.len() == 10
+            && let Some(suffix) = item
+                .media
+                .date
+                .as_deref()
+                .and_then(|d| d.get(10..))
+                .filter(|s| s.starts_with('T'))
+        {
+            format!("{selected}{suffix}")
+        } else {
+            selected
+        };
         let old = item.path.clone();
         let source = paths::inside(&self.root, Path::new(&old))?;
-        item.media.date = Some(selected);
+        if !source.is_file() {
+            return Err("Archived file is missing on disk.".into());
+        }
+        item.media.date = Some(full_date.clone());
         item.media.date_source = "manual".into();
-        let target = paths::relative(&item.settings, &item.media, &item.original_name)?;
-        item.path = paths::unique(&self.root, &target, id)?
+        let target = if let Some(owner_path) = owner_path {
+            PathBuf::from(owner_path).with_extension("xmp")
+        } else {
+            paths::relative(&item.settings, &item.media, &item.original_name)?
+        };
+        let next = paths::unique_for(&self.root, &target, id, Some(Path::new(&old)))?
             .to_string_lossy()
             .replace('\\', "/");
-        self.place(&source, item, None, Some(old))?;
+        if next == old {
+            self.transaction(|archive| archive.store(&item))?;
+        } else {
+            item.path = next.clone();
+            self.place(&source, item, None, Some(old))?;
+        }
         for companion in self.companions(id)? {
             if self.item(&companion)?.media.kind == "sidecar" {
-                self.correct_date(&companion, date)?;
+                self.correct_date_inner(&companion, &full_date, Some(&next), visited)?;
             }
         }
-        self.backup()
+        Ok(())
     }
 
     pub fn save_job(&self, id: &str, data: &serde_json::Value) -> Result<()> {

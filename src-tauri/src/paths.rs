@@ -122,6 +122,30 @@ pub fn relative(settings: &Settings, media: &Media, original: &str) -> Result<Pa
     Ok(path)
 }
 
+pub fn canonical(path: &Path) -> Result<PathBuf> {
+    let real = path.canonicalize().map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    if let Some(text) = real.to_str()
+        && let Some(stripped) = text.strip_prefix(r"\\?\")
+        && !stripped.starts_with(r"UNC\")
+    {
+        return Ok(PathBuf::from(stripped));
+    }
+    Ok(real)
+}
+
+pub fn suffixed(wanted: &Path, id: &str) -> Result<PathBuf> {
+    let stem = wanted
+        .file_stem()
+        .ok_or("Missing filename stem.")?
+        .to_string_lossy();
+    let ext = wanted
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    Ok(wanted.with_file_name(format!("{stem}__{id}{ext}")))
+}
+
 pub fn inside(root: &Path, relative: &Path) -> Result<PathBuf> {
     if relative
         .components()
@@ -135,11 +159,11 @@ pub fn inside(root: &Path, relative: &Path) -> Result<PathBuf> {
         if path == root {
             break;
         }
-        if path.exists() {
-            let real = path.canonicalize().map_err(|e| e.to_string())?;
-            if !real.starts_with(root) {
-                return Err("An archive path escapes through a symlink.".into());
-            }
+        if path
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Err("An archive path escapes through a symlink.".into());
         }
         parent = path.parent();
     }
@@ -149,7 +173,9 @@ pub fn inside(root: &Path, relative: &Path) -> Result<PathBuf> {
     {
         return Err("Refusing to use a symlink as an archived file.".into());
     }
-    if target.as_os_str().len() > 240 {
+    let text = target.to_string_lossy();
+    let portable = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    if portable.encode_utf16().count() > 240 {
         return Err(format!(
             "Output path is too long for portable Windows support: {}",
             target.display()
@@ -158,8 +184,21 @@ pub fn inside(root: &Path, relative: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
-pub fn unique(root: &Path, wanted: &Path, id: &str) -> Result<PathBuf> {
+pub fn unique_for(
+    root: &Path,
+    wanted: &Path,
+    id: &str,
+    current: Option<&Path>,
+) -> Result<PathBuf> {
     let target = inside(root, wanted)?;
+    let current_id = current
+        .and_then(|rel| inside(root, rel).ok())
+        .and_then(|abs| crate::media::identity(&abs).ok());
+    let is_self = |candidate: &Path| -> bool {
+        current_id
+            .as_ref()
+            .is_some_and(|cid| crate::media::identity(candidate).ok().as_ref() == Some(cid))
+    };
     let parent = target.parent().ok_or("Missing output parent.")?;
     let name = target
         .file_name()
@@ -169,22 +208,17 @@ pub fn unique(root: &Path, wanted: &Path, id: &str) -> Result<PathBuf> {
         && std::fs::read_dir(parent)
             .map_err(|e| e.to_string())?
             .any(|entry| {
-                entry.is_ok_and(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(&name))
+                entry.is_ok_and(|e| {
+                    e.file_name().to_string_lossy().eq_ignore_ascii_case(&name)
+                        && !is_self(&e.path())
+                })
             });
     if !exists {
         return Ok(wanted.to_path_buf());
     }
-    let stem = wanted
-        .file_stem()
-        .ok_or("Missing filename stem.")?
-        .to_string_lossy();
-    let ext = wanted
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
-    let new_name = format!("{stem}__{id}{ext}");
-    let result = wanted.with_file_name(new_name);
-    if inside(root, &result)?.exists() {
+    let result = suffixed(wanted, id)?;
+    let result_target = inside(root, &result)?;
+    if result_target.exists() && !is_self(&result_target) {
         return Err("Collision at the generated unique filename.".into());
     }
     Ok(result)

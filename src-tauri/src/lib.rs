@@ -8,7 +8,6 @@ mod recycle;
 mod tests;
 
 use archive::Archive;
-use base64::Engine;
 use model::*;
 use std::{fs, io::Cursor, path::Path, process::Command, sync::atomic::Ordering};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -39,6 +38,19 @@ async fn read<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
+async fn inspect_exclusive<T: Send + 'static>(
+    app: tauri::AppHandle,
+    action: impl FnOnce(&Archive) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    read(app, move |app| {
+        let state = app.state::<AppState>();
+        let _busy = guard(&state)?;
+        let archive = state.archive.lock().map_err(|e| e.to_string())?;
+        action(archive.as_ref().ok_or("Choose an archive folder first.")?)
+    })
+    .await
+}
+
 async fn change<T: Send + 'static>(
     app: tauri::AppHandle,
     action: impl FnOnce(&mut Archive) -> Result<T> + Send + 'static,
@@ -50,7 +62,9 @@ async fn change<T: Send + 'static>(
             let mut archive = state.archive.lock().map_err(|e| e.to_string())?;
             action(archive.as_mut().ok_or("Choose an archive folder first.")?)
         };
-        app.emit("library-changed", ()).map_err(|e| e.to_string())?;
+        if result.is_ok() {
+            app.emit("library-changed", ()).map_err(|e| e.to_string())?;
+        }
         result
     })
     .await
@@ -94,23 +108,29 @@ async fn open_archive(app: tauri::AppHandle, path: String) -> Result<Snapshot> {
     read(app, move |app| {
         let state = app.state::<AppState>();
         let _busy = guard(&state)?;
-        {
+        let root = {
             let mut slot = state.archive.lock().map_err(|e| e.to_string())?;
-            if slot
-                .as_ref()
-                .is_some_and(|a| a.root == Path::new(&path).canonicalize().unwrap_or_default())
-            {
+            if slot.as_ref().is_some_and(|a| {
+                paths::canonical(Path::new(&path)).ok().as_ref() == Some(&a.root)
+                    && a.check().is_ok()
+            }) {
                 drop(slot);
                 return current_snapshot(app);
             }
+            *slot = None;
             let mut archive = Archive::open(Path::new(&path))?;
             let errors = archive.recover()?;
+            let root = archive.root.clone();
             *state.progress.lock().map_err(|e| e.to_string())? = Progress {
                 errors,
                 ..Progress::default()
             };
             *slot = Some(archive);
-        }
+            root
+        };
+        let scope = app.asset_protocol_scope();
+        let _ = scope.allow_directory(root.join(".photo-dedupe/thumbnails"), false);
+        let _ = scope.allow_directory(root.join(".photo-dedupe/previews"), false);
         let config = app.path().app_config_dir().map_err(|e| e.to_string())?;
         fs::create_dir_all(&config).map_err(|e| e.to_string())?;
         fs::write(config.join("last-archive.txt"), &path).map_err(|e| e.to_string())?;
@@ -213,31 +233,36 @@ async fn preview_image(app: tauri::AppHandle, id: String, large: bool) -> Result
         if item.state == "purged" {
             return Err("This original was purged.".into());
         }
-        let cached = root.join(".photo-dedupe/thumbnails").join(format!(
+        let thumbnails = root.join(".photo-dedupe/thumbnails");
+        let cached = thumbnails.join(format!(
             "{}-{}.jpg",
             item.id,
             if large { "large" } else { "small" }
         ));
-        let bytes = if cached.is_file() {
-            fs::read(cached).map_err(|e| e.to_string())?
-        } else {
+        if !cached.is_file() {
             let path = paths::inside(&root, Path::new(&item.path))?;
-            let image = media::decode(app, &path, &item.media.kind, &item.media.metadata)?;
             let size = if large { 2200 } else { 420 };
+            let image =
+                media::decode_sized(app, &path, &item.media.kind, &item.media.metadata, size)?;
             let mut data = Cursor::new(Vec::new());
             image
                 .thumbnail(size, size)
                 .to_rgb8()
                 .write_to(&mut data, image::ImageFormat::Jpeg)
                 .map_err(|e| e.to_string())?;
-            let bytes = data.into_inner();
-            fs::write(cached, &bytes).map_err(|e| e.to_string())?;
-            bytes
-        };
-        Ok(format!(
-            "data:image/jpeg;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(bytes)
-        ))
+            let pending = thumbnails.join(format!("{}.pending.jpg", uuid::Uuid::new_v4()));
+            fs::write(&pending, data.into_inner()).map_err(|e| e.to_string())?;
+            if let Err(error) = fs::rename(&pending, &cached) {
+                let _ = fs::remove_file(&pending);
+                if !cached.is_file() {
+                    return Err(error.to_string());
+                }
+            }
+        }
+        app.asset_protocol_scope()
+            .allow_file(&cached)
+            .map_err(|e| e.to_string())?;
+        Ok(cached.to_string_lossy().into())
     })
     .await
 }
@@ -246,7 +271,6 @@ async fn preview_image(app: tauri::AppHandle, id: String, large: bool) -> Result
 async fn video_preview(app: tauri::AppHandle, id: String) -> Result<String> {
     read(app, move |app| {
         let state = app.state::<AppState>();
-        let _busy = guard(&state)?;
         let (root, item) = {
             let archive = state.archive.lock().map_err(|e| e.to_string())?;
             let archive = archive.as_ref().ok_or("Choose an archive first.")?;
@@ -256,16 +280,10 @@ async fn video_preview(app: tauri::AppHandle, id: String) -> Result<String> {
         if item.media.kind != "video" || item.state == "purged" {
             return Err("This is not an available video.".into());
         }
-        let cache = root
-            .join(".photo-dedupe/previews")
-            .join(format!("{}.mp4", item.id));
+        let previews = root.join(".photo-dedupe/previews");
+        let cache = previews.join(format!("{}.mp4", item.id));
         if !cache.exists() {
-            let pending = root
-                .join(".photo-dedupe/previews")
-                .join(format!("{}.pending.mp4", item.id));
-            if pending.exists() {
-                fs::remove_file(&pending).map_err(|e| e.to_string())?;
-            }
+            let pending = previews.join(format!("{}.{}.pending.mp4", item.id, uuid::Uuid::new_v4()));
             let mut command = Command::new(media::tool(app, "ffmpeg")?);
             command
                 .args(["-v", "error", "-nostdin", "-i"])
@@ -292,8 +310,16 @@ async fn video_preview(app: tauri::AppHandle, id: String) -> Result<String> {
                     "-y",
                 ])
                 .arg(&pending);
-            media::execute(command, 3600)?;
-            fs::rename(pending, &cache).map_err(|e| e.to_string())?;
+            if let Err(error) = media::execute(command, 3600) {
+                let _ = fs::remove_file(&pending);
+                return Err(error);
+            }
+            if let Err(error) = fs::rename(&pending, &cache) {
+                let _ = fs::remove_file(&pending);
+                if !cache.exists() {
+                    return Err(error.to_string());
+                }
+            }
         }
         app.asset_protocol_scope()
             .allow_file(&cache)
@@ -309,24 +335,26 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
         return Err("Choose at least one source folder.".into());
     }
     let state = app.state::<AppState>();
-    let settings = {
+    let (settings, validated_roots) = {
         let archive = state.archive.lock().map_err(|e| e.to_string())?;
         let archive = archive
             .as_ref()
             .ok_or("Choose an archive folder before importing.")?;
         archive.check()?;
-        archive.settings.clone()
+        let valid = import::validate_roots(&roots, &archive.root)?
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        if valid.is_empty() {
+            return Err("Choose at least one source folder.".into());
+        }
+        (archive.settings.clone(), valid)
     };
     let job = QueuedJob {
         id: uuid::Uuid::new_v4().to_string(),
-        roots,
+        roots: validated_roots,
         settings,
     };
-    {
-        let archive = state.archive.lock().map_err(|e| e.to_string())?;
-        archive.as_ref().ok_or("Archive is not open.")?.save_job(&job.id,
-            &serde_json::json!({"id":job.id,"roots":job.roots,"settings":job.settings,"progress":{"status":"queued"}}))?;
-    }
     let mut queue = state.queue.lock().map_err(|e| e.to_string())?;
     let started = state
         .busy
@@ -335,12 +363,20 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
     if !started && !state.importing.load(Ordering::SeqCst) {
         return Err("Another archive operation is running; add folders after it finishes.".into());
     }
+    if !started && state.cancel.load(Ordering::SeqCst) {
+        return Err("Current import is cancelling; wait a moment before starting another.".into());
+    }
+    {
+        let archive = state.archive.lock().map_err(|e| e.to_string())?;
+        archive.as_ref().ok_or("Archive is not open.")?.save_job(&job.id,
+            &serde_json::json!({"id":job.id,"roots":job.roots,"settings":job.settings,"progress":{"status":"queued"}}))?;
+    }
     queue.push_back(job);
     if !started {
         return Ok(false);
     }
     state.importing.store(true, Ordering::SeqCst);
-    state.cancel.store(false, Ordering::Relaxed);
+    state.cancel.store(false, Ordering::SeqCst);
     state.pause.store(false, Ordering::Relaxed);
     drop(queue);
     let handle = app.clone();
@@ -349,14 +385,34 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
         loop {
             let job = match state.queue.lock() {
                 Ok(mut queue) => {
+                    if state.cancel.load(Ordering::SeqCst) {
+                        let drained: Vec<QueuedJob> = queue.drain(..).collect();
+                        if let Ok(archive) = state.archive.lock()
+                            && let Some(archive) = archive.as_ref()
+                        {
+                            for cancelled in drained {
+                                let _ = archive.save_job(
+                                    &cancelled.id,
+                                    &serde_json::json!({
+                                        "id": cancelled.id,
+                                        "roots": cancelled.roots,
+                                        "settings": cancelled.settings,
+                                        "progress": { "status": "cancelled" }
+                                    }),
+                                );
+                            }
+                        }
+                    }
                     let job = queue.pop_front();
                     if job.is_none() {
+                        state.cancel.store(false, Ordering::SeqCst);
                         state.importing.store(false, Ordering::SeqCst);
                         state.busy.store(false, Ordering::SeqCst);
                     }
                     job
                 }
                 Err(error) => {
+                    state.cancel.store(false, Ordering::SeqCst);
                     state.importing.store(false, Ordering::SeqCst);
                     state.busy.store(false, Ordering::SeqCst);
                     let progress = Progress {
@@ -391,21 +447,6 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
                     eprintln!("Could not publish import failure: {error}");
                 }
             }
-            if state.cancel.load(Ordering::Relaxed) {
-                match state.queue.lock() {
-                    Ok(mut queue) => {
-                        queue.clear();
-                        state.importing.store(false, Ordering::SeqCst);
-                        state.busy.store(false, Ordering::SeqCst);
-                    }
-                    Err(error) => {
-                        state.importing.store(false, Ordering::SeqCst);
-                        state.busy.store(false, Ordering::SeqCst);
-                        eprintln!("Could not cancel queued imports: {error}");
-                    }
-                }
-                break;
-            }
         }
         if let Err(error) = handle.emit("library-changed", ()) {
             eprintln!("Could not publish library update: {error}");
@@ -424,7 +465,7 @@ fn control_import(app: tauri::AppHandle, action: String) -> Result<()> {
         "pause" => state.pause.store(true, Ordering::Relaxed),
         "resume" => state.pause.store(false, Ordering::Relaxed),
         "cancel" => {
-            state.cancel.store(true, Ordering::Relaxed);
+            state.cancel.store(true, Ordering::SeqCst);
             state.pause.store(false, Ordering::Relaxed);
         }
         _ => return Err("Unknown import control.".into()),
@@ -472,6 +513,7 @@ async fn resolve_review(
                 return Err("Choose one of the compared files as keeper.".into());
             };
             archive.move_to_undo(discarded, &keeper)?;
+            archive.transfer_reviews(discarded, &keeper)?;
         }
         archive.dismiss_review(&item, &candidate)?;
         archive.backup()
@@ -495,7 +537,7 @@ async fn purge_item(
 
 #[tauri::command]
 async fn cleanup_preview(app: tauri::AppHandle) -> Result<Vec<CleanupRow>> {
-    change(app, |a| a.cleanup_rows()).await
+    inspect_exclusive(app, |a| a.cleanup_rows()).await
 }
 
 #[tauri::command]
@@ -530,8 +572,12 @@ async fn clean_sources(
 }
 
 #[tauri::command]
-async fn reorganization_preview(app: tauri::AppHandle, ids: Vec<String>) -> Result<Vec<MoveRow>> {
-    change(app, move |a| a.move_preview(&ids)).await
+async fn reorganization_preview(
+    app: tauri::AppHandle,
+    ids: Option<Vec<String>>,
+) -> Result<Vec<MoveRow>> {
+    let ids = ids.unwrap_or_default();
+    inspect_exclusive(app, move |a| a.move_preview(&ids)).await
 }
 
 #[tauri::command]
@@ -548,7 +594,7 @@ async fn reorganize_archive(
 
 #[tauri::command]
 async fn rollback_preview(app: tauri::AppHandle) -> Result<Vec<MoveRow>> {
-    change(app, |a| a.rollback_preview()).await
+    inspect_exclusive(app, |a| a.rollback_preview()).await
 }
 
 #[tauri::command]

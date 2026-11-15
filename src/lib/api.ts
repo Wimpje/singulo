@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 export interface Settings {
   template: string;
@@ -123,14 +123,43 @@ export const bytes = (value: number): string => {
 export const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 let running = 0;
-const waiting: Array<() => void> = [];
-export async function thumbnail(id: string, large: boolean): Promise<string> {
-  if (running >= 2) await new Promise<void>((resolve) => waiting.push(resolve));
+interface QueuedThumb {
+  start: () => void;
+  cancel: () => void;
+}
+const waiting: QueuedThumb[] = [];
+
+export async function thumbnail(id: string, large: boolean, signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  if (running >= 4) {
+    await new Promise<void>((resolve, reject) => {
+      const entry: QueuedThumb = {
+        start: () => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        },
+        cancel: () => reject(new DOMException("Aborted", "AbortError")),
+      };
+      const onAbort = () => {
+        const index = waiting.indexOf(entry);
+        if (index >= 0) waiting.splice(index, 1);
+        entry.cancel();
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (large) waiting.unshift(entry);
+      else waiting.push(entry);
+    });
+  }
+  if (signal?.aborted) {
+    waiting.shift()?.start();
+    throw new DOMException("Aborted", "AbortError");
+  }
   running += 1;
   try {
-    return await api<string>("preview_image", { id, large });
+    const path = await api<string>("preview_image", { id, large });
+    return path.startsWith("data:") ? path : convertFileSrc(path);
   } finally {
     running -= 1;
-    waiting.shift()?.();
+    waiting.shift()?.start();
   }
 }

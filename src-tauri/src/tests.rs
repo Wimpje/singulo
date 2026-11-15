@@ -186,3 +186,127 @@ fn scaled_jpeg_matches_full_decode() {
         &media::Preview::new(&full, 2400, 1600)
     ));
 }
+
+#[test]
+fn reorganize_and_date_correction_handle_collisions_and_preserve_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let s1 = dir.path().join("IMG_1234.CR2");
+    let s2 = dir.path().join("other_IMG_1234.CR2");
+    let xmp = dir.path().join("IMG_1234.CR2.xmp");
+    let target = dir.path().join("archive");
+    fs::create_dir(&target).unwrap();
+    fs::write(&s1, b"photo-one").unwrap();
+    fs::write(&s2, b"photo-two").unwrap();
+    fs::write(&xmp, b"<xmp/>").unwrap();
+    let mut archive = Archive::open(&target).unwrap();
+
+    let h1 = media::hash(&s1).unwrap();
+    let h2 = media::hash(&s2).unwrap();
+    let hx = media::hash(&xmp).unwrap();
+    let first = Item {
+        id: "id-1".into(),
+        path: "2023/07/18/IMG_1234.CR2".into(),
+        original_name: "IMG_1234.CR2".into(),
+        state: "active".into(),
+        keeper: None,
+        media: Media {
+            kind: "raw".into(),
+            ..sample(h1.clone())
+        },
+        settings: Settings::default(),
+        albums: vec![],
+    };
+    let second = Item {
+        id: "id-2".into(),
+        path: "2023/07/18/IMG_1234__id-2.CR2".into(),
+        original_name: "IMG_1234.CR2".into(),
+        state: "active".into(),
+        keeper: None,
+        media: Media {
+            kind: "raw".into(),
+            ..sample(h2)
+        },
+        settings: Settings::default(),
+        albums: vec![],
+    };
+    let sidecar = Item {
+        id: "id-xmp".into(),
+        path: "2023/07/18/IMG_1234.xmp".into(),
+        original_name: "IMG_1234.CR2.xmp".into(),
+        state: "active".into(),
+        keeper: None,
+        media: Media {
+            kind: "sidecar".into(),
+            ..sample(hx.clone())
+        },
+        settings: Settings::default(),
+        albums: vec![],
+    };
+    let root_str = dir.path().canonicalize().unwrap().to_string_lossy().into_owned();
+    archive
+        .place(
+            &s1,
+            first,
+            Some(Occurrence {
+                id: "occ-1".into(),
+                item: "id-1".into(),
+                source: s1.canonicalize().unwrap().to_string_lossy().into(),
+                root: root_str.clone(),
+                album: "Card".into(),
+                relative: "IMG_1234.CR2".into(),
+                hash: h1,
+                identity: media::identity(&s1).unwrap(),
+                status: "pending".into(),
+                bytes: 9,
+            }),
+            None,
+        )
+        .unwrap();
+    archive.place(&s2, second, None, None).unwrap();
+    archive
+        .place(
+            &xmp,
+            sidecar,
+            Some(Occurrence {
+                id: "occ-xmp".into(),
+                item: "id-xmp".into(),
+                source: xmp.canonicalize().unwrap().to_string_lossy().into(),
+                root: root_str,
+                album: "Card".into(),
+                relative: "IMG_1234.CR2.xmp".into(),
+                hash: hx,
+                identity: media::identity(&xmp).unwrap(),
+                status: "pending".into(),
+                bytes: 6,
+            }),
+            None,
+        )
+        .unwrap();
+
+    // .CR2.xmp links to .CR2 companion
+    assert!(archive.companions("id-1").unwrap().contains(&"id-xmp".to_string()));
+    // Reorganize preview with existing __<id> collision is a no-op rather than failing
+    assert!(archive.move_preview(&[]).unwrap().is_empty());
+
+    // Correcting date on same day preserves HH:MM:SS and does not add a self-collision suffix
+    archive.correct_date("id-1", "2023-07-18").unwrap();
+    let updated = archive.item("id-1").unwrap();
+    assert_eq!(updated.path, "2023/07/18/IMG_1234.CR2");
+    assert_eq!(updated.media.date.as_deref(), Some("2023-07-18T14:32:10"));
+
+    // Correcting to a new day moves both photo and sidecar while keeping time-of-day
+    archive.correct_date("id-1", "2023-07-19").unwrap();
+    assert_eq!(archive.item("id-1").unwrap().path, "2023/07/19/IMG_1234.CR2");
+    assert_eq!(archive.item("id-xmp").unwrap().path, "2023/07/19/IMG_1234.xmp");
+    assert_eq!(
+        archive.item("id-1").unwrap().media.date.as_deref(),
+        Some("2023-07-19T14:32:10")
+    );
+
+    // Now id-2 can cleanly take the vacated unsuffixed name on reorganization
+    let moves = archive.move_preview(&[]).unwrap();
+    assert_eq!(moves.len(), 1);
+    assert_eq!(moves[0].to, "2023/07/18/IMG_1234.CR2");
+    archive.reorganize(&moves).unwrap();
+    assert!(archive.move_preview(&[]).unwrap().is_empty());
+}

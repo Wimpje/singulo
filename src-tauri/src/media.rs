@@ -198,11 +198,20 @@ pub fn valid_date(input: &str) -> Option<String> {
     {
         return None;
     }
-    if normalized.len() == 10 {
+    if normalized.len() == 10
+        || matches!(normalized.as_bytes().get(10), Some(b'Z' | b'+' | b'-'))
+    {
         return Some(day.to_string());
     }
-    NaiveDateTime::parse_from_str(normalized.get(..19)?, "%Y-%m-%dT%H:%M:%S")
-        .ok()
+    if let Some(full) = normalized
+        .get(..19)
+        .and_then(|s| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").ok())
+    {
+        return Some(full.format("%Y-%m-%dT%H:%M:%S").to_string());
+    }
+    normalized
+        .get(..16)
+        .and_then(|s| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M").ok())
         .map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string())
 }
 
@@ -278,11 +287,34 @@ pub fn decode(
     kind: &str,
     metadata: &serde_json::Value,
 ) -> Result<DynamicImage> {
+    decode_sized(app, path, kind, metadata, 2200)
+}
+
+pub fn decode_sized(
+    app: &tauri::AppHandle,
+    path: &Path,
+    kind: &str,
+    metadata: &serde_json::Value,
+    min_side: u32,
+) -> Result<DynamicImage> {
     let image = match kind {
-        "photo" => reader(path)?,
+        "photo" => {
+            let jpeg = path.extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg")
+            });
+            if jpeg && let Ok(Some((scaled, _, _))) = scaled_jpeg_min(path, min_side) {
+                scaled
+            } else {
+                reader(path)?
+            }
+        }
         "raw" => {
             let mut command = Command::new(tool(app, "dcraw_emu")?);
-            command.args(["-w", "-T", "-Z", "-"]).arg(path);
+            if min_side <= 1000 {
+                command.args(["-w", "-h", "-T", "-Z", "-"]).arg(path);
+            } else {
+                command.args(["-w", "-T", "-Z", "-"]).arg(path);
+            }
             let bytes = execute(command, 180)?;
             let mut output = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
             output.write_all(&bytes).map_err(|e| e.to_string())?;
@@ -290,22 +322,47 @@ pub fn decode(
         }
         "heic" => {
             let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
-            let output = directory.path().join("decoded.png");
+            let output = directory.path().join("decoded.jpg");
             let mut command = Command::new(tool(app, "heif-convert")?);
             command.arg(path).arg(&output);
             execute(command, 120)?;
-            return reader(&output);
+            if output.is_file() {
+                return reader(&output);
+            }
+            let mut produced = fs::read_dir(directory.path())
+                .map_err(|e| e.to_string())?
+                .filter_map(|entry| entry.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg"))
+                })
+                .collect::<Vec<_>>();
+            produced.sort();
+            let first = produced
+                .first()
+                .ok_or("HEIC decoder produced no readable image.")?;
+            return reader(first);
         }
         "video" => {
             let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
             let output = directory.path().join("frame.jpg");
-            let mut command = Command::new(tool(app, "ffmpeg")?);
-            command
-                .args(["-v", "error", "-nostdin", "-i"])
+            let ffmpeg = tool(app, "ffmpeg")?;
+            let mut seeked = Command::new(&ffmpeg);
+            seeked
+                .args(["-v", "error", "-nostdin", "-ss", "1", "-i"])
                 .arg(path)
                 .args(["-frames:v", "1", "-vf", "scale=960:-2", "-y"])
                 .arg(&output);
-            execute(command, 120)?;
+            let _ = execute(seeked, 120);
+            if !output.is_file() {
+                let mut fallback = Command::new(ffmpeg);
+                fallback
+                    .args(["-v", "error", "-nostdin", "-i"])
+                    .arg(path)
+                    .args(["-frames:v", "1", "-vf", "scale=960:-2", "-y"])
+                    .arg(&output);
+                execute(fallback, 120)?;
+            }
             return reader(&output);
         }
         _ => return Err("Sidecars have no image preview.".into()),
@@ -336,18 +393,26 @@ fn orient(image: DynamicImage, metadata: &serde_json::Value) -> DynamicImage {
 const COMPARE: u32 = 512;
 
 /// Reduced-size decode used for fingerprints and pixel comparison.
+#[derive(Clone)]
 pub struct Preview {
     pub pixels: image::RgbImage,
     pub alpha: bool,
     /// Full-resolution size after orientation.
     pub width: u32,
     pub height: u32,
-    pub signature: String,
+    pub signature: Option<String>,
 }
 
 /// JPEG DCT scaling decodes at 1/2, 1/4 or 1/8 size, which is much cheaper than a full
 /// decode. Returns None for pixel formats the fast path does not handle.
 pub(crate) fn scaled_jpeg(path: &Path) -> Result<Option<(DynamicImage, u32, u32)>> {
+    scaled_jpeg_min(path, COMPARE)
+}
+
+pub(crate) fn scaled_jpeg_min(
+    path: &Path,
+    min_side: u32,
+) -> Result<Option<(DynamicImage, u32, u32)>> {
     let file = std::io::BufReader::new(File::open(path).map_err(|e| e.to_string())?);
     let mut decoder = jpeg_decoder::Decoder::new(file);
     decoder.read_info().map_err(|e| e.to_string())?;
@@ -362,10 +427,10 @@ pub(crate) fn scaled_jpeg(path: &Path) -> Result<Option<(DynamicImage, u32, u32)
         return Ok(None);
     }
     // The decoder picks the smallest scale where *either* side reaches the request, so
-    // request proportionally to keep the short side at or above the comparison size.
+    // request proportionally to keep the short side at or above the requested minimum.
     let short = u32::from(info.width.min(info.height)).max(1);
     let request = |side: u16| {
-        (u32::from(side) * COMPARE)
+        (u32::from(side) * min_side)
             .div_ceil(short)
             .min(u32::from(side)) as u16
     };
@@ -443,14 +508,26 @@ pub fn preview(
     Ok(Preview::new(&image, width, height))
 }
 
+fn pixel_variance(pixels: &image::RgbImage) -> f64 {
+    let raw = pixels.as_raw();
+    if raw.is_empty() {
+        return 0.0;
+    }
+    let mean = raw.iter().map(|&x| x as f64).sum::<f64>() / raw.len() as f64;
+    raw.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / raw.len() as f64
+}
+
 impl Preview {
     pub fn new(image: &DynamicImage, width: u32, height: u32) -> Self {
+        let pixels = image
+            .resize_exact(COMPARE, COMPARE, image::imageops::FilterType::Triangle)
+            .to_rgb8();
+        // Solid/blank frames (e.g. black video intros) all hash to 0 and match unrelated files.
+        let signature = (pixel_variance(&pixels) >= 16.0).then(|| signature(image));
         Self {
             alpha: image.color().has_alpha(),
-            signature: signature(image),
-            pixels: image
-                .resize_exact(COMPARE, COMPARE, image::imageops::FilterType::Triangle)
-                .to_rgb8(),
+            signature,
+            pixels,
             width,
             height,
         }
@@ -474,14 +551,33 @@ pub fn distance(left: &str, right: &str) -> Option<u32> {
     Some((u64::from_str_radix(left, 16).ok()? ^ u64::from_str_radix(right, 16).ok()?).count_ones())
 }
 
+fn normalize_source_key(text: &str) -> String {
+    let replaced = text.replace('\\', "/");
+    let stripped = replaced.strip_prefix("//?/").unwrap_or(&replaced);
+    if cfg!(windows) {
+        stripped.to_lowercase()
+    } else {
+        stripped.to_string()
+    }
+}
+
 pub fn metadata_batch(
     app: &tauri::AppHandle,
     paths: &[PathBuf],
 ) -> Result<std::collections::HashMap<PathBuf, serde_json::Value>> {
+    if paths.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut lookup = std::collections::HashMap::with_capacity(paths.len());
+    for path in paths {
+        lookup.insert(normalize_source_key(&path.to_string_lossy()), path.clone());
+    }
     let mut command = Command::new(tool(app, "exiftool")?);
     command.args([
         "-config",
         "",
+        "-charset",
+        "filename=utf8",
         "-json",
         "-G1",
         "-n",
@@ -507,12 +603,15 @@ pub fn metadata_batch(
     command.args(paths);
     let rows: Vec<serde_json::Value> = serde_json::from_slice(&execute_output(command, 180, true)?)
         .map_err(|e| format!("Invalid metadata batch response: {e}"))?;
-    let mut result = std::collections::HashMap::new();
+    let mut result = std::collections::HashMap::with_capacity(rows.len());
     for row in rows {
         let source = value(&row, "SourceFile")
             .and_then(|v| v.as_str())
             .ok_or("Metadata result has no source filename.")?;
-        result.insert(PathBuf::from(source), row);
+        let key = lookup
+            .remove(&normalize_source_key(source))
+            .unwrap_or_else(|| PathBuf::from(source));
+        result.insert(key, row);
     }
     Ok(result)
 }
@@ -590,7 +689,7 @@ pub fn inspect(
         height,
         hash,
         bytes: stat.len(),
-        signature: preview.as_ref().map(|p| p.signature.clone()),
+        signature: preview.as_ref().and_then(|p| p.signature.clone()),
         metadata,
     };
     Ok((media, preview))
@@ -602,18 +701,17 @@ pub fn photo_equivalent(left: &Preview, right: &Preview) -> bool {
     }
     let (lw, lh) = (left.width, left.height);
     let (rw, rh) = (right.width, right.height);
-    if lh == 0 || rh == 0 || (lw as f64 / lh as f64 - rw as f64 / rh as f64).abs() > 0.001 {
+    if lh == 0 || rh == 0 {
+        return false;
+    }
+    let ratio_a = lw as f64 / lh as f64;
+    let ratio_b = rw as f64 / rh as f64;
+    let rounding_slack = ((ratio_a.max(1.0)) / f64::from(lh.min(rh)) + 0.001).min(0.005);
+    if (ratio_a - ratio_b).abs() > rounding_slack {
         return false;
     }
     let (a, b) = (&left.pixels, &right.pixels);
-    let mean = a.as_raw().iter().map(|&x| x as f64).sum::<f64>() / a.as_raw().len() as f64;
-    let variance = a
-        .as_raw()
-        .iter()
-        .map(|&x| (x as f64 - mean).powi(2))
-        .sum::<f64>()
-        / a.as_raw().len() as f64;
-    if variance < 100.0 {
+    if pixel_variance(a) < 100.0 {
         return false;
     }
     // Require agreement in every tile, not just a low whole-image average.

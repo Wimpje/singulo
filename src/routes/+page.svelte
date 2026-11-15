@@ -46,6 +46,9 @@
   let undoingMoves = $state(false);
   let onTop = $state(true);
   let loaded = $state(false);
+  let lastQuery = "";
+  let searchSeq = 0;
+  let mutating = false;
   const busy = $derived(working || ["scanning", "importing", "paused"].includes(snapshot.progress.status));
   const percent = $derived(snapshot.progress.total ? Math.round(snapshot.progress.done / snapshot.progress.total * 100) : 0);
   const viewerIndex = $derived(selected ? items.findIndex((item) => item.id === selected?.item.id) : -1);
@@ -65,30 +68,58 @@
     finally { working = false; }
   }
 
-  async function refresh() {
+  async function refresh(preservePages = false) {
     snapshot = await api<Snapshot>("snapshot");
     if (snapshot.root) {
       if (mode === "main") {
         [reviews, jobs] = await Promise.all([api<Review[]>("review_list"), api<Job[]>("job_history")]);
       }
-      await loadItems();
+      await loadItems(false, preservePages);
+    } else {
+      items = [];
+      hasMore = false;
     }
   }
 
-  async function loadItems(more = false) {
-    if (!snapshot.root) { items = []; return; }
-    const result = await api<Item[]>("library", { search, filter, offset: more ? items.length : 0 });
-    items = more ? [...items, ...result] : result;
-    hasMore = result.length === 60;
+  async function mutate(action: () => Promise<void>) {
+    mutating = true;
+    try { await action(); }
+    finally { mutating = false; }
+  }
+
+  async function loadItems(more = false, preservePages = false) {
+    if (!snapshot.root) { items = []; hasMore = false; return; }
+    const key = `${search}\0${filter}`;
+    if (more) {
+      const result = await api<Item[]>("library", { search, filter, offset: items.length });
+      items = [...items, ...result];
+      hasMore = result.length === 60;
+      lastQuery = key;
+      return;
+    }
+    const targetCount = preservePages ? Math.max(60, items.length) : 60;
+    const collected: Item[] = [];
+    let moreAvailable = false;
+    for (let offset = 0; offset < targetCount; offset += 60) {
+      const batch = await api<Item[]>("library", { search, filter, offset });
+      collected.push(...batch);
+      moreAvailable = batch.length === 60;
+      if (!moreAvailable) break;
+    }
+    items = collected;
+    hasMore = moreAvailable;
+    lastQuery = key;
   }
 
   async function chooseArchive() {
     await run(async () => {
       const path = await open({ directory: true, multiple: false, title: "Choose the archive destination (a dedicated folder is best)" });
       if (!path) return;
-      snapshot = await api<Snapshot>("open_archive", { path });
-      config = { ...snapshot.settings };
-      await refresh();
+      await mutate(async () => {
+        snapshot = await api<Snapshot>("open_archive", { path });
+        config = { ...snapshot.settings };
+        await refresh();
+      });
       loaded = true;
     });
   }
@@ -153,9 +184,11 @@
     if (!review) return;
     await run(async () => {
       if (keeper && !await confirm("Keep the chosen file active and move the other original into archive undo? Meaningful edits and RAW/JPEG pairs should be kept together.", { title: "Confirm your keeper", kind: "warning" })) return;
-      await api("resolve_review", { ...review, keeper });
-      selected = null; comparing = null; currentReview = null;
-      await refresh();
+      await mutate(async () => {
+        await api("resolve_review", { ...review, keeper });
+        selected = null; comparing = null; currentReview = null;
+        await refresh(true);
+      });
     });
   }
 
@@ -183,22 +216,18 @@
         { title: "Clean up verified sources", kind: "warning" },
       );
       if (!approved) return;
-      cleanupResults = await api<string[]>("clean_sources", { ids: cleanupSelection, confirmed: true, emptyFolders });
-      cleanup = await api<CleanupRow[]>("cleanup_preview");
-      cleanupSelection = [];
-      await refresh();
+      await mutate(async () => {
+        cleanupResults = await api<string[]>("clean_sources", { ids: cleanupSelection, confirmed: true, emptyFolders });
+        cleanup = await api<CleanupRow[]>("cleanup_preview");
+        cleanupSelection = [];
+        await refresh(true);
+      });
     });
   }
 
   async function previewMoves() {
     await run(async () => {
-      const all: Item[] = [];
-      for (let offset = 0; ; offset += 60) {
-        const batch = await api<Item[]>("library", { search: "", filter: "all", offset });
-        all.push(...batch);
-        if (batch.length < 60) break;
-      }
-      moves = await api<MoveRow[]>("reorganization_preview", { ids: all.map((item) => item.id) });
+      moves = await api<MoveRow[]>("reorganization_preview");
       undoingMoves = false;
     });
   }
@@ -206,23 +235,29 @@
   async function applyMoves() {
     await run(async () => {
       if (!moves?.length || !await confirm(`Reorganize ${moves.length} archived files using the saved layout? Sources are untouched. A recovery manifest is saved with the archive.`, { title: "Reorganize archive", kind: "warning" })) return;
-      await api(undoingMoves ? "rollback_archive" : "reorganize_archive", { preview: moves, confirmed: true });
-      moves = null;
-      await refresh();
+      await mutate(async () => {
+        await api(undoingMoves ? "rollback_archive" : "reorganize_archive", { preview: moves, confirmed: true });
+        moves = null;
+        await refresh();
+      });
       notice = undoingMoves ? "Reorganization undone. Original folder history is preserved." : "Archive reorganized. Original folder history is preserved.";
     });
   }
 
   async function restore(item: Item) {
-    await run(async () => { await api("restore_item", { id: item.id }); selected = null; await refresh(); });
+    await run(async () => {
+      await mutate(async () => { await api("restore_item", { id: item.id }); selected = null; await refresh(true); });
+    });
   }
 
   async function purge(item: Item) {
     await run(async () => {
       if (!await confirm(`Permanently delete this archive undo copy: ${item.originalName}?\n\nIt may be the LAST byte-identical original, especially if its source was cleaned up. The better-looking keeper is not an exact backup. This cannot be undone.`, { title: "Permanently purge original", kind: "warning" })) return;
-      await api("purge_item", { id: item.id, acknowledgeOriginalLoss: true });
-      selected = null;
-      await refresh();
+      await mutate(async () => {
+        await api("purge_item", { id: item.id, acknowledgeOriginalLoss: true });
+        selected = null;
+        await refresh(true);
+      });
     });
   }
 
@@ -244,11 +279,18 @@
   $effect(() => {
     const term = search;
     const selectedFilter = filter;
-    if (!loaded || !native) return;
+    const key = `${term}\0${selectedFilter}`;
+    if (!loaded || !native || !snapshot.root || key === lastQuery) return;
+    const seq = ++searchSeq;
     const timer = setTimeout(() => {
       api<Item[]>("library", { search: term, filter: selectedFilter, offset: 0 })
-        .then((value) => { items = value; hasMore = value.length === 60; })
-        .catch((reason: unknown) => { error = message(reason); });
+        .then((value) => {
+          if (seq !== searchSeq) return;
+          lastQuery = key;
+          items = value;
+          hasMore = value.length === 60;
+        })
+        .catch((reason: unknown) => { if (seq === searchSeq) error = message(reason); });
     }, 220);
     return () => clearTimeout(timer);
   });
@@ -274,13 +316,20 @@
         snapshot.progress = event.payload;
       }));
       register(await listen("library-changed", () => {
-        void refresh().catch((reason: unknown) => { error = message(reason); });
+        if (mutating) return;
+        void refresh(true).catch((reason: unknown) => { error = message(reason); });
       }));
       register(await listen<string>("quit-blocked", (event) => { error = event.payload; }));
       snapshot = await api<Snapshot>("snapshot");
       if (!snapshot.root && mode === "main") {
         const path = await api<string | null>("last_archive");
-        if (path) snapshot = await api<Snapshot>("open_archive", { path });
+        if (path) {
+          try {
+            await mutate(async () => { snapshot = await api<Snapshot>("open_archive", { path }); });
+          } catch (reason: unknown) {
+            notice = `Previous archive unavailable (${message(reason)}). Connect the disk or choose a folder.`;
+          }
+        }
       }
       config = { ...snapshot.settings };
       if (mode === "main") tools = await api<ToolStatus[]>("tool_status");
@@ -411,7 +460,7 @@
           <div class="setting-columns"><label>Filenames<select bind:value={config.filenames}><option value="original">Keep original filenames</option><option value="date">Use photo date / time</option></select></label><label>Unknown-date folder<input bind:value={config.unknownFolder} /></label></div>
           <div class="path-preview"><small>YOUR FILES WOULD LOOK LIKE THIS</small>{#each examples as example}<code>{example}</code>{/each}{#if !native}<code>2023/07/18/IMG_1234.jpg</code><code>unknown/undated.jpg</code>{/if}{#if configError}<p class="field-error">{configError}</p>{/if}<p>Name collisions receive a unique suffix. Estimated dates stay marked; missing times aren't invented.</p></div>
           <label class="check-setting"><input type="checkbox" bind:checked={config.automaticMatches} /><span><strong>Automatically group very confident matches</strong><small>Keep a clearly better equivalent copy active. All other originals remain in undo. Ambiguous variants go to review.</small></span></label>
-          <div class="button-row"><button class="primary" disabled={!native || !snapshot.root || busy || !!configError} onclick={() => run(async () => { await api("save_settings", { settings: config }); await refresh(); notice = "Settings saved for future imports. Existing files haven't moved."; })}>Save archive settings</button><button class="text-button" onclick={() => config = { ...defaults }}>Reset defaults</button></div>
+          <div class="button-row"><button class="primary" disabled={!native || !snapshot.root || busy || !!configError} onclick={() => run(async () => { await mutate(async () => { await api("save_settings", { settings: config }); await refresh(true); }); notice = "Settings saved for future imports. Existing files haven't moved."; })}>Save archive settings</button><button class="text-button" onclick={() => config = { ...defaults }}>Reset defaults</button></div>
         </section>
         <section class="next-steps"><div><h3>Apply the saved layout to older imports?</h3><p>Preview existing file moves first. Sources and folder history stay untouched.</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={previewMoves}>Preview reorganization</button></section>
         <button class="text-button" disabled={!native || !snapshot.root || busy} onclick={() => run(async () => { moves = await api<MoveRow[]>("rollback_preview"); undoingMoves = true; })}>Preview undo of last reorganization</button>
@@ -446,7 +495,7 @@
         <div class="modal-bottom"><p>{currentReview?.reason}</p><div class="button-row">{#if videoSource && secondVideoSource}<button class="secondary" onclick={() => run(async () => { if (firstVideo && secondVideo) { firstVideo.currentTime = 0; secondVideo.currentTime = 0; await Promise.all([firstVideo.play(), secondVideo.play()]); } })}>Play both from start</button><button class="secondary" onclick={() => { firstVideo?.pause(); secondVideo?.pause(); }}>Pause both</button>{/if}<button class="secondary" disabled={working} onclick={() => resolve(null)}>Keep both / dismiss match</button></div></div>
       {:else}
         <div class="modal-bottom">
-          {#if selected.item.state === "undo"}<div class="button-row"><button class="primary" disabled={working} onclick={() => selected && restore(selected.item)}>Restore this original</button><button class="danger-button" disabled={working} onclick={() => selected && purge(selected.item)}>Permanently purge undo copy</button></div>{:else}<div class="date-edit"><label>Correct the date<input type="date" bind:value={dateEntry} /></label><button class="secondary" disabled={working || !dateEntry} onclick={() => run(async () => { if (!selected) return; await api("set_date", { id: selected.item.id, date: dateEntry }); closeDetails(); await refresh(); })}>Save date & reorganize this file</button></div>{/if}
+          {#if selected.item.state === "undo"}<div class="button-row"><button class="primary" disabled={working} onclick={() => selected && restore(selected.item)}>Restore this original</button><button class="danger-button" disabled={working} onclick={() => selected && purge(selected.item)}>Permanently purge undo copy</button></div>{:else}<div class="date-edit"><label>Correct the date<input type="date" bind:value={dateEntry} /></label><button class="secondary" disabled={working || !dateEntry} onclick={() => run(async () => { if (!selected) return; const id = selected.item.id; await mutate(async () => { await api("set_date", { id, date: dateEntry }); closeDetails(); await refresh(true); }); })}>Save date & reorganize this file</button></div>{/if}
         </div>
       {/if}
     </dialog>

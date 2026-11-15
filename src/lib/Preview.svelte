@@ -14,20 +14,26 @@
     const target = element;
     source = "";
     error = "";
+    loading = false;
     let active = true;
     let requested = false;
+    const controller = new AbortController();
     const observer = new IntersectionObserver((entries) => {
       if (!entries.some((entry) => entry.isIntersecting) || requested) return;
       requested = true;
       observer.disconnect();
       if (!isTauri()) { error = "Open the desktop app for previews."; return; }
       loading = true;
-      thumbnail(id, size).then((value) => { if (active) source = value; })
-        .catch((reason: unknown) => { if (active) error = message(reason); })
+      thumbnail(id, size, controller.signal)
+        .then((value) => { if (active) source = value; })
+        .catch((reason: unknown) => {
+          if (!active || controller.signal.aborted) return;
+          error = message(reason);
+        })
         .finally(() => { if (active) loading = false; });
     });
     if (target) observer.observe(target);
-    return () => { active = false; observer.disconnect(); };
+    return () => { active = false; controller.abort(); observer.disconnect(); };
   });
 </script>
 
