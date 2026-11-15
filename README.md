@@ -83,6 +83,16 @@ cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
 Five focused Rust tests, not an extensive framework. Manually smoke-test import/re-import, matching, viewing, layout changes/undo, recycling on disposable data, and an interrupted operation.
 
+### App icon
+
+The original stacked-photo artwork is in [static/app-icon.svg](static/app-icon.svg). Native Windows/macOS icons in [src-tauri/icons](src-tauri/icons) and the PNG favicon are generated from it with Tauri's icon command.
+
+```sh
+npm run tauri -- icon static/app-icon.svg --output /path/to/temporary-icons
+```
+
+Copy the generated `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.png`, `icon.icns` and `icon.ico` into `src-tauri/icons`, and `32x32.png` to `static/favicon.png`. Mobile and Windows Store artwork is not needed for the current desktop installers.
+
 ## Offline distribution
 
 Release builds require a complete architecture-matching media bundle; they **never** silently depend on Homebrew or an end-user command-line installation.
