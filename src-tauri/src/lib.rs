@@ -286,6 +286,31 @@ async fn preview_image(app: tauri::AppHandle, id: String, large: bool) -> Result
 }
 
 #[tauri::command]
+async fn video_original(app: tauri::AppHandle, id: String) -> Result<String> {
+    read(app, move |app| {
+        let state = app.state::<AppState>();
+        let (root, item) = {
+            let archive = state.archive.lock().map_err(|e| e.to_string())?;
+            let archive = archive.as_ref().ok_or("Choose an archive first.")?;
+            archive.check()?;
+            (archive.root.clone(), archive.item(&id)?)
+        };
+        if item.media.kind != "video" || item.state == "purged" {
+            return Err("This is not an available video.".into());
+        }
+        let path = paths::inside(&root, Path::new(&item.path))?;
+        if !fs::metadata(&path).map_err(|e| e.to_string())?.is_file() {
+            return Err("The original video is not a file.".into());
+        }
+        app.asset_protocol_scope()
+            .allow_file(&path)
+            .map_err(|e| e.to_string())?;
+        Ok(path.to_string_lossy().into())
+    })
+    .await
+}
+
+#[tauri::command]
 async fn video_preview(app: tauri::AppHandle, id: String) -> Result<String> {
     read(app, move |app| {
         let state = app.state::<AppState>();
@@ -692,6 +717,7 @@ pub fn run() {
             library_months,
             item_details,
             preview_image,
+            video_original,
             video_preview,
             start_import,
             control_import,

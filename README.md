@@ -2,6 +2,8 @@
 
 A small, offline desktop app for organizing pictures and videos. Built with Tauri 2, Rust and Svelte.
 
+The interface is available in English and Dutch. Choose a language on the Settings page; your choice is saved on this computer.
+
 ## Use it
 
 1. Choose a dedicated archive folder, usually on an external disk.
@@ -11,7 +13,11 @@ A small, offline desktop app for organizing pictures and videos. Built with Taur
 
 Keeping one copy moves the other to archive undo. A picture with related RAW/JPEG, sidecar or Live Photo files cannot be moved to undo on its own. If only one picture has related files, you can keep it and move the other to undo. If both have related files, choose **Keep both / dismiss match**; both remain active and the review is cleared.
 
+In comparisons, a file size or pixel count at least twice the other is highlighted. A **Probably better** label appears only when the other available measurement does not favor the other picture. These are hints, not guarantees of image quality; inspect both before deciding.
+
 The library and separate viewer let you choose a year and month (or unknown dates) and show up to 60 thumbnails per page. Search and filters apply across the archive; the year and month choices show matching photos. The separate viewer is browsing-only, without import or settings controls. Click a thumbnail for a large photo, use Previous/Next or the arrow keys to browse across pages within the selected month, and Escape to return to thumbnails. Videos have a Play video button.
+
+Video playback tries the archived original first. If the built-in player cannot play it, the app prepares and caches a playable copy in the background; the original is never changed. Playback support depends on the system and the video's container and codecs.
 
 Imports **copy**, never delete or modify sources. Exact duplicates share one verified archived copy. Conservative visual matching can keep a clearly higher-resolution equivalent active; other original bytes remain in **archive undo** until you explicitly purge them. Resolution and visual comparisons are quality estimates, not a promise of photographic quality.
 
@@ -58,7 +64,7 @@ Interrupted copy/relocation jobs are reconciled on opening. Conflicting/incomple
 | JPEG, PNG, WebP, TIFF, BMP, GIF | Yes | Rust image decoder; animated files need review |
 | HEIC/HEIF, AVIF | Yes | Bundled libheif, subject to decoder support |
 | Camera RAW, including DNG/CR2/CR3/NEF/ARW/RAF | Yes | LibRaw supported-camera list; originals are preserved |
-| MP4/MOV, AVI/MKV/WebM and other recognized videos | Yes | FFmpeg codecs; playback uses a cached proxy |
+| MP4/MOV, AVI/MKV/WebM and other recognized videos | Yes | Direct playback where supported; otherwise a cached FFmpeg proxy |
 | XMP sidecars | Yes | Preserved and associated where identifiable |
 
 Unsupported/corrupt previews are explicitly marked; recognized originals can still be copied and exact-deduplicated. RAW/JPEG and identifiable Live Photo companions are protected from automatic replacement.
@@ -85,7 +91,7 @@ npm test
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 ```
 
-Five focused Rust tests and one JPEG fast-decode check, not an extensive framework. Manually smoke-test import/re-import, matching, viewing, layout changes/undo, recycling on disposable data, and an interrupted operation.
+Focused Rust tests and JavaScript comparison-rule tests are included, but they are not an extensive framework. Manually smoke-test import/re-import, matching, viewing, layout changes/undo, recycling on disposable data, and an interrupted operation.
 
 ### Large collections
 

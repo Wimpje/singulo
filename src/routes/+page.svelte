@@ -5,6 +5,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open, confirm } from "@tauri-apps/plugin-dialog";
   import Preview from "$lib/Preview.svelte";
+  import { comparePictures } from "$lib/comparison";
   import {
     api, bytes, defaults, emptySnapshot, message,
     type Snapshot, type Settings, type Progress, type Item, type Details,
@@ -13,7 +14,247 @@
 
   type Tab = "home" | "library" | "review" | "settings";
   type LibraryMonth = { month: string; count: number };
+  type VideoPlayback = { id: string; request: number; source: string; phase: "opening" | "original" | "converting" | "proxy" };
   const pageSize = 60;
+  type Language = "en" | "nl";
+  const dutch: Record<string, string> = {
+    "Language": "Taal",
+    "Choose the interface language": "Kies de taal van de interface",
+    "Main navigation": "Hoofdnavigatie",
+    "Pictures and videos.": "Foto's en video's.",
+    "YOUR ARCHIVE": "JE ARCHIEF",
+    "Overview": "Overzicht",
+    "Photo library": "Fotobibliotheek",
+    "Similarity review": "Vergelijkbare foto's",
+    "Settings": "Instellingen",
+    "Local. Private. Yours.": "Lokaal. Privé. Van jou.",
+    "Your photos never leave your disks. Importing doesn't change the originals.": "Je foto's verlaten je schijven niet. Importeren verandert de originelen niet.",
+    "Open floating drop window": "Zwevend importvenster openen",
+    "Open separate viewer": "Aparte viewer openen",
+    "Your collection": "Je collectie",
+    "Browse your pictures": "Blader door je foto's",
+    "Review similar pictures": "Vergelijkbare foto's beoordelen",
+    "Archive settings": "Archiefinstellingen",
+    "Working on your archive": "Bezig met je archief",
+    "Offline by design": "Bewust offline",
+    "Desktop preview": "Desktopvoorbeeld",
+    "Folder imports and photo previews work in the Tauri desktop app. Run": "Mappen importeren en foto's bekijken kan in de Tauri-desktopapp. Voer uit:",
+    "to use them.": "om deze functies te gebruiken.",
+    "Choose month": "Kies een maand",
+    "originals copied": "originelen gekopieerd",
+    "exact duplicates skipped": "exacte duplicaten overgeslagen",
+    "idle": "Inactief",
+    "scanning": "Scannen",
+    "importing": "Importeren",
+    "paused": "Gepauzeerd",
+    "complete": "Voltooid",
+    "failed": "Mislukt",
+    "cancelled": "Geannuleerd",
+    "queued": "In wachtrij",
+    "copied": "gekopieerd",
+    "exact duplicates": "exacte duplicaten",
+    "estimated": "geschat",
+    "Holiday Germany": "Vakantie Duitsland",
+    "Dismiss": "Sluiten",
+    "Choose the archive destination (a dedicated folder is best)": "Kies de locatie voor het archief (een aparte map is het beste)",
+    "Choose an archive destination first.": "Kies eerst een archieflocatie.",
+    "Choose photo folders to copy": "Kies fotomappen om te kopiëren",
+    "Folders added. Originals stay untouched during import.": "Mappen toegevoegd. Originelen blijven ongewijzigd tijdens het importeren.",
+    "Folders queued after the current import.": "Mappen worden na de huidige import verwerkt.",
+    "The photo list changed. Refresh the library and try again.": "De fotolijst is gewijzigd. Vernieuw de bibliotheek en probeer het opnieuw.",
+    "All similar matches have been reviewed.": "Alle vergelijkbare foto's zijn beoordeeld.",
+    "Select at least one eligible file.": "Selecteer ten minste één geschikt bestand.",
+    "Reorganization undone. Original folder history is preserved.": "Archiefindeling hersteld. De oorspronkelijke mapgeschiedenis is behouden.",
+    "Archive reorganized. Original folder history is preserved.": "Archief opnieuw ingedeeld. De oorspronkelijke mapgeschiedenis is behouden.",
+    "Settings saved for future imports. Existing files haven't moved.": "Instellingen opgeslagen voor toekomstige imports. Bestaande bestanden zijn niet verplaatst.",
+    "Year": "Jaar",
+    "Choose year": "Kies een jaar",
+    "Unknown date": "Onbekende datum",
+    "Month": "Maand",
+    "pictures and videos": "foto's en video's",
+    "Previous page": "Vorige pagina",
+    "Page": "Pagina",
+    "of": "van",
+    "Next page": "Volgende pagina",
+    "Drop to copy safely": "Laat los om veilig te kopiëren",
+    "Drop photo folders here": "Sleep fotomappen hierheen",
+    "Choose an archive first": "Kies eerst een archief",
+    "Originals kept safe": "Originelen blijven veilig",
+    "Open app": "App openen",
+    "Always on top": "Altijd op voorgrond",
+    "Photo Archive Viewer": "Fotoarchiefviewer",
+    "No archive open": "Geen archief geopend",
+    "Open main app": "Hoofdapp openen",
+    "Photo previews are available in the desktop app.": "Fotovoorbeelden zijn beschikbaar in de desktopapp.",
+    "Back to thumbnails": "Terug naar miniaturen",
+    "Previous": "Vorige",
+    "Next": "Volgende",
+    "This video proxy could not be played. Check the bundled media tools.": "Deze videovoorvertoning kan niet worden afgespeeld. Controleer de meegeleverde mediaprogramma's.",
+    "Date unknown": "Onbekende datum",
+    "Play video": "Video afspelen",
+    "Opening video...": "Video openen...",
+    "Preparing a playable copy...": "Een afspeelbare kopie voorbereiden...",
+    "This video could not be played, even with a playable copy.": "Deze video kan ook met een afspeelbare kopie niet worden afgespeeld.",
+    "Arrow keys to browse / Escape for thumbnails": "Pijltjestoetsen om te bladeren / Escape voor miniaturen",
+    "Photo information": "Foto-informatie",
+    "Search pictures and original folders": "Zoek foto's en oorspronkelijke mappen",
+    "Search pictures, dates or original folders...": "Zoek foto's, datums of oorspronkelijke mappen...",
+    "Filter viewer": "Viewer filteren",
+    "Filter library": "Bibliotheek filteren",
+    "All pictures and videos": "Alle foto's en video's",
+    "Videos": "Video's",
+    "Unknown dates": "Onbekende datums",
+    "Estimated dates": "Geschatte datums",
+    "Retained undo copies": "Bewaarde herstelkopieën",
+    "No pictures to show yet.": "Er zijn nog geen foto's om te tonen.",
+    "Open your archive in the main app.": "Open je archief in de hoofdapp.",
+    "No matching pictures. Try another search.": "Geen overeenkomende foto's. Probeer een andere zoekopdracht.",
+    "Imported pictures and videos will appear here.": "Geïmporteerde foto's en video's verschijnen hier.",
+    "PICTURE ARCHIVE": "FOTOARCHIEF",
+    "Organize your pictures.": "Orden je foto's.",
+    "Bring scattered folders together. We'll organize the dates": "Breng verspreide mappen samen. Wij orden de datums",
+    "and help you keep the best copies.": "en helpen je de beste kopieën te bewaren.",
+    "import/recovery issue(s) need attention": "import-/herstelprobleem(en) vragen aandacht",
+    "PICTURES AND VIDEOS": "FOTO'S EN VIDEO'S",
+    "in your archive": "in je archief",
+    "ARCHIVE SIZE": "ARCHIEFGROOTTE",
+    "verified original files": "geverifieerde originele bestanden",
+    "SAFELY RETAINED": "VEILIG BEWAARD",
+    "undo copies": "herstelkopieën",
+    "ARCHIVE DESTINATION": "ARCHIEFLOCATIE",
+    "Choose a folder on your external disk": "Kies een map op je externe schijf",
+    "Photos stay as ordinary files, with original folder history.": "Foto's blijven gewone bestanden, met behoud van de oorspronkelijke mapgeschiedenis.",
+    "A dedicated archive folder keeps things tidy.": "Met een aparte archiefmap blijft alles overzichtelijk.",
+    "Change": "Wijzigen",
+    "Choose folder": "Map kiezen",
+    "Ready. Drop your folders.": "Klaar. Sleep je mappen hierheen.",
+    "Or click to choose folders from your computer.": "Of klik om mappen op je computer te kiezen.",
+    "Choose source folders": "Bronmappen kiezen",
+    "PHOTOS, RAW FILES & VIDEOS": "FOTO'S, RAW-BESTANDEN & VIDEO'S",
+    "COPIED, NEVER MOVED DURING IMPORT": "GEKOPIEERD, NOOIT VERPLAATST TIJDENS IMPORT",
+    "files": "bestanden",
+    "Resume": "Hervatten",
+    "Pause": "Pauzeren",
+    "Cancel import": "Import annuleren",
+    "Clean up old pictures?": "Oude fotos opruimen?",
+    "Once copies are verified, review source files for cleanup.": "Check de kopieën eerst, dan kunnen de bronbestanden worden opgeruimd.",
+    "Nothing leaves your source folders without your say-so.": "Er wordt niets uit je bronmappen verwijderd zonder jouw toestemming.",
+    "Review source cleanup": "Bronbestanden opschonen",
+    "Recent imports": "Recente imports",
+    "Original folder names stay searchable": "Oorspronkelijke mapnamen blijven doorzoekbaar",
+    "Retry folders": "Mappen opnieuw proberen",
+    "PICTURE LIBRARY": "FOTOBIBLIOTHEEK",
+    "Your picture library.": "Je fotobibliotheek.",
+    "Search a date, a filename, or an original folder like \"Holiday Germany\".": "Zoek op datum, bestandsnaam of oorspronkelijke map, zoals \"Vakantie Duitsland\".",
+    "Add folders +": "Mappen toevoegen +",
+    "Search pictures or original folders...": "Zoek foto's of oorspronkelijke mappen...",
+    "Your pictures will appear here.": "Je foto's verschijnen hier.",
+    "Start with an archive folder.": "Begin met een archiefmap.",
+    "No matches. Try another filename, date or original folder.": "Geen resultaten. Probeer een andere bestandsnaam, datum of oorspronkelijke map.",
+    "Import folders from the overview to fill your library.": "Importeer mappen via het overzicht om je bibliotheek te vullen.",
+    "Go to overview": "Naar overzicht",
+    "SIMILAR DOESN'T ALWAYS MEAN THE SAME": "GELIJKEND IS NIET ALTIJD HETZELFDE",
+    "A second look.": "Nog eens goed kijken.",
+    "Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.": "Vergelijk onzekere overeenkomsten. Bewerkingen, reeksen en RAW/JPEG-paren mogen naast elkaar blijven.",
+    "to review": "te beoordelen",
+    "Review next match": "Volgende overeenkomst beoordelen",
+    "Skip confirmation when keeping a copy": "Bevestiging overslaan bij bewaren van een kopie",
+    "Applies on this computer. The other original still goes to archive undo.": "Geldt op deze computer. Het andere origineel gaat nog steeds naar de herstelmap van het archief.",
+    "Compare similar pictures": "Vergelijkbare foto's vergelijken",
+    "Two similar pictures": "Twee vergelijkbare foto's",
+    "Compare files": "Bestanden vergelijken",
+    "Nothing needs a second look.": "Er hoeft niets opnieuw bekeken te worden.",
+    "Uncertain matches will appear here. Exact duplicates are handled automatically.": "Onzekere overeenkomsten verschijnen hier. Exacte duplicaten worden automatisch verwerkt.",
+    "SIMPLE SETTINGS, YOUR WAY": "EENVOUDIGE INSTELLINGEN, ZOALS JIJ WILT",
+    "A place for everything.": "Een plek voor alles.",
+    "Archive settings travel with your disk. Changes apply to future imports.": "Archiefinstellingen reizen mee met je schijf. Wijzigingen gelden voor toekomstige imports.",
+    "Folder organization": "Mapindeling",
+    "Choose a layout": "Kies een indeling",
+    "Year / month / day": "Jaar / maand / dag",
+    "Year / month": "Jaar / maand",
+    "Date folders": "Datumsmappen",
+    "Photos & videos / year / month / day": "Foto's & video's / jaar / maand / dag",
+    "Custom layout": "Aangepaste indeling",
+    "Advanced folder template": "Geavanceerd mapsjabloon",
+    "Template": "Sjabloon",
+    "Supported:": "Ondersteund:",
+    "Safe literal folder names are welcome.": "Je kunt ook gewone mapnamen gebruiken.",
+    "Filenames": "Bestandsnamen",
+    "Keep original filenames": "Oorspronkelijke bestandsnamen behouden",
+    "Use photo date / time": "Foto- en tijdstip gebruiken",
+    "Unknown-date folder": "Map voor onbekende datums",
+    "YOUR FILES WOULD LOOK LIKE THIS": "ZO ZIEN JE BESTANDEN ERUIT",
+    "Name collisions receive a unique suffix. Estimated dates stay marked; missing times aren't invented.": "Bij gelijke namen wordt een unieke toevoeging gebruikt. Geschatte datums blijven gemarkeerd; ontbrekende tijden worden niet verzonnen.",
+    "Automatically group very confident matches": "Zeer zekere overeenkomsten automatisch groeperen",
+    "Keep a clearly better equivalent copy active. All other originals remain in undo. Ambiguous variants go to review.": "Bewaar de duidelijk betere, gelijkwaardige kopie actief. Alle andere originelen blijven herstelbaar. Twijfelgevallen worden ter beoordeling aangeboden.",
+    "Save archive settings": "Archiefinstellingen opslaan",
+    "Reset defaults": "Standaardwaarden herstellen",
+    "Apply the saved layout to older imports?": "Opgeslagen indeling toepassen op eerdere imports?",
+    "Preview existing file moves first. Sources and folder history stay untouched.": "Bekijk eerst welke bestaande bestanden worden verplaatst. Bronnen en mapgeschiedenis blijven ongewijzigd.",
+    "Preview reorganization": "Herindeling bekijken",
+    "Preview undo of last reorganization": "Laatste herindeling ongedaan maken (voorbeeld)",
+    "Media tools": "Mediaprogramma's",
+    "RAW and video formats depend on the bundled decoders. Unsupported originals can still be archived without a preview.": "RAW- en videoformaten zijn afhankelijk van de meegeleverde decoders. Niet-ondersteunde originelen kunnen zonder voorbeeld worden gearchiveerd.",
+    "Available": "Beschikbaar",
+    "Sources stay safe until you explicitly clean them up.": "Bronbestanden blijven veilig totdat je ze zelf opschoont.",
+    "COMPARE THE ORIGINALS": "VERGELIJK DE ORIGINELEN",
+    "PICTURE DETAILS": "FOTODETAILS",
+    "Which copy would you keep?": "Welke kopie wil je bewaren?",
+    "Close": "Sluiten",
+    "Keep this copy active": "Deze kopie bewaren",
+    "Unavailable because the other picture has related files and cannot be moved to undo on its own.": "Niet beschikbaar: de andere foto heeft bijbehorende bestanden en kan niet afzonderlijk naar de herstelmap worden verplaatst.",
+    "Keep both / dismiss match": "Beide bewaren / overeenkomst negeren",
+    "Keeping one picture moves the other to archive undo. Keep both / dismiss match leaves both active and clears this review.": "Als je één foto bewaart, gaat de andere naar de herstelmap. Met beide bewaren / overeenkomst negeren blijven ze allebei actief en wordt deze beoordeling afgesloten.",
+    "Highlighted measurements are at least twice as large. File size and pixel count do not guarantee better quality; compare the originals before choosing.": "Gemarkeerde waarden zijn minstens twee keer zo hoog. Bestandsgrootte en aantal pixels garanderen geen betere kwaliteit; vergelijk de originelen voordat je kiest.",
+    "Resolution and file size favor different pictures, so neither is recommended.": "Resolutie en bestandsgrootte wijzen elk een andere foto aan; er wordt geen voorkeur gegeven.",
+    "Both pictures have related files and cannot be moved to undo on their own. Choose Keep both / dismiss match to finish this review without moving either picture.": "Beide foto's hebben bijbehorende bestanden en kunnen niet afzonderlijk naar de herstelmap. Kies Beide bewaren / overeenkomst negeren om deze beoordeling af te sluiten zonder foto's te verplaatsen.",
+    "The picture with related files cannot be moved to undo on its own. To move the other picture to undo, choose Keep this copy active for the picture with related files. Or choose Keep both / dismiss match.": "De foto met bijbehorende bestanden kan niet afzonderlijk naar de herstelmap. Kies Deze kopie bewaren bij die foto om de andere te verplaatsen. Of kies Beide bewaren / overeenkomst negeren.",
+    "This video proxy could not be played. Check the bundled decoder/encoder.": "Deze videovoorvertoning kan niet worden afgespeeld. Controleer de meegeleverde decoder/encoder.",
+    "The comparison video could not be played.": "De vergelijkingsvideo kan niet worden afgespeeld.",
+    "Prepare playable video preview": "Videovoorvertoning voorbereiden",
+    "Probably better": "Waarschijnlijk beter",
+    "at least 2x pixels": "minstens 2x zoveel pixels",
+    "at least 2x size": "minstens 2x zo groot",
+    "Related RAW/JPEG, sidecar or Live Photo files detected. This picture cannot be moved to archive undo on its own.": "Bijbehorende RAW/JPEG-, sidecar- of Live Photo-bestanden gevonden. Deze foto kan niet afzonderlijk naar de herstelmap worden verplaatst.",
+    "Original folders & import history": "Oorspronkelijke mappen en importgeschiedenis",
+    "Cleanup recovery needed": "Herstel van opschoning nodig",
+    "Source moved to OS trash": "Bron naar de prullenmand verplaatst",
+    "Source retained": "Bron behouden",
+    "Metadata & quality notes": "Metadata en kwaliteitsnotities",
+    "Play both from start": "Beide vanaf het begin afspelen",
+    "Pause both": "Beide pauzeren",
+    "Restore this original": "Dit origineel herstellen",
+    "Permanently purge undo copy": "Herstelkopie definitief verwijderen",
+    "Correct the date": "Datum corrigeren",
+    "Save date & reorganize this file": "Datum opslaan en dit bestand herindelen",
+    "Source cleanup preview": "Voorbeeld bronbestanden opschonen",
+    "EXPLICITLY VERIFIED, NEVER AUTOMATIC": "EXPLICIET GECONTROLEERD, NOOIT AUTOMATISCH",
+    "Clean up source folders.": "Bronmappen opschonen.",
+    "Only byte-identical archived originals qualify. Cleanup may leave one copy. Trash usually needs emptying before space is freed.": "Alleen byte-identieke originelen in het archief komen in aanmerking. Na opschoning kan één kopie overblijven. Leeg de prullenmand om schijfruimte vrij te maken.",
+    "No pending imported sources to clean up.": "Er zijn geen geïmporteerde bronbestanden om op te schonen.",
+    "Also remove genuinely empty imported subfolders": "Echt lege geïmporteerde submappen ook verwijderen",
+    "No recursive deletion. Dropped roots, hidden files and nonempty folders remain.": "Geen recursieve verwijdering. Bronmappen, verborgen bestanden en niet-lege mappen blijven behouden.",
+    "selected": "geselecteerd",
+    "to trash": "naar de prullenmand",
+    "Confirm cleanup...": "Opschonen bevestigen...",
+    "Archive reorganization preview": "Voorbeeld archiefherindeling",
+    "PREVIEW BEFORE MOVING": "BEKIJKEN VOORDAT JE VERPLAATST",
+    "Reorganize your archive.": "Je archief herindelen.",
+    "Only managed active files move. Originals, undo copies and original-folder albums stay intact.": "Alleen actieve archiefbestanden worden verplaatst. Originelen, herstelkopieën en albums met oorspronkelijke mappen blijven intact.",
+    "becomes": "wordt",
+    "Everything already follows the saved layout.": "Alles volgt al de opgeslagen indeling.",
+    "file(s) to reorganize": "bestand(en) opnieuw in te delen",
+    "Confirm reorganization...": "Herindeling bevestigen...",
+    "Confirm your keeper": "Bevestig welke kopie je bewaart",
+    "Keep the chosen file active and move the other original into archive undo? Meaningful edits and RAW/JPEG pairs should be kept together.": "Het gekozen bestand actief houden en het andere origineel naar de herstelmap verplaatsen? Bewerkingen en RAW/JPEG-paren horen bij elkaar.",
+    "Clean up verified sources": "Geverifieerde bronbestanden opschonen",
+    "Reorganize archive": "Archief herindelen",
+    "Permanently purge original": "Origineel definitief verwijderen",
+    "Previous archive unavailable": "Vorig archief niet beschikbaar",
+    "Connect the disk or choose a folder.": "Sluit de schijf aan of kies een map.",
+  };
+  let language = $state<Language>("en");
+  const t = (text: string) => language === "nl" ? dutch[text] ?? text : text;
   let native = $state(false);
   let mode = $state("main");
   let tab = $state<Tab>("home");
@@ -40,8 +281,8 @@
   let currentReview = $state<Review | null>(null);
   let skipKeeperConfirmation = $state(false);
   let dateEntry = $state("");
-  let videoSource = $state("");
-  let secondVideoSource = $state("");
+  let videos = $state<(VideoPlayback | null)[]>([null, null]);
+  let videoRequest = 0;
   let firstVideo = $state<HTMLVideoElement>();
   let secondVideo = $state<HTMLVideoElement>();
   let cleanup = $state<CleanupRow[] | null>(null);
@@ -58,6 +299,7 @@
   const busy = $derived(working || ["scanning", "importing", "paused"].includes(snapshot.progress.status));
   const percent = $derived(snapshot.progress.total ? Math.round(snapshot.progress.done / snapshot.progress.total * 100) : 0);
   const viewerIndex = $derived(selected ? items.findIndex((item) => item.id === selected?.item.id) : -1);
+  const pictureComparison = $derived(selected && comparing ? comparePictures(selected.item.media, comparing.item.media) : null);
   const monthCount = $derived(months.find((entry) => entry.month === month)?.count ?? 0);
   const years = $derived([...new Set(months.map((entry) => entry.month === "unknown" ? "unknown" : entry.month.slice(0, 4)))]);
   const year = $derived(month === "unknown" ? "unknown" : month.slice(0, 4));
@@ -67,6 +309,19 @@
     ["{yyyy}-{mm}-{dd}", "Date folders"],
     ["{media_type}/{yyyy}/{mm}/{dd}", "Photos & videos / year / month / day"],
   ];
+
+  $effect(() => {
+    document.documentElement.lang = language;
+  });
+
+  function changeLanguage(event: Event) {
+    language = (event.currentTarget as HTMLSelectElement).value === "nl" ? "nl" : "en";
+    window.localStorage.setItem("photo-dedupe.language", language);
+  }
+
+  function syncLanguage(event: StorageEvent) {
+    if (event.key === "photo-dedupe.language") language = event.newValue === "nl" ? "nl" : "en";
+  }
 
   async function run(action: () => Promise<void>) {
     working = true;
@@ -148,7 +403,7 @@
 
   async function chooseArchive() {
     await run(async () => {
-      const path = await open({ directory: true, multiple: false, title: "Choose the archive destination (a dedicated folder is best)" });
+      const path = await open({ directory: true, multiple: false, title: t("Choose the archive destination (a dedicated folder is best)") });
       if (!path) return;
       await mutate(async () => {
         snapshot = await api<Snapshot>("open_archive", { path });
@@ -161,12 +416,12 @@
 
   async function importFolders(paths?: string[]) {
     await run(async () => {
-      if (!snapshot.root) throw new Error("Choose an archive destination first.");
-      const folders = paths ?? await open({ directory: true, multiple: true, title: "Choose photo folders to copy" });
+      if (!snapshot.root) throw new Error(t("Choose an archive destination first."));
+      const folders = paths ?? await open({ directory: true, multiple: true, title: t("Choose photo folders to copy") });
       if (!folders) return;
       const started = await api<boolean>("start_import", { roots: typeof folders === "string" ? [folders] : folders });
       if (started) snapshot.progress = { ...snapshot.progress, status: "scanning", done: 0, total: 0, errors: [] };
-      notice = started ? "Folders added. Originals stay untouched during import." : "Folders queued after the current import.";
+      notice = started ? t("Folders added. Originals stay untouched during import.") : t("Folders queued after the current import.");
     });
   }
 
@@ -176,8 +431,7 @@
       comparing = null;
       currentReview = null;
       dateEntry = selected.item.media.date?.slice(0, 10) ?? "";
-      videoSource = "";
-      secondVideoSource = "";
+      resetVideos();
     });
   }
 
@@ -191,15 +445,14 @@
       const nextItems = nextPage === page ? items
         : await api<Item[]>("library", { search, filter, month, offset: nextPage * pageSize });
       const item = nextItems[absoluteIndex % pageSize];
-      if (!item) throw new Error("The photo list changed. Refresh the library and try again.");
+      if (!item) throw new Error(t("The photo list changed. Refresh the library and try again."));
       const detail = await api<Details>("item_details", { id: item.id });
       if (seq !== searchSeq) return;
       items = nextItems;
       page = nextPage;
       selected = detail;
       dateEntry = detail.item.media.date?.slice(0, 10) ?? "";
-      videoSource = "";
-      secondVideoSource = "";
+      resetVideos();
     });
   }
 
@@ -223,8 +476,7 @@
       api<Details>("item_details", { id: review.candidate }),
     ]);
     currentReview = review;
-    videoSource = "";
-    secondVideoSource = "";
+    resetVideos();
   }
 
   async function compare(review: Review) {
@@ -235,13 +487,13 @@
     const review = currentReview;
     if (!review) return;
     await run(async () => {
-      if (keeper && !skipKeeperConfirmation && !await confirm("Keep the chosen file active and move the other original into archive undo? Meaningful edits and RAW/JPEG pairs should be kept together.", { title: "Confirm your keeper", kind: "warning" })) return;
+      if (keeper && !skipKeeperConfirmation && !await confirm(t("Keep the chosen file active and move the other original into archive undo? Meaningful edits and RAW/JPEG pairs should be kept together."), { title: t("Confirm your keeper"), kind: "warning" })) return;
       await mutate(async () => {
         await api("resolve_review", { item: review.item, candidate: review.candidate, keeper });
-        selected = null; comparing = null; currentReview = null;
+        closeDetails();
         await refresh(true);
         if (reviews.length) await loadComparison(reviews[0]);
-        else notice = "All similar matches have been reviewed.";
+        else notice = t("All similar matches have been reviewed.");
       });
     });
   }
@@ -250,12 +502,48 @@
     window.localStorage.setItem("photo-dedupe.skipKeeperConfirmation", String(skipKeeperConfirmation));
   }
 
-  async function playVideo(item: Item, second = false) {
-    await run(async () => {
-      const path = await api<string>("video_preview", { id: item.id });
-      if (second) secondVideoSource = convertFileSrc(path);
-      else videoSource = convertFileSrc(path);
-    });
+  function resetVideos() {
+    videos = [null, null];
+  }
+
+  async function playVideo(item: Item, index = 0) {
+    const request = ++videoRequest;
+    videos[index] = { id: item.id, request, source: "", phase: "opening" };
+    error = "";
+    try {
+      const path = await api<string>("video_original", { id: item.id });
+      if (videos[index]?.request === request) {
+        videos[index] = { id: item.id, request, source: convertFileSrc(path), phase: "original" };
+      }
+    } catch (reason: unknown) {
+      if (videos[index]?.request !== request) return;
+      videos[index] = null;
+      error = message(reason);
+      console.error(reason);
+    }
+  }
+
+  async function videoFailed(index: number, id: string, source: string) {
+    const video = videos[index];
+    if (!video || video.id !== id || video.source !== source) return;
+    if (video.phase === "proxy") {
+      videos[index] = null;
+      error = t("This video could not be played, even with a playable copy.");
+      return;
+    }
+    if (video.phase !== "original") return;
+    videos[index] = { ...video, phase: "converting", source: "" };
+    try {
+      const path = await api<string>("video_preview", { id });
+      if (videos[index]?.request === video.request) {
+        videos[index] = { ...video, source: convertFileSrc(path), phase: "proxy" };
+      }
+    } catch (reason: unknown) {
+      if (videos[index]?.request !== video.request) return;
+      videos[index] = null;
+      error = message(reason);
+      console.error(reason);
+    }
   }
 
   async function startCleanup() {
@@ -268,10 +556,13 @@
 
   async function cleanSources() {
     await run(async () => {
-      if (!cleanupSelection.length) throw new Error("Select at least one eligible file.");
+      if (!cleanupSelection.length) throw new Error(t("Select at least one eligible file."));
+      const cleanupPrompt = language === "nl"
+        ? `Verplaats ${cleanupSelection.length} geverifieerde bronbestanden naar de prullenmand?\n\nJe archief kan hierdoor de enige kopie zijn. Een tweede back-up wordt aanbevolen.\n\nLeeg de prullenmand handmatig om schijfruimte vrij te maken. De app verwijdert bronbestanden nooit definitief.`
+        : `Move ${cleanupSelection.length} verified source files to OS Trash/Recycle Bin?\n\nThis may leave your archive as the only copy. A second backup is recommended.\n\nTrash must usually be emptied manually before disk space is reclaimed. The app never permanently deletes sources.`;
       const approved = await confirm(
-        `Move ${cleanupSelection.length} verified source files to OS Trash/Recycle Bin?\n\nThis may leave your archive as the only copy. A second backup is recommended.\n\nTrash must usually be emptied manually before disk space is reclaimed. The app never permanently deletes sources.`,
-        { title: "Clean up verified sources", kind: "warning" },
+        cleanupPrompt,
+        { title: t("Clean up verified sources"), kind: "warning" },
       );
       if (!approved) return;
       await mutate(async () => {
@@ -292,35 +583,41 @@
 
   async function applyMoves() {
     await run(async () => {
-      if (!moves?.length || !await confirm(`Reorganize ${moves.length} archived files using the saved layout? Sources are untouched. A recovery manifest is saved with the archive.`, { title: "Reorganize archive", kind: "warning" })) return;
+      const movePrompt = language === "nl"
+        ? `De indeling van ${moves?.length ?? 0} gearchiveerde bestanden aanpassen? Bronnen blijven ongewijzigd. Er wordt een herstelbestand in het archief opgeslagen.`
+        : `Reorganize ${moves?.length ?? 0} archived files using the saved layout? Sources are untouched. A recovery manifest is saved with the archive.`;
+      if (!moves?.length || !await confirm(movePrompt, { title: t("Reorganize archive"), kind: "warning" })) return;
       await mutate(async () => {
         await api(undoingMoves ? "rollback_archive" : "reorganize_archive", { preview: moves, confirmed: true });
         moves = null;
         await refresh();
       });
-      notice = undoingMoves ? "Reorganization undone. Original folder history is preserved." : "Archive reorganized. Original folder history is preserved.";
+      notice = undoingMoves ? t("Reorganization undone. Original folder history is preserved.") : t("Archive reorganized. Original folder history is preserved.");
     });
   }
 
   async function restore(item: Item) {
     await run(async () => {
-      await mutate(async () => { await api("restore_item", { id: item.id }); selected = null; await refresh(true); });
+      await mutate(async () => { await api("restore_item", { id: item.id }); closeDetails(); await refresh(true); });
     });
   }
 
   async function purge(item: Item) {
     await run(async () => {
-      if (!await confirm(`Permanently delete this archive undo copy: ${item.originalName}?\n\nIt may be the LAST byte-identical original, especially if its source was cleaned up. The better-looking keeper is not an exact backup. This cannot be undone.`, { title: "Permanently purge original", kind: "warning" })) return;
+      const purgePrompt = language === "nl"
+        ? `Deze herstelkopie definitief verwijderen: ${item.originalName}?\n\nDit kan het LAATSTE byte-identieke origineel zijn, vooral als de bron is opgeschoond. De beter ogende foto is geen exacte back-up. Dit kan niet ongedaan worden gemaakt.`
+        : `Permanently delete this archive undo copy: ${item.originalName}?\n\nIt may be the LAST byte-identical original, especially if its source was cleaned up. The better-looking keeper is not an exact backup. This cannot be undone.`;
+      if (!await confirm(purgePrompt, { title: t("Permanently purge original"), kind: "warning" })) return;
       await mutate(async () => {
         await api("purge_item", { id: item.id, acknowledgeOriginalLoss: true });
-        selected = null;
+        closeDetails();
         await refresh(true);
       });
     });
   }
 
   function closeDetails() {
-    selected = null; comparing = null; currentReview = null; videoSource = ""; secondVideoSource = "";
+    selected = null; comparing = null; currentReview = null; resetVideos();
   }
 
   $effect(() => {
@@ -356,6 +653,7 @@
   });
 
   onMount(() => {
+    language = window.localStorage.getItem("photo-dedupe.language") === "nl" ? "nl" : "en";
     native = isTauri();
     mode = native ? getCurrentWindow().label : new URLSearchParams(window.location.search).get("window") ?? "main";
     skipKeeperConfirmation = window.localStorage.getItem("photo-dedupe.skipKeeperConfirmation") === "true";
@@ -388,7 +686,7 @@
           try {
             await mutate(async () => { snapshot = await api<Snapshot>("open_archive", { path }); });
           } catch (reason: unknown) {
-            notice = `Previous archive unavailable (${message(reason)}). Connect the disk or choose a folder.`;
+            notice = `${t("Previous archive unavailable")} (${message(reason)}). ${t("Connect the disk or choose a folder.")}`;
           }
         }
       }
@@ -402,30 +700,30 @@
 </script>
 
 <svelte:head><title>Photo Archive</title><meta name="description" content="An offline archive for pictures and videos" /></svelte:head>
-<svelte:window onkeydown={viewerKey} />
+<svelte:window onkeydown={viewerKey} onstorage={syncLanguage} />
 
 {#snippet datePicker()}
   {#if months.length}
     <div class="date-picker">
-      <label>Year
-        <select aria-label="Choose year" value={year} disabled={working || libraryLoading} onchange={(event) => {
+      <label>{t("Year")}
+        <select aria-label={t("Choose year")} value={year} disabled={working || libraryLoading} onchange={(event) => {
           const value = event.currentTarget.value;
           const entry = months.find((candidate) => value === "unknown" ? candidate.month === "unknown" : candidate.month.startsWith(`${value}-`));
           if (entry) void changeMonth(entry.month);
         }}>
-          {#each years as value}<option value={value}>{value === "unknown" ? "Unknown date" : value}</option>{/each}
+          {#each years as value}<option value={value}>{value === "unknown" ? t("Unknown date") : value}</option>{/each}
         </select>
       </label>
       {#if year !== "unknown"}
-        <label>Month
-          <select aria-label="Choose month" value={month} disabled={working || libraryLoading} onchange={(event) => changeMonth(event.currentTarget.value)}>
+        <label>{t("Month")}
+          <select aria-label={t("Choose month")} value={month} disabled={working || libraryLoading} onchange={(event) => changeMonth(event.currentTarget.value)}>
             {#each months.filter((entry) => entry.month.startsWith(`${year}-`)) as entry}
               <option value={entry.month}>{entry.month.slice(5, 7)} ({entry.count.toLocaleString()})</option>
             {/each}
           </select>
         </label>
       {/if}
-      <span>{monthCount.toLocaleString()} pictures and videos</span>
+      <span>{monthCount.toLocaleString()} {t("pictures and videos")}</span>
     </div>
   {/if}
 {/snippet}
@@ -433,9 +731,9 @@
 {#snippet pageControls()}
   {#if monthCount > pageSize}
     <div class="page-controls">
-      <button class="secondary" disabled={working || libraryLoading || page === 0} onclick={() => changePage(page - 1)}>Previous page</button>
-      <span>Page {page + 1} of {Math.ceil(monthCount / pageSize)}</span>
-      <button class="secondary" disabled={working || libraryLoading || (page + 1) * pageSize >= monthCount} onclick={() => changePage(page + 1)}>Next page</button>
+      <button class="secondary" disabled={working || libraryLoading || page === 0} onclick={() => changePage(page - 1)}>{t("Previous page")}</button>
+      <span>{t("Page")} {page + 1} {t("of")} {Math.ceil(monthCount / pageSize)}</span>
+      <button class="secondary" disabled={working || libraryLoading || (page + 1) * pageSize >= monthCount} onclick={() => changePage(page + 1)}>{t("Next page")}</button>
     </div>
   {/if}
 {/snippet}
@@ -445,128 +743,133 @@
     <div class="mini-heading"><span class="brand-symbol">PA</span><strong>Photo Archive</strong></div>
     <button class="mini-drop" disabled={!native} onclick={() => snapshot.root ? importFolders() : chooseArchive()}>
       <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5" /><path d="M4 15v5h16v-5" /></svg>
-      <strong>{dropping ? "Drop to copy safely" : "Drop photo folders here"}</strong>
-      <small>{snapshot.root ? snapshot.root.split(/[\\/]/).pop() : "Choose an archive first"}</small>
+      <strong>{dropping ? t("Drop to copy safely") : t("Drop photo folders here")}</strong>
+      <small>{snapshot.root ? snapshot.root.split(/[\\/]/).pop() : t("Choose an archive first")}</small>
     </button>
-    <div class="mini-bottom"><small>{busy ? `${snapshot.progress.status} ${percent}%` : "Originals kept safe"}</small><button class="text-button" onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>Open app</button></div>
-    <label class="mini-pin"><input type="checkbox" bind:checked={onTop} onchange={() => run(async () => { await getCurrentWindow().setAlwaysOnTop(onTop); })} /> Always on top</label>
+    <div class="mini-bottom"><small>{busy ? `${t(snapshot.progress.status)} ${percent}%` : t("Originals kept safe")}</small><button class="text-button" onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>{t("Open app")}</button></div>
+    <label class="mini-pin"><input type="checkbox" bind:checked={onTop} onchange={() => run(async () => { await getCurrentWindow().setAlwaysOnTop(onTop); })} /> {t("Always on top")}</label>
     {#if error}<p class="mini-error">{error}</p>{/if}
   </main>
 {:else if mode === "viewer"}
   <main class="viewer-shell">
     <header class="viewer-header">
-      <div><strong>Photo Archive Viewer</strong><small>{snapshot.root?.split(/[\\/]/).pop() ?? "No archive open"}</small></div>
-      <button class="secondary" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>Open main app</button>
+      <div><strong>{t("Photo Archive Viewer")}</strong><small>{snapshot.root?.split(/[\\/]/).pop() ?? t("No archive open")}</small></div>
+      <button class="secondary" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>{t("Open main app")}</button>
     </header>
     {#if error}<div class="banner error" role="alert">{error}</div>{/if}
-    {#if !native}<div class="banner warning">Photo previews are available in the desktop app.</div>{/if}
+    {#if !native}<div class="banner warning">{t("Photo previews are available in the desktop app.")}</div>{/if}
     {#if selected}
       <div class="viewer-navigation">
-        <button class="secondary" disabled={working} onclick={closeDetails}>Back to thumbnails</button>
+        <button class="secondary" disabled={working} onclick={closeDetails}>{t("Back to thumbnails")}</button>
         <span>{selected.item.originalName}</span>
         <div class="button-row">
-          <button class="secondary" disabled={working || viewerIndex < 0 || page * pageSize + viewerIndex <= 0} onclick={() => navigatePhoto(-1)}>Previous</button>
-          <button class="secondary" disabled={working || viewerIndex < 0 || page * pageSize + viewerIndex >= monthCount - 1} onclick={() => navigatePhoto(1)}>Next</button>
+          <button class="secondary" disabled={working || viewerIndex < 0 || page * pageSize + viewerIndex <= 0} onclick={() => navigatePhoto(-1)}>{t("Previous")}</button>
+          <button class="secondary" disabled={working || viewerIndex < 0 || page * pageSize + viewerIndex >= monthCount - 1} onclick={() => navigatePhoto(1)}>{t("Next")}</button>
         </div>
       </div>
       <section class="viewer-stage" aria-label={selected.item.originalName}>
-        {#if videoSource}
-          <video src={videoSource} controls onerror={() => error = "This video proxy could not be played. Check the bundled media tools."}><track kind="captions" /></video>
+        {#if videos[0]?.source}
+          {@const video = videos[0]}
+          <video src={video.source} controls autoplay onerror={() => videoFailed(0, video.id, video.source)}><track kind="captions" /></video>
         {:else}
           <Preview item={selected.item} large />
         {/if}
       </section>
       <div class="viewer-caption">
-        <div><strong>{selected.item.media.date?.slice(0, 10) ?? "Date unknown"}</strong><small>{selected.item.albums.join(" / ")}</small><small>{selected.item.media.dateSource} / {selected.item.media.width} x {selected.item.media.height} / {bytes(selected.item.media.bytes)}</small></div>
-        {#if selected.item.media.kind === "video" && !videoSource}<button class="secondary" disabled={working} onclick={() => selected && playVideo(selected.item)}>Play video</button>{/if}
-        <small>Arrow keys to browse / Escape for thumbnails</small>
+        <div><strong>{selected.item.media.date?.slice(0, 10) ?? t("Date unknown")}</strong><small>{selected.item.albums.join(" / ")}</small><small>{selected.item.media.dateSource} / {selected.item.media.width} x {selected.item.media.height} / {bytes(selected.item.media.bytes)}</small></div>
+        {#if selected.item.media.kind === "video" && !videos[0]?.source}
+          {#if videos[0]}<small role="status">{t(videos[0].phase === "converting" ? "Preparing a playable copy..." : "Opening video...")}</small>
+          {:else}<button class="secondary" disabled={working} onclick={() => selected && playVideo(selected.item)}>{t("Play video")}</button>{/if}
+        {/if}
+        <small>{t("Arrow keys to browse / Escape for thumbnails")}</small>
       </div>
-      {#if selected.item.media.warnings.length}<details><summary>Photo information</summary>{#each selected.item.media.warnings as warning}<p class="muted">{warning}</p>{/each}</details>{/if}
+      {#if selected.item.media.warnings.length}<details><summary>{t("Photo information")}</summary>{#each selected.item.media.warnings as warning}<p class="muted">{warning}</p>{/each}</details>{/if}
     {:else}
       <div class="library-toolbar">
-        <input class="search" aria-label="Search pictures and original folders" bind:value={search} placeholder="Search pictures, dates or original folders..." />
-        <select aria-label="Filter viewer" bind:value={filter}><option value="all">All pictures and videos</option><option value="video">Videos</option><option value="unknown">Unknown dates</option><option value="estimated">Estimated dates</option></select>
+        <input class="search" aria-label={t("Search pictures and original folders")} bind:value={search} placeholder={t("Search pictures, dates or original folders...")} />
+        <select aria-label={t("Filter viewer")} bind:value={filter}><option value="all">{t("All pictures and videos")}</option><option value="video">{t("Videos")}</option><option value="unknown">{t("Unknown dates")}</option><option value="estimated">{t("Estimated dates")}</option></select>
       </div>
       {@render datePicker()}
       {#if items.length}
         <div class="photo-grid">{#each items as item (item.id)}<button class="photo-card" disabled={working || libraryLoading} onclick={() => selectItem(item.id)}><Preview {item} /><div class="photo-info"><strong>{item.originalName}</strong><span>{item.media.date?.slice(0, 10) ?? "Date unknown"}</span><small>{item.albums.join(" / ")}</small></div></button>{/each}</div>
         {@render pageControls()}
       {:else}
-        <div class="empty"><h2>{snapshot.root ? "No pictures to show yet." : "Open your archive in the main app."}</h2><p>{search ? "No matching pictures. Try another search." : "Imported pictures and videos will appear here."}</p></div>
+        <div class="empty"><h2>{snapshot.root ? t("No pictures to show yet.") : t("Open your archive in the main app.")}</h2><p>{search ? t("No matching pictures. Try another search.") : t("Imported pictures and videos will appear here.")}</p></div>
       {/if}
     {/if}
   </main>
 {:else}
   <div class="app-shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-symbol"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m3 19 6-10 4 5 3-8 5 13H3Z" /><circle cx="7" cy="5" r="1.5" /></svg></span><div><strong>Photo Archive</strong><small>Pictures and videos.</small></div></div>
-      <div class="nav-caption">YOUR ARCHIVE</div>
-      <nav aria-label="Main navigation">
-        <button class:active={tab === "home"} onclick={() => tab = "home"}><span class="nav-icon">01</span> Overview</button>
-        <button class:active={tab === "library"} onclick={() => tab = "library"}><span class="nav-icon">02</span> Photo library <span class="nav-count">{snapshot.activeCount || ""}</span></button>
-        <button class:active={tab === "review"} onclick={() => tab = "review"}><span class="nav-icon">03</span> Similarity review {#if reviews.length}<span class="nav-count">{reviews.length}</span>{/if}</button>
-        <button class:active={tab === "settings"} onclick={() => { config = { ...snapshot.settings }; tab = "settings"; }}><span class="nav-icon">04</span> Settings</button>
+      <div class="brand"><span class="brand-symbol"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m3 19 6-10 4 5 3-8 5 13H3Z" /><circle cx="7" cy="5" r="1.5" /></svg></span><div><strong>Photo Archive</strong><small>{t("Pictures and videos.")}</small></div></div>
+      <div class="nav-caption">{t("YOUR ARCHIVE")}</div>
+      <nav aria-label={t("Main navigation")}>
+        <button class:active={tab === "home"} onclick={() => tab = "home"}><span class="nav-icon">01</span> {t("Overview")}</button>
+        <button class:active={tab === "library"} onclick={() => tab = "library"}><span class="nav-icon">02</span> {t("Photo library")} <span class="nav-count">{snapshot.activeCount || ""}</span></button>
+        <button class:active={tab === "review"} onclick={() => tab = "review"}><span class="nav-icon">03</span> {t("Similarity review")} {#if reviews.length}<span class="nav-count">{reviews.length}</span>{/if}</button>
+        <button class:active={tab === "settings"} onclick={() => { config = { ...snapshot.settings }; tab = "settings"; }}><span class="nav-icon">04</span> {t("Settings")}</button>
       </nav>
       <div class="sidebar-bottom">
-        <div class="safety-note"><span class="safe-dot"></span><strong>Local. Private. Yours.</strong><p>Your photos never leave your disks. Importing doesn't change the originals.</p></div>
-        <button class="secondary full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "drop" }); })}>Open floating drop window</button>
-        <button class="text-button full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "viewer" }); })}>Open separate viewer</button>
+        <div class="safety-note"><span class="safe-dot"></span><strong>{t("Local. Private. Yours.")}</strong><p>{t("Your photos never leave your disks. Importing doesn't change the originals.")}</p></div>
+        <button class="secondary full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "drop" }); })}>{t("Open floating drop window")}</button>
+        <button class="text-button full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "viewer" }); })}>{t("Open separate viewer")}</button>
         <small class="version">PHOTO ARCHIVE / 0.1</small>
       </div>
     </aside>
 
     <main class="content">
-      <header class="topbar"><span>{tab === "home" ? "Your collection" : tab === "library" ? "Browse your pictures" : tab === "review" ? "Review similar pictures" : "Archive settings"}</span><div class="status"><span class="safe-dot"></span>{busy ? "Working on your archive" : "Offline by design"}</div></header>
-      {#if !native}<div class="banner warning"><strong>Desktop preview</strong> Folder imports and photo previews work in the Tauri desktop app. Run <code>npm run desktop</code> to use them.</div>{/if}
-      {#if error}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>Dismiss</button></div>{/if}
+      <header class="topbar"><span>{tab === "home" ? t("Your collection") : tab === "library" ? t("Browse your pictures") : tab === "review" ? t("Review similar pictures") : t("Archive settings")}</span><div class="status"><span class="safe-dot"></span>{busy ? t("Working on your archive") : t("Offline by design")}</div></header>
+      {#if !native}<div class="banner warning"><strong>{t("Desktop preview")}</strong> {t("Folder imports and photo previews work in the Tauri desktop app. Run")} <code>npm run desktop</code> {t("to use them.")}</div>{/if}
+      {#if error}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
       {#if notice}<div class="banner success" role="status">{notice}</div>{/if}
-      {#if snapshot.progress.errors.length}<details class="banner error"><summary>{snapshot.progress.errors.length} import/recovery issue(s) need attention</summary>{#each snapshot.progress.errors as issue}<p>{issue}</p>{/each}</details>{/if}
+      {#if snapshot.progress.errors.length}<details class="banner error"><summary>{snapshot.progress.errors.length} {t("import/recovery issue(s) need attention")}</summary>{#each snapshot.progress.errors as issue}<p>{issue}</p>{/each}</details>{/if}
 
       {#if tab === "home"}
-        <div class="page-heading"><div><p class="eyebrow">PICTURE ARCHIVE</p><h1>Organize your pictures.</h1><p class="subtitle">Bring scattered folders together. We'll organize the dates<br class="wide-only" /> and help you keep the best copies.</p></div><span class="hero-mark" aria-hidden="true"><svg width="60" height="60" viewBox="0 0 60 60" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="7" y="12" width="37" height="35" rx="4" transform="rotate(-10 7 12)" /><rect x="15" y="10" width="37" height="35" rx="4" fill="#f5f3ec" /><circle cx="26" cy="21" r="3" /><path d="m16 39 12-12 8 8 7-7 8 11" /></svg></span></div>
+        <div class="page-heading"><div><p class="eyebrow">{t("PICTURE ARCHIVE")}</p><h1>{t("Organize your pictures.")}</h1><p class="subtitle">{t("Bring scattered folders together. We'll organize the dates")}<br class="wide-only" /> {t("and help you keep the best copies.")}</p></div><span class="hero-mark" aria-hidden="true"><svg width="60" height="60" viewBox="0 0 60 60" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="7" y="12" width="37" height="35" rx="4" transform="rotate(-10 7 12)" /><rect x="15" y="10" width="37" height="35" rx="4" fill="#f5f3ec" /><circle cx="26" cy="21" r="3" /><path d="m16 39 12-12 8 8 7-7 8 11" /></svg></span></div>
         <section class="destination">
           <span class="disk-icon"><svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="3" /><path d="M3 14h18M7 17h1m3 0h1" /></svg></span>
-          <div><small>ARCHIVE DESTINATION</small><strong>{snapshot.root ?? "Choose a folder on your external disk"}</strong><span>{snapshot.root ? "Photos stay as ordinary files, with original folder history." : "A dedicated archive folder keeps things tidy."}</span></div>
-          <button class="secondary" disabled={!native || busy} onclick={chooseArchive}>{snapshot.root ? "Change" : "Choose folder"}</button>
+          <div><small>{t("ARCHIVE DESTINATION")}</small><strong>{snapshot.root ?? t("Choose a folder on your external disk")}</strong><span>{snapshot.root ? t("Photos stay as ordinary files, with original folder history.") : t("A dedicated archive folder keeps things tidy.")}</span></div>
+          <button class="secondary" disabled={!native || busy} onclick={chooseArchive}>{snapshot.root ? t("Change") : t("Choose folder")}</button>
         </section>
         <button class="drop-zone" class:dropping disabled={!native} onclick={() => importFolders()}>
           <span class="drop-icon"><svg width="35" height="35" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M3 8V5h7l2 3h9v12H3V8Z" /><path d="M12 10v7m-3-3 3 3 3-3" /></svg></span>
-          <h2>{dropping ? "Ready. Drop your folders." : "Drop photo folders here"}</h2><p>Or click to choose folders from your computer.</p><span class="primary">Choose source folders <span aria-hidden="true">+</span></span>
-          <small>PHOTOS, RAW FILES & VIDEOS <span> / </span> COPIED, NEVER MOVED DURING IMPORT</small>
+          <h2>{dropping ? t("Ready. Drop your folders.") : t("Drop photo folders here")}</h2><p>{t("Or click to choose folders from your computer.")}</p><span class="primary">{t("Choose source folders")} <span aria-hidden="true">+</span></span>
+          <small>{t("PHOTOS, RAW FILES & VIDEOS")} <span> / </span> {t("COPIED, NEVER MOVED DURING IMPORT")}</small>
         </button>
         {#if busy || snapshot.progress.total > 0}
-          <section class="progress-card"><div class="section-line"><strong>{snapshot.progress.status}</strong><span>{snapshot.progress.done} / {snapshot.progress.total} files</span></div><div class="progress-track"><div style={`width:${percent}%`}></div></div><p class="current-file">{snapshot.progress.current || `${snapshot.progress.copied} originals copied / ${snapshot.progress.duplicates} exact duplicates skipped`}</p>
-            {#if busy}<div class="button-row"><button class="secondary" onclick={() => run(async () => { await api("control_import", { action: snapshot.progress.status === "paused" ? "resume" : "pause" }); })}>{snapshot.progress.status === "paused" ? "Resume" : "Pause"}</button><button class="text-button" onclick={() => run(async () => { await api("control_import", { action: "cancel" }); })}>Cancel import</button></div>{/if}
+          <section class="progress-card"><div class="section-line"><strong>{t(snapshot.progress.status)}</strong><span>{snapshot.progress.done} / {snapshot.progress.total} {t("files")}</span></div><div class="progress-track"><div style={`width:${percent}%`}></div></div><p class="current-file">{snapshot.progress.current || `${snapshot.progress.copied} ${t("originals copied")} / ${snapshot.progress.duplicates} ${t("exact duplicates skipped")}`}</p>
+            {#if busy}<div class="button-row"><button class="secondary" onclick={() => run(async () => { await api("control_import", { action: snapshot.progress.status === "paused" ? "resume" : "pause" }); })}>{snapshot.progress.status === "paused" ? t("Resume") : t("Pause")}</button><button class="text-button" onclick={() => run(async () => { await api("control_import", { action: "cancel" }); })}>{t("Cancel import")}</button></div>{/if}
           </section>
         {/if}
-        <div class="stats"><div class="stat"><small>PICTURES AND VIDEOS</small><strong>{snapshot.activeCount.toLocaleString()}</strong><span>in your archive</span></div><div class="stat"><small>ARCHIVE SIZE</small><strong>{bytes(snapshot.activeBytes)}</strong><span>verified original files</span></div><div class="stat"><small>SAFELY RETAINED</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>undo copies / {bytes(snapshot.undoBytes)}</span></div></div>
-        <section class="next-steps"><div><h3>A little less clutter?</h3><p>Once copies are verified, review source files for cleanup.<br />Nothing leaves your source folders without your say-so.</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={startCleanup}>Review source cleanup</button></section>
-        {#if jobs.length}<section class="history"><div class="section-line"><h3>Recent imports</h3><small>Original folder names stay searchable</small></div>{#each jobs.slice(0, 5) as job}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{job.progress.status ?? "queued"} / {job.progress.copied ?? 0} copied / {job.progress.duplicates ?? 0} exact duplicates</small></div><button class="text-button" disabled={busy} onclick={() => importFolders(job.roots)}>Retry folders</button></div>{/each}</section>{/if}
+        <div class="stats"><div class="stat"><small>{t("PICTURES AND VIDEOS")}</small><strong>{snapshot.activeCount.toLocaleString()}</strong><span>{t("in your archive")}</span></div><div class="stat"><small>{t("ARCHIVE SIZE")}</small><strong>{bytes(snapshot.activeBytes)}</strong><span>{t("verified original files")}</span></div><div class="stat"><small>{t("SAFELY RETAINED")}</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>{t("undo copies")} / {bytes(snapshot.undoBytes)}</span></div></div>
+        <section class="next-steps"><div><h3>{t("Clean up old pictures?")}</h3><p>{t("Once copies are verified, review source files for cleanup.")}<br />{t("Nothing leaves your source folders without your say-so.")}</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={startCleanup}>{t("Review source cleanup")}</button></section>
+        {#if jobs.length}<section class="history"><div class="section-line"><h3>{t("Recent imports")}</h3><small>{t("Original folder names stay searchable")}</small></div>{#each jobs.slice(0, 5) as job}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t(job.progress.status ?? "queued")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small></div><button class="text-button" disabled={busy} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button></div>{/each}</section>{/if}
       {:else if tab === "library"}
-        <div class="page-heading"><div><p class="eyebrow">PICTURE LIBRARY</p><h1>Your picture library.</h1><p class="subtitle">Search a date, a filename, or an original folder like "Holiday Germany".</p></div><button class="primary" disabled={!native || !snapshot.root} onclick={() => importFolders()}>Add folders +</button></div>
-        <div class="library-toolbar"><input class="search" aria-label="Search pictures and original folders" bind:value={search} placeholder="Search pictures or original folders..." /><select aria-label="Filter library" bind:value={filter}><option value="all">All pictures and videos</option><option value="video">Videos</option><option value="unknown">Unknown dates</option><option value="estimated">Estimated dates</option><option value="undo">Retained undo copies</option></select></div>
+        <div class="page-heading"><div><p class="eyebrow">{t("PICTURE LIBRARY")}</p><h1>{t("Your picture library.")}</h1><p class="subtitle">{t("Search a date, a filename, or an original folder like \"Holiday Germany\".")}</p></div><button class="primary" disabled={!native || !snapshot.root} onclick={() => importFolders()}>{t("Add folders +")}</button></div>
+        <div class="library-toolbar"><input class="search" aria-label={t("Search pictures and original folders")} bind:value={search} placeholder={t("Search pictures or original folders...")} /><select aria-label={t("Filter library")} bind:value={filter}><option value="all">{t("All pictures and videos")}</option><option value="video">{t("Videos")}</option><option value="unknown">{t("Unknown dates")}</option><option value="estimated">{t("Estimated dates")}</option><option value="undo">{t("Retained undo copies")}</option></select></div>
         {@render datePicker()}
         {#if items.length}
-          <div class="photo-grid">{#each items as item (item.id)}<button class="photo-card" disabled={working || libraryLoading} onclick={() => selectItem(item.id)}><Preview {item} /><div class="photo-info"><strong>{item.originalName}</strong><span>{item.media.date?.slice(0, 10) ?? "Date unknown"}{item.media.dateSource.startsWith("estimated") ? " / estimated" : ""}</span><small>{item.albums.join(" / ")}</small></div></button>{/each}</div>
+          <div class="photo-grid">{#each items as item (item.id)}<button class="photo-card" disabled={working || libraryLoading} onclick={() => selectItem(item.id)}><Preview {item} /><div class="photo-info"><strong>{item.originalName}</strong><span>{item.media.date?.slice(0, 10) ?? t("Date unknown")}{item.media.dateSource.startsWith("estimated") ? ` / ${t("estimated")}` : ""}</span><small>{item.albums.join(" / ")}</small></div></button>{/each}</div>
           {@render pageControls()}
-        {:else}<div class="empty"><h2>{snapshot.root ? "Your pictures will appear here." : "Start with an archive folder."}</h2><p>{search ? "No matches. Try another filename, date or original folder." : "Import folders from the overview to fill your library."}</p><button class="secondary" onclick={() => tab = "home"}>Go to overview</button></div>{/if}
+        {:else}<div class="empty"><h2>{snapshot.root ? t("Your pictures will appear here.") : t("Start with an archive folder.")}</h2><p>{search ? t("No matches. Try another filename, date or original folder.") : t("Import folders from the overview to fill your library.")}</p><button class="secondary" onclick={() => tab = "home"}>{t("Go to overview")}</button></div>{/if}
       {:else if tab === "review"}
-        <div class="page-heading"><div><p class="eyebrow">SIMILAR DOESN'T ALWAYS MEAN THE SAME</p><h1>A second look.</h1><p class="subtitle">Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.</p></div><div class="review-actions"><span class="pill">{reviews.length} to review</span>{#if reviews.length}<button class="primary" disabled={working || busy} onclick={() => compare(reviews[0])}>Review next match</button>{/if}</div></div>
-        <label class="check-setting review-confirm-setting"><input type="checkbox" bind:checked={skipKeeperConfirmation} onchange={updateSkipKeeperConfirmation} /><span><strong>Skip confirmation when keeping a copy</strong><small>Applies on this computer. The other original still goes to archive undo.</small></span></label>
-        {#if reviews.length}<div class="review-list">{#each reviews as review}<div class="review-row"><div class="review-thumbnails"><Preview item={review.itemPreview} /><Preview item={review.candidatePreview} /></div><div class="review-description"><strong>Two similar pictures</strong><p>{review.reason}</p></div><button class="secondary" disabled={working || busy} onclick={() => compare(review)}>Compare files</button></div>{/each}</div>{:else}<div class="empty"><span class="empty-check" aria-hidden="true">OK</span><h2>Nothing needs a second look.</h2><p>Uncertain matches will appear here. Exact duplicates are handled automatically.</p></div>{/if}
+        <div class="page-heading"><div><p class="eyebrow">{t("SIMILAR DOESN'T ALWAYS MEAN THE SAME")}</p><h1>{t("A second look.")}</h1><p class="subtitle">{t("Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.")}</p></div><div class="review-actions"><span class="pill">{reviews.length} {t("to review")}</span>{#if reviews.length}<button class="primary" disabled={working || busy} onclick={() => compare(reviews[0])}>{t("Review next match")}</button>{/if}</div></div>
+        <label class="check-setting review-confirm-setting"><input type="checkbox" bind:checked={skipKeeperConfirmation} onchange={updateSkipKeeperConfirmation} /><span><strong>{t("Skip confirmation when keeping a copy")}</strong><small>{t("Applies on this computer. The other original still goes to archive undo.")}</small></span></label>
+        {#if reviews.length}<div class="review-list">{#each reviews as review}<div class="review-row" role="button" aria-label={`${t("Compare similar pictures")}: ${review.reason}`} aria-disabled={working || busy} tabindex={working || busy ? -1 : 0} onclick={() => { if (!working && !busy) compare(review); }} onkeydown={(event) => { if ((event.key === "Enter" || event.key === " ") && !working && !busy) { event.preventDefault(); compare(review); } }}><div class="review-thumbnails"><Preview item={review.itemPreview} /><Preview item={review.candidatePreview} /></div><div class="review-description"><strong>{t("Two similar pictures")}</strong><p>{review.reason}</p></div><span class="secondary">{t("Compare files")}</span></div>{/each}</div>{:else}<div class="empty"><span class="empty-check" aria-hidden="true">OK</span><h2>{t("Nothing needs a second look.")}</h2><p>{t("Uncertain matches will appear here. Exact duplicates are handled automatically.")}</p></div>{/if}
       {:else}
-        <div class="page-heading"><div><p class="eyebrow">SIMPLE SETTINGS, YOUR WAY</p><h1>A place for everything.</h1><p class="subtitle">Archive settings travel with your disk. Changes apply to future imports.</p></div></div>
-        <section class="settings-card"><h3>Folder organization</h3><label>Choose a layout<select bind:value={config.template}>{#each presets as [value, label]}<option {value}>{label}</option>{/each}{#if !presets.some(([value]) => value === config.template)}<option value={config.template}>Custom layout</option>{/if}</select></label><details class="advanced"><summary>Advanced folder template</summary><label>Template<input bind:value={config.template} placeholder={"Family/{yyyy}/{mm}"} /></label><p>Supported: <code>{"{yyyy}"}</code> <code>{"{mm}"}</code> <code>{"{dd}"}</code> <code>{"{media_type}"}</code>. Safe literal folder names are welcome.</p></details>
-          <div class="setting-columns"><label>Filenames<select bind:value={config.filenames}><option value="original">Keep original filenames</option><option value="date">Use photo date / time</option></select></label><label>Unknown-date folder<input bind:value={config.unknownFolder} /></label></div>
-          <div class="path-preview"><small>YOUR FILES WOULD LOOK LIKE THIS</small>{#each examples as example}<code>{example}</code>{/each}{#if !native}<code>2023/07/18/IMG_1234.jpg</code><code>unknown/undated.jpg</code>{/if}{#if configError}<p class="field-error">{configError}</p>{/if}<p>Name collisions receive a unique suffix. Estimated dates stay marked; missing times aren't invented.</p></div>
-          <label class="check-setting"><input type="checkbox" bind:checked={config.automaticMatches} /><span><strong>Automatically group very confident matches</strong><small>Keep a clearly better equivalent copy active. All other originals remain in undo. Ambiguous variants go to review.</small></span></label>
-          <div class="button-row"><button class="primary" disabled={!native || !snapshot.root || busy || !!configError} onclick={() => run(async () => { await mutate(async () => { await api("save_settings", { settings: config }); await refresh(true); }); notice = "Settings saved for future imports. Existing files haven't moved."; })}>Save archive settings</button><button class="text-button" onclick={() => config = { ...defaults }}>Reset defaults</button></div>
+        <div class="page-heading"><div><p class="eyebrow">{t("SIMPLE SETTINGS, YOUR WAY")}</p><h1>{t("A place for everything.")}</h1><p class="subtitle">{t("Archive settings travel with your disk. Changes apply to future imports.")}</p></div></div>
+        <section class="settings-card"><h3>{t("Language")}</h3><label class="language-setting">{t("Choose the interface language")}<select aria-label={t("Language")} value={language} onchange={changeLanguage}><option value="en">English</option><option value="nl">Nederlands</option></select></label></section>
+        <section class="settings-card"><h3>{t("Folder organization")}</h3><label>{t("Choose a layout")}<select bind:value={config.template}>{#each presets as [value, label]}<option {value}>{t(label)}</option>{/each}{#if !presets.some(([value]) => value === config.template)}<option value={config.template}>{t("Custom layout")}</option>{/if}</select></label><details class="advanced"><summary>{t("Advanced folder template")}</summary><label>{t("Template")}<input bind:value={config.template} placeholder={"Family/{yyyy}/{mm}"} /></label><p>{t("Supported:")} <code>{"{yyyy}"}</code> <code>{"{mm}"}</code> <code>{"{dd}"}</code> <code>{"{media_type}"}</code>. {t("Safe literal folder names are welcome.")}</p></details>
+          <div class="setting-columns"><label>{t("Filenames")}<select bind:value={config.filenames}><option value="original">{t("Keep original filenames")}</option><option value="date">{t("Use photo date / time")}</option></select></label><label>{t("Unknown-date folder")}<input bind:value={config.unknownFolder} /></label></div>
+          <div class="path-preview"><small>{t("YOUR FILES WOULD LOOK LIKE THIS")}</small>{#each examples as example}<code>{example}</code>{/each}{#if !native}<code>2023/07/18/IMG_1234.jpg</code><code>unknown/undated.jpg</code>{/if}{#if configError}<p class="field-error">{configError}</p>{/if}<p>{t("Name collisions receive a unique suffix. Estimated dates stay marked; missing times aren't invented.")}</p></div>
+          <label class="check-setting"><input type="checkbox" bind:checked={config.automaticMatches} /><span><strong>{t("Automatically group very confident matches")}</strong><small>{t("Keep a clearly better equivalent copy active. All other originals remain in undo. Ambiguous variants go to review.")}</small></span></label>
+          <div class="button-row"><button class="primary" disabled={!native || !snapshot.root || busy || !!configError} onclick={() => run(async () => { await mutate(async () => { await api("save_settings", { settings: config }); await refresh(true); }); notice = t("Settings saved for future imports. Existing files haven't moved."); })}>{t("Save archive settings")}</button><button class="text-button" onclick={() => config = { ...defaults }}>{t("Reset defaults")}</button></div>
         </section>
-        <section class="next-steps"><div><h3>Apply the saved layout to older imports?</h3><p>Preview existing file moves first. Sources and folder history stay untouched.</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={previewMoves}>Preview reorganization</button></section>
-        <button class="text-button" disabled={!native || !snapshot.root || busy} onclick={() => run(async () => { moves = await api<MoveRow[]>("rollback_preview"); undoingMoves = true; })}>Preview undo of last reorganization</button>
-        <section class="settings-card"><h3>Media tools</h3><p class="muted">RAW and video formats depend on the bundled decoders. Unsupported originals can still be archived without a preview.</p><div class="tool-list">{#each tools as tool}<div><span class:unavailable={!tool.available} class="safe-dot"></span><strong>{tool.name}</strong><small title={tool.detail}>{tool.available ? "Available" : tool.detail}</small></div>{/each}</div></section>
+        <section class="next-steps"><div><h3>{t("Apply the saved layout to older imports?")}</h3><p>{t("Preview existing file moves first. Sources and folder history stay untouched.")}</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={previewMoves}>{t("Preview reorganization")}</button></section>
+        <button class="text-button" disabled={!native || !snapshot.root || busy} onclick={() => run(async () => { moves = await api<MoveRow[]>("rollback_preview"); undoingMoves = true; })}>{t("Preview undo of last reorganization")}</button>
+        <section class="settings-card"><h3>{t("Media tools")}</h3><p class="muted">{t("RAW and video formats depend on the bundled decoders. Unsupported originals can still be archived without a preview.")}</p><div class="tool-list">{#each tools as tool}<div><span class:unavailable={!tool.available} class="safe-dot"></span><strong>{tool.name}</strong><small title={tool.detail}>{tool.available ? t("Available") : tool.detail}</small></div>{/each}</div></section>
       {/if}
-      <footer>Photo Archive. <span>Sources stay safe until you explicitly clean them up.</span></footer>
+      <footer>Photo Archive. <span>{t("Sources stay safe until you explicitly clean them up.")}</span></footer>
     </main>
   </div>
 {/if}
@@ -574,15 +877,33 @@
 {#if selected && mode !== "viewer"}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="modal-backdrop" onclick={(event) => { if (!working && event.target === event.currentTarget) closeDetails(); }}>
-    <dialog open class="modal detail-modal" class:comparison={!!comparing} aria-modal="true" aria-label={comparing ? "Compare similar pictures" : selected.item.originalName} tabindex="-1">
-      <div class="modal-top"><div><small>{comparing ? "COMPARE THE ORIGINALS" : "PICTURE DETAILS"}</small><h2>{comparing ? "Which copy would you keep?" : selected.item.originalName}</h2></div><button class="secondary" onclick={closeDetails}>Close</button></div>
+    <dialog open class="modal detail-modal" class:comparison={!!comparing} aria-modal="true" aria-label={comparing ? t("Compare similar pictures") : selected.item.originalName} tabindex="-1">
+      <div class="modal-top"><div><small>{comparing ? t("COMPARE THE ORIGINALS") : t("PICTURE DETAILS")}</small><h2>{comparing ? t("Which copy would you keep?") : selected.item.originalName}</h2></div><button class="secondary" onclick={closeDetails}>{t("Close")}</button></div>
       {#if error}<div class="banner error" role="alert">{error}</div>{/if}
       {#if comparing}
-        <p class="muted">Keeping one picture moves the other to archive undo. Keep both / dismiss match leaves both active and clears this review.</p>
+        <div class="comparison-actions">
+          <div class="comparison-choices">
+            {#each [selected, comparing] as detail, index (detail.item.id)}
+              {@const other = index === 0 ? comparing : selected}
+              <div class="comparison-choice">
+                <button class="primary" aria-label={`${t("Keep this copy active")}: ${detail.item.originalName}`} disabled={working || !!other.companions.length} onclick={() => resolve(detail.item.id)}>
+                  <span>{t("Keep this copy active")}</span><small title={detail.item.originalName}>{detail.item.originalName}</small>
+                </button>
+                {#if other.companions.length}<p class="muted">{t("Unavailable because the other picture has related files and cannot be moved to undo on its own.")}</p>{/if}
+              </div>
+            {/each}
+          </div>
+          <button class="secondary comparison-dismiss" disabled={working} onclick={() => resolve(null)}>{t("Keep both / dismiss match")}</button>
+        </div>
+        <p class="muted">{t("Keeping one picture moves the other to archive undo. Keep both / dismiss match leaves both active and clears this review.")}</p>
+        <p class="muted">{t("Highlighted measurements are at least twice as large. File size and pixel count do not guarantee better quality; compare the originals before choosing.")}</p>
+        {#if pictureComparison && pictureComparison.resolution.higher !== null && pictureComparison.size.higher !== null && pictureComparison.resolution.higher !== pictureComparison.size.higher}
+          <p class="muted">{t("Resolution and file size favor different pictures, so neither is recommended.")}</p>
+        {/if}
         {#if selected.companions.length && comparing.companions.length}
-          <p class="banner warning">Both pictures have related files and cannot be moved to undo on their own. Choose Keep both / dismiss match to finish this review without moving either picture.</p>
+          <p class="banner warning">{t("Both pictures have related files and cannot be moved to undo on their own. Choose Keep both / dismiss match to finish this review without moving either picture.")}</p>
         {:else if selected.companions.length || comparing.companions.length}
-          <p class="banner warning">The picture with related files cannot be moved to undo on its own. To move the other picture to undo, choose Keep this copy active for the picture with related files. Or choose Keep both / dismiss match.</p>
+          <p class="banner warning">{t("The picture with related files cannot be moved to undo on its own. To move the other picture to undo, choose Keep this copy active for the picture with related files. Or choose Keep both / dismiss match.")}</p>
         {/if}
       {/if}
       <div class="detail-columns">
@@ -590,25 +911,34 @@
           <div class="detail-column">
             <Preview item={detail.item} large />
             {#if detail.item.media.kind === "video"}
-              {#if index === 0 && videoSource}<video bind:this={firstVideo} src={videoSource} controls onerror={() => error = "This video proxy could not be played. Check the bundled decoder/encoder."}><track kind="captions" /></video>{:else if index === 1 && secondVideoSource}<video bind:this={secondVideo} src={secondVideoSource} controls onerror={() => error = "The comparison video could not be played."}><track kind="captions" /></video>{:else}<button class="secondary full" disabled={working} onclick={() => playVideo(detail.item, index === 1)}>Prepare playable video preview</button>{/if}
+              {#if videos[index]?.source}
+                {@const video = videos[index]}
+                {#if index === 0}<video bind:this={firstVideo} src={video.source} controls autoplay onerror={() => videoFailed(index, video.id, video.source)}><track kind="captions" /></video>
+                {:else}<video bind:this={secondVideo} src={video.source} controls autoplay onerror={() => videoFailed(index, video.id, video.source)}><track kind="captions" /></video>{/if}
+              {:else if videos[index]}
+                <p class="muted" role="status">{t(videos[index].phase === "converting" ? "Preparing a playable copy..." : "Opening video...")}</p>
+              {:else}
+                <button class="secondary full" disabled={working} onclick={() => playVideo(detail.item, index)}>{t("Play video")}</button>
+              {/if}
             {/if}
-            <h3>{detail.item.originalName}</h3><div class="detail-facts"><span>{detail.item.media.width} x {detail.item.media.height}</span><span>{bytes(detail.item.media.bytes)}</span><span>{detail.item.media.kind.toUpperCase()}</span></div><p class="detail-date">{detail.item.media.date ?? "Date unknown"} <small>{detail.item.media.dateSource}</small></p><code class="file-path">{detail.item.path}</code>
-            {#if detail.companions.length}<p class="banner warning">Related RAW/JPEG, sidecar or Live Photo files detected. This picture cannot be moved to archive undo on its own.</p>{/if}
-            <details><summary>Original folders & import history</summary>{#each detail.sources as source}<p class="source-history"><strong>{source.album}</strong><code>{source.relative}</code><small>{source.status.startsWith("staged:") ? "Cleanup recovery needed" : source.status === "trashed" ? "Source moved to OS trash" : "Source retained"}</small></p>{/each}</details>
-            {#if detail.item.media.warnings.length}<details><summary>Metadata & quality notes</summary>{#each detail.item.media.warnings as warning}<p class="muted">{warning}</p>{/each}</details>{/if}
-            {#if comparing}
-              {@const other = index === 0 ? comparing : selected}
-              <button class="primary full" disabled={working || !!other.companions.length} onclick={() => resolve(detail.item.id)}>Keep this copy active</button>
-              {#if other.companions.length}<p class="muted">Unavailable because the other picture has related files and cannot be moved to undo on its own.</p>{/if}
-            {/if}
+            <h3>{detail.item.originalName}</h3>
+            {#if pictureComparison?.recommendation === index}<span class="quality-label">{t("Probably better")}</span>{/if}
+            <div class="detail-facts">
+              <span class:quality-higher={pictureComparison?.resolution.substantiallyHigher === index}>{detail.item.media.width} x {detail.item.media.height}{#if pictureComparison?.resolution.substantiallyHigher === index} <small>({t("at least 2x pixels")})</small>{/if}</span>
+              <span class:quality-higher={pictureComparison?.size.substantiallyHigher === index}>{bytes(detail.item.media.bytes)}{#if pictureComparison?.size.substantiallyHigher === index} <small>({t("at least 2x size")})</small>{/if}</span>
+              <span>{detail.item.media.kind.toUpperCase()}</span>
+            </div><p class="detail-date">{detail.item.media.date ?? t("Date unknown")} <small>{detail.item.media.dateSource}</small></p><code class="file-path">{detail.item.path}</code>
+            {#if detail.companions.length}<p class="banner warning">{t("Related RAW/JPEG, sidecar or Live Photo files detected. This picture cannot be moved to archive undo on its own.")}</p>{/if}
+            <details><summary>{t("Original folders & import history")}</summary>{#each detail.sources as source}<p class="source-history"><strong>{source.album}</strong><code>{source.relative}</code><small>{source.status.startsWith("staged:") ? t("Cleanup recovery needed") : source.status === "trashed" ? t("Source moved to OS trash") : t("Source retained")}</small></p>{/each}</details>
+            {#if detail.item.media.warnings.length}<details><summary>{t("Metadata & quality notes")}</summary>{#each detail.item.media.warnings as warning}<p class="muted">{warning}</p>{/each}</details>{/if}
           </div>
         {/each}
       </div>
       {#if comparing}
-        <div class="modal-bottom"><p>{currentReview?.reason}</p><div class="button-row">{#if videoSource && secondVideoSource}<button class="secondary" onclick={() => run(async () => { if (firstVideo && secondVideo) { firstVideo.currentTime = 0; secondVideo.currentTime = 0; await Promise.all([firstVideo.play(), secondVideo.play()]); } })}>Play both from start</button><button class="secondary" onclick={() => { firstVideo?.pause(); secondVideo?.pause(); }}>Pause both</button>{/if}<button class="secondary" disabled={working} onclick={() => resolve(null)}>Keep both / dismiss match</button></div></div>
+        <div class="modal-bottom">{#if currentReview?.reason}<p>{currentReview.reason}</p>{/if}{#if videos[0]?.source && videos[1]?.source}<div class="button-row"><button class="secondary" onclick={() => run(async () => { if (firstVideo && secondVideo) { firstVideo.currentTime = 0; secondVideo.currentTime = 0; await Promise.all([firstVideo.play(), secondVideo.play()]); } })}>{t("Play both from start")}</button><button class="secondary" onclick={() => { firstVideo?.pause(); secondVideo?.pause(); }}>{t("Pause both")}</button></div>{/if}</div>
       {:else}
         <div class="modal-bottom">
-          {#if selected.item.state === "undo"}<div class="button-row"><button class="primary" disabled={working} onclick={() => selected && restore(selected.item)}>Restore this original</button><button class="danger-button" disabled={working} onclick={() => selected && purge(selected.item)}>Permanently purge undo copy</button></div>{:else}<div class="date-edit"><label>Correct the date<input type="date" bind:value={dateEntry} /></label><button class="secondary" disabled={working || !dateEntry} onclick={() => run(async () => { if (!selected) return; const id = selected.item.id; await mutate(async () => { await api("set_date", { id, date: dateEntry }); closeDetails(); await refresh(true); }); })}>Save date & reorganize this file</button></div>{/if}
+          {#if selected.item.state === "undo"}<div class="button-row"><button class="primary" disabled={working} onclick={() => selected && restore(selected.item)}>{t("Restore this original")}</button><button class="danger-button" disabled={working} onclick={() => selected && purge(selected.item)}>{t("Permanently purge undo copy")}</button></div>{:else}<div class="date-edit"><label>{t("Correct the date")}<input type="date" bind:value={dateEntry} /></label><button class="secondary" disabled={working || !dateEntry} onclick={() => run(async () => { if (!selected) return; const id = selected.item.id; await mutate(async () => { await api("set_date", { id, date: dateEntry }); closeDetails(); await refresh(true); }); })}>{t("Save date & reorganize this file")}</button></div>{/if}
         </div>
       {/if}
     </dialog>
@@ -616,12 +946,12 @@
 {/if}
 
 {#if cleanup !== null}
-  <div class="modal-backdrop"><dialog open class="modal" aria-modal="true" aria-label="Source cleanup preview" tabindex="-1"><div class="modal-top"><div><small>EXPLICITLY VERIFIED, NEVER AUTOMATIC</small><h2>Clean up source folders.</h2></div><button class="secondary" disabled={working} onclick={() => cleanup = null}>Close</button></div><div class="banner warning">Only byte-identical archived originals qualify. Cleanup may leave one copy. Trash usually needs emptying before space is freed.</div>{#if error}<div class="banner error" role="alert">{error}</div>{/if}
-    <div class="cleanup-list">{#each cleanup as row}<label class="cleanup-row"><input type="checkbox" bind:group={cleanupSelection} value={row.id} disabled={!row.eligible || working} /><span><strong>{row.source}</strong><small class:field-error={!row.eligible}>{row.reason}</small></span><small>{bytes(row.bytes)}</small></label>{/each}{#if !cleanup.length}<p class="muted">No pending imported sources to clean up.</p>{/if}</div><label class="check-setting"><input type="checkbox" bind:checked={emptyFolders} /><span><strong>Also remove genuinely empty imported subfolders</strong><small>No recursive deletion. Dropped roots, hidden files and nonempty folders remain.</small></span></label>{#each cleanupResults as result}<p class="cleanup-result">{result}</p>{/each}<div class="modal-bottom button-row"><strong>{cleanupSelection.length} selected / {bytes(cleanup.filter((row) => cleanupSelection.includes(row.id)).reduce((sum, row) => sum + row.bytes, 0))} to trash</strong><button class="primary" disabled={working || !cleanupSelection.length} onclick={cleanSources}>Confirm cleanup...</button></div></dialog></div>
+  <div class="modal-backdrop"><dialog open class="modal" aria-modal="true" aria-label={t("Source cleanup preview")} tabindex="-1"><div class="modal-top"><div><small>{t("EXPLICITLY VERIFIED, NEVER AUTOMATIC")}</small><h2>{t("Clean up source folders.")}</h2></div><button class="secondary" disabled={working} onclick={() => cleanup = null}>{t("Close")}</button></div><div class="banner warning">{t("Only byte-identical archived originals qualify. Cleanup may leave one copy. Trash usually needs emptying before space is freed.")}</div>{#if error}<div class="banner error" role="alert">{error}</div>{/if}
+    <div class="cleanup-list">{#each cleanup as row}<label class="cleanup-row"><input type="checkbox" bind:group={cleanupSelection} value={row.id} disabled={!row.eligible || working} /><span><strong>{row.source}</strong><small class:field-error={!row.eligible}>{row.reason}</small></span><small>{bytes(row.bytes)}</small></label>{/each}{#if !cleanup.length}<p class="muted">{t("No pending imported sources to clean up.")}</p>{/if}</div><label class="check-setting"><input type="checkbox" bind:checked={emptyFolders} /><span><strong>{t("Also remove genuinely empty imported subfolders")}</strong><small>{t("No recursive deletion. Dropped roots, hidden files and nonempty folders remain.")}</small></span></label>{#each cleanupResults as result}<p class="cleanup-result">{result}</p>{/each}<div class="modal-bottom button-row"><strong>{cleanupSelection.length} {t("selected")} / {bytes(cleanup.filter((row) => cleanupSelection.includes(row.id)).reduce((sum, row) => sum + row.bytes, 0))} {t("to trash")}</strong><button class="primary" disabled={working || !cleanupSelection.length} onclick={cleanSources}>{t("Confirm cleanup...")}</button></div></dialog></div>
 {/if}
 
 {#if moves !== null}
-  <div class="modal-backdrop"><dialog open class="modal" aria-modal="true" aria-label="Archive reorganization preview" tabindex="-1"><div class="modal-top"><div><small>PREVIEW BEFORE MOVING</small><h2>Reorganize your archive.</h2></div><button class="secondary" disabled={working} onclick={() => moves = null}>Close</button></div>{#if error}<div class="banner error" role="alert">{error}</div>{/if}<p class="muted">Only managed active files move. Originals, undo copies and original-folder albums stay intact.</p><div class="move-list">{#each moves as move}<div><code>{move.from}</code><small>becomes</small><code>{move.to}</code></div>{/each}{#if !moves.length}<p>Everything already follows the saved layout.</p>{/if}</div><div class="modal-bottom button-row"><span>{moves.length} file(s) to reorganize</span><button class="primary" disabled={working || !moves.length} onclick={applyMoves}>Confirm reorganization...</button></div></dialog></div>
+  <div class="modal-backdrop"><dialog open class="modal" aria-modal="true" aria-label={t("Archive reorganization preview")} tabindex="-1"><div class="modal-top"><div><small>{t("PREVIEW BEFORE MOVING")}</small><h2>{t("Reorganize your archive.")}</h2></div><button class="secondary" disabled={working} onclick={() => moves = null}>{t("Close")}</button></div>{#if error}<div class="banner error" role="alert">{error}</div>{/if}<p class="muted">{t("Only managed active files move. Originals, undo copies and original-folder albums stay intact.")}</p><div class="move-list">{#each moves as move}<div><code>{move.from}</code><small>{t("becomes")}</small><code>{move.to}</code></div>{/each}{#if !moves.length}<p>{t("Everything already follows the saved layout.")}</p>{/if}</div><div class="modal-bottom button-row"><span>{moves.length} {t("file(s) to reorganize")}</span><button class="primary" disabled={working || !moves.length} onclick={applyMoves}>{t("Confirm reorganization...")}</button></div></dialog></div>
 {/if}
 
 <style>
@@ -667,6 +997,8 @@
   .nav-icon { font-size: 9px; opacity: .65; width: 17px; }
   .nav-count { margin-left: auto; border-radius: 5px; background: #dde8d4; padding: 2px 6px; font-size: 10px; }
   .sidebar-bottom { margin-top: auto; padding-top: 20px; }
+  .language-setting { display: flex; flex-direction: column; gap: 6px; margin-top: 13px; color: #788273; font-size: 10px; }
+  .language-setting select { width: 100%; padding: 8px 10px; font-size: 11px; }
   .safety-note { padding: 16px 12px; margin-bottom: 15px; background: #f2f3eb; border-radius: 9px; }
   .safety-note strong { font-size: 11px; margin-left: 6px; }
   .safety-note p { font-size: 11px; line-height: 1.7; color: #858e7e; margin: 10px 0 0; }
@@ -749,7 +1081,10 @@
   .review-actions { display: flex; align-items: center; gap: 12px; }
   .review-confirm-setting { margin: 0 0 20px; }
   .review-list { display: flex; flex-direction: column; gap: 14px; }
-  .review-row { display: flex; align-items: center; gap: 19px; padding: 23px; background: #fffdf8; border: 1px solid #dfe4d6; border-radius: 12px; }
+  .review-row { display: flex; align-items: center; gap: 19px; padding: 23px; background: #fffdf8; border: 1px solid #dfe4d6; border-radius: 12px; cursor: pointer; }
+  .review-row:hover:not([aria-disabled="true"]) { border-color: #aab99a; background: #fbfcf6; }
+  .review-row:focus-visible { outline: 3px solid #879c70; outline-offset: 3px; }
+  .review-row[aria-disabled="true"] { cursor: wait; }
   .review-description { flex: 1; min-width: 0; }
   .review-row strong { font-size: 13px; }
   .review-row p { font-size: 11px; line-height: 1.6; color: #8b977f; margin: 7px 0 0; }
@@ -787,6 +1122,13 @@
   .modal { position: relative; margin: 0; border: 0; color: inherit; width: min(760px, 100%); background: #fffdf8; border-radius: 15px; padding: 27px; box-shadow: 0 20px 100px #0003; max-height: calc(100vh - 60px); overflow: auto; }
   .detail-modal { width: min(660px, 100%); }
   .comparison { width: min(1140px, 100%); }
+  .comparison-actions { position: sticky; top: 0; z-index: 2; background: #fffdf8; padding: 12px 0; border-bottom: 1px solid #e2e6d8; }
+  .comparison-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .comparison-choice { min-width: 0; }
+  .comparison-choice .primary { width: 100%; min-width: 0; flex-direction: column; gap: 4px; white-space: normal; }
+  .comparison-choice .primary small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; font-weight: 400; opacity: .8; }
+  .comparison-choice .muted { margin: 6px 0 0; }
+  .comparison-dismiss { width: 100%; margin-top: 8px; }
   .modal-top { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
   .modal-top small { font-size: 8px; letter-spacing: .12em; color: #92a17f; }
   .modal-top h2 { font-family: Georgia, serif; font-weight: 400; margin: 8px 0 0; }
@@ -794,7 +1136,10 @@
   .comparison .detail-columns { grid-template-columns: 1fr 1fr; }
   .detail-column { min-width: 0; }
   .detail-column h3 { margin-top: 18px; }
-  .detail-facts { display: flex; gap: 15px; color: #8a9a79; font-size: 11px; }
+  .detail-facts { display: flex; flex-wrap: wrap; gap: 8px 15px; color: #8a9a79; font-size: 11px; }
+  .quality-higher { color: #a42626; font-weight: 700; }
+  .quality-higher small { font-size: 10px; }
+  .quality-label { display: inline-block; margin: 0 0 9px; padding: 4px 8px; border-radius: 5px; background: #fae5e2; color: #922323; font-size: 11px; font-weight: 700; }
   .detail-date { font-size: 12px; margin: 15px 0 10px; }
   .detail-date small { display: block; font-size: 10px; color: #97a48a; margin-top: 6px; }
   .file-path { font-size: 11px; color: #8c9d7a; }
