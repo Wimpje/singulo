@@ -561,7 +561,7 @@
     await run(async () => {
       if (!cleanupSelection.length) throw new Error(t("Select at least one eligible file."));
       const cleanupPrompt = locale.language === "nl"
-        ? `Verplaats ${cleanupSelection.length} geverifieerde bronbestanden naar de prullenmand?\n\nJe archief kan hierdoor de enige kopie zijn. Een tweede back-up wordt aanbevolen.\n\nLeeg de prullenmand handmatig om schijfruimte vrij te maken. De app verwijdert bronbestanden nooit definitief.`
+        ? `${cleanupSelection.length} gecontroleerde bronbestanden naar de prullenmand verplaatsen?\n\nDaarna is je archief misschien de enige kopie. Bewaar daarom ook een tweede back-up.\n\nLeeg de prullenmand zelf om schijfruimte vrij te maken. De app verwijdert bronbestanden nooit definitief.`
         : `Move ${cleanupSelection.length} verified source files to OS Trash/Recycle Bin?\n\nThis may leave your archive as the only copy. A second backup is recommended.\n\nTrash must usually be emptied manually before disk space is reclaimed. The app never permanently deletes sources.`;
       const approved = await confirm(
         cleanupPrompt,
@@ -587,7 +587,7 @@
   async function applyMoves() {
     await run(async () => {
       const movePrompt = locale.language === "nl"
-        ? `De indeling van ${moves?.length ?? 0} gearchiveerde bestanden aanpassen? Bronnen blijven ongewijzigd. Er wordt een herstelbestand in het archief opgeslagen.`
+        ? `${moves?.length ?? 0} bestanden in je archief verplaatsen volgens de opgeslagen indeling? Je bronbestanden blijven ongewijzigd. Het archief onthoudt de oude plekken, zodat je dit kunt terugdraaien.`
         : `Reorganize ${moves?.length ?? 0} archived files using the saved layout? Sources are untouched. A recovery manifest is saved with the archive.`;
       if (!moves?.length || !await confirm(movePrompt, { title: t("Reorganize archive"), kind: "warning" })) return;
       await mutate(async () => {
@@ -608,9 +608,9 @@
   async function purge(item: Item) {
     await run(async () => {
       const purgePrompt = locale.language === "nl"
-        ? `Deze herstelkopie definitief verwijderen: ${item.originalName}?\n\nDit kan het LAATSTE byte-identieke origineel zijn, vooral als de bron is opgeschoond. De beter ogende foto is geen exacte back-up. Dit kan niet ongedaan worden gemaakt.`
-        : `Permanently delete this archive undo copy: ${item.originalName}?\n\nIt may be the LAST byte-identical original, especially if its source was cleaned up. The better-looking keeper is not an exact backup. This cannot be undone.`;
-      if (!await confirm(purgePrompt, { title: t("Permanently purge original"), kind: "warning" })) return;
+        ? `Deze reservekopie definitief verwijderen: ${item.originalName}?\n\nDit kan het LAATSTE exacte origineel zijn, zeker als het bronbestand al is opgeruimd. De foto die je hebt bewaard, is geen exacte kopie hiervan. Dit kan niet ongedaan worden gemaakt.`
+        : `Permanently delete this spare copy: ${item.originalName}?\n\nIt may be the LAST exact original, especially if its source file was cleaned up. The picture you kept is not an exact copy of it. This cannot be undone.`;
+      if (!await confirm(purgePrompt, { title: t("Delete spare copy permanently"), kind: "warning" })) return;
       await mutate(async () => {
         await api("purge_item", { id: item.id, acknowledgeOriginalLoss: true });
         closeDetails();
@@ -739,7 +739,7 @@
     </div>
     <select aria-label={t("Filter library")} bind:value={filter}>
       <option value="all">{t("All pictures and videos")}</option><option value="video">{t("Videos")}</option><option value="unknown">{t("Unknown dates")}</option><option value="estimated">{t("Estimated dates")}</option>
-      {#if !viewer}<option value="undo">{t("Retained undo copies")}</option>{/if}
+      {#if !viewer}<option value="undo">{t("Spare copies of removed duplicates")}</option>{/if}
     </select>
     <label class="size-slider" title={t("Thumbnail size")}>
       <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" /></svg>
@@ -778,7 +778,7 @@
             <button class="photo-card" data-id={item.id} title={item.originalName} onclick={() => openItem(item.id)}>
               <Preview {item} />
               <span class="photo-caption"><strong>{item.originalName}</strong><small>{item.media.date?.slice(0, 10) ?? t("Date unknown")}{item.media.dateSource.startsWith("estimated") ? ` · ${t("estimated")}` : ""}</small></span>
-              {#if item.state === "undo"}<span class="card-badge">{t("Undo copy")}</span>{/if}
+              {#if item.state === "undo"}<span class="card-badge">{t("Spare copy")}</span>{/if}
             </button>
           {/each}
         </div>
@@ -894,7 +894,7 @@
             {#if busy}<div class="button-row"><button class="secondary" onclick={() => run(async () => { await api("control_import", { action: snapshot.progress.status === "paused" ? "resume" : "pause" }); })}>{snapshot.progress.status === "paused" ? t("Resume") : t("Pause")}</button><button class="text-button" onclick={() => run(async () => { await api("control_import", { action: "cancel" }); })}>{t("Cancel import")}</button></div>{/if}
           </section>
         {/if}
-        <div class="stats"><div class="stat"><small>{t("PICTURES AND VIDEOS")}</small><strong>{snapshot.activeCount.toLocaleString()}</strong><span>{t("in your archive")}</span></div><div class="stat"><small>{t("ARCHIVE SIZE")}</small><strong>{bytes(snapshot.activeBytes)}</strong><span>{t("verified original files")}</span></div><div class="stat"><small>{t("SAFELY RETAINED")}</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>{t("undo copies")} / {bytes(snapshot.undoBytes)}</span></div></div>
+        <div class="stats"><div class="stat"><small>{t("PICTURES AND VIDEOS")}</small><strong>{snapshot.activeCount.toLocaleString()}</strong><span>{t("in your archive")}</span></div><div class="stat"><small>{t("ARCHIVE SIZE")}</small><strong>{bytes(snapshot.activeBytes)}</strong><span>{t("verified original files")}</span></div><div class="stat"><small>{t("SPARE COPIES")}</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>{t("of removed duplicates")} / {bytes(snapshot.undoBytes)}</span></div></div>
         <section class="next-steps"><div><h3>{t("Clean up old pictures?")}</h3><p>{t("Once copies are verified, review source files for cleanup.")}<br />{t("Nothing leaves your source folders without your say-so.")}</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={startCleanup}>{t("Review source cleanup")}</button></section>
         {#if jobs.length}<section class="history"><div class="section-line"><h3>{t("Recent imports")}</h3><small>{t("Original folder names stay searchable")}</small></div>{#each jobs.slice(0, 5) as job, index (job.id)}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t(job.progress.status ?? "queued")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small></div>{#if canRetry(job, index)}<button class="text-button" disabled={busy} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button>{/if}</div>{/each}</section>{/if}
       {:else if tab === "library"}
@@ -909,7 +909,7 @@
         <section class="settings-card"><h3>{t("Folder organization")}</h3><label>{t("Choose a layout")}<select bind:value={config.template}>{#each presets as [value, label]}<option {value}>{t(label)}</option>{/each}{#if !presets.some(([value]) => value === config.template)}<option value={config.template}>{t("Custom layout")}</option>{/if}</select></label><details class="advanced"><summary>{t("Advanced folder template")}</summary><label>{t("Template")}<input bind:value={config.template} placeholder={"Family/{yyyy}/{mm}"} /></label><p>{t("Supported:")} <code>{"{yyyy}"}</code> <code>{"{mm}"}</code> <code>{"{dd}"}</code> <code>{"{media_type}"}</code>. {t("Safe literal folder names are welcome.")}</p></details>
           <div class="setting-columns"><label>{t("Filenames")}<select bind:value={config.filenames}><option value="original">{t("Keep original filenames")}</option><option value="date">{t("Use photo date / time")}</option></select></label><label>{t("Unknown-date folder")}<input bind:value={config.unknownFolder} /></label></div>
           <div class="path-preview"><small>{t("YOUR FILES WOULD LOOK LIKE THIS")}</small>{#each examples as example}<code>{example}</code>{/each}{#if !native}<code>2023/07/18/IMG_1234.jpg</code><code>unknown/undated.jpg</code>{/if}{#if configError}<p class="field-error">{configError}</p>{/if}<p>{t("Name collisions receive a unique suffix. Estimated dates stay marked; missing times aren't invented.")}</p></div>
-          <label class="check-setting"><input type="checkbox" bind:checked={config.automaticMatches} /><span><strong>{t("Automatically group very confident matches")}</strong><small>{t("Keep a clearly better equivalent copy active. All other originals remain in undo. Ambiguous variants go to review.")}</small></span></label>
+          <label class="check-setting"><input type="checkbox" bind:checked={config.automaticMatches} /><span><strong>{t("Automatically group very confident matches")}</strong><small>{t("The clearly better version stays in your library. The duplicate is removed, but a spare copy is kept so you can restore it. Doubtful cases are left for you to compare.")}</small></span></label>
           <label class="check-setting"><input type="checkbox" bind:checked={config.deepVideoMatching} disabled={!config.automaticMatches} /><span><strong>{t("Deep video comparison (slower)")}</strong><small>{t("Off by default: exact video duplicates are recognized by hash; possible matches from a preview or capture date and duration go to manual review. Enable to compare every frame and audio before automatically grouping a clearly higher-resolution equivalent. Requires automatic grouping above and can slow imports substantially.")}</small></span></label>
           <div class="button-row"><button class="primary" disabled={!native || !snapshot.root || busy || !!configError || !settingsDirty} onclick={() => run(async () => { await mutate(async () => { await api("save_settings", { settings: config }); await refresh(true); }); notice = t("Settings saved for future imports. Existing files haven't moved."); })}>{t("Save archive settings")}</button>{#if settingsDirty}<span class="pill unsaved">{t("Unsaved changes")}</span><button class="text-button" onclick={() => config = { ...snapshot.settings }}>{t("Discard changes")}</button>{/if}<button class="text-button" onclick={() => config = { ...defaults }}>{t("Reset defaults")}</button></div>
         </section>
@@ -965,14 +965,14 @@
             <dt>{t("Location in archive")}</dt><dd><code>{item.path}</code></dd>
           </dl>
           <button class="secondary full" disabled={!native} onclick={() => reveal(item)}>{t(revealLabel)}</button>
-          {#if selected.companions.length}<p class="banner warning">{t("Related RAW/JPEG, sidecar or Live Photo files detected. This picture cannot be moved to archive undo on its own.")}</p>{/if}
+          {#if selected.companions.length}<p class="banner warning">{t("This picture belongs with related files (RAW/JPEG, sidecar or Live Photo), so it can't be removed on its own as a duplicate.")}</p>{/if}
           {#if item.media.warnings.length}<details><summary>{t("Metadata & quality notes")}</summary>{#each item.media.warnings as warning}<p class="muted">{warning}</p>{/each}</details>{/if}
           <details><summary>{t("Original folders & import history")}</summary>{#each selected.sources as source}<p class="source-history"><strong>{source.album}</strong><code>{source.relative}</code><small>{source.status.startsWith("staged:") ? t("Cleanup recovery needed") : source.status === "trashed" ? t("Source moved to OS trash") : t("Source retained")}</small></p>{/each}</details>
           {#if mode !== "viewer"}
             <div class="lightbox-actions">
               {#if item.state === "undo"}
-                <button class="primary full" disabled={working} onclick={() => restore(item)}>{t("Restore this original")}</button>
-                <button class="danger-button full" disabled={working} onclick={() => purge(item)}>{t("Permanently purge undo copy")}</button>
+                <button class="primary full" disabled={working} onclick={() => restore(item)}>{t("Restore to library")}</button>
+                <button class="danger-button full" disabled={working} onclick={() => purge(item)}>{t("Delete spare copy permanently")}</button>
               {:else}
                 <label>{t("Correct the date")}<input type="date" bind:value={dateEntry} /></label>
                 <button class="secondary full" disabled={working || !dateEntry || dateEntry === item.media.date?.slice(0, 10)} onclick={saveDate}>{t("Save date & reorganize this file")}</button>
@@ -1001,7 +1001,7 @@
       </div>
       {#if error}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
       {#if selected.companions.length && comparing.companions.length}
-        <p class="banner warning">{t("Both pictures have related files and cannot be moved to undo on their own. Choose Keep both / dismiss match to finish this review without moving either picture.")}</p>
+        <p class="banner warning">{t("Both pictures belong with related files and can't be removed on their own. Choose Keep both / dismiss match to finish this pair.")}</p>
       {/if}
       <div class="detail-columns">
         {#each pair as detail, index (detail.item.id)}
@@ -1025,7 +1025,7 @@
             <button class="primary keep-button" disabled={working || opening || busy || !!other.companions.length} onclick={() => resolve(detail.item.id)}>
               <span>{t("Keep this one")} <kbd>{index + 1}</kbd></span><small title={detail.item.originalName}>{detail.item.originalName}</small>
             </button>
-            {#if other.companions.length && !detail.companions.length}<p class="muted">{t("Unavailable because the other picture has related files and cannot be moved to undo on its own.")}</p>{/if}
+            {#if other.companions.length && !detail.companions.length}<p class="muted">{t("Not possible: the other picture belongs with related files (RAW/JPEG, sidecar or Live Photo) and can't be removed on its own.")}</p>{/if}
           </div>
         {/each}
       </div>
@@ -1057,7 +1057,7 @@
       <details>
         <summary>{t("Why were these matched?")}</summary>
         {#if currentReview?.reason}<p class="muted">{currentReview.reason}</p>{/if}
-        <p class="muted">{t("Keeping one picture moves the other to archive undo. Keep both / dismiss match leaves both active and clears this review.")}</p>
+        <p class="muted">{t("Keeping one picture removes the other from your library. A spare copy is kept, so you can always restore it. Keep both / dismiss match leaves both in your library and clears this pair.")}</p>
         <p class="muted">{t("Highlighted measurements are at least twice as large. File size and pixel count do not guarantee better quality; compare the originals before choosing.")}</p>
         {#each pair as detail}
           <p class="source-history"><strong>{detail.item.originalName}</strong>{#each detail.sources as source}<code>{source.album} / {source.relative}</code>{/each}</p>
@@ -1076,12 +1076,12 @@
 
 {#if moves !== null}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="modal-backdrop" onclick={(event) => { if (!working && event.target === event.currentTarget) moves = null; }}><div class="modal" role="dialog" aria-modal="true" aria-label={t("Archive reorganization preview")} tabindex="-1" {@attach focusOnMount}><div class="modal-top"><div><small>{t("PREVIEW BEFORE MOVING")}</small><h2>{t("Reorganize your archive.")}</h2></div><button class="secondary" disabled={working} onclick={() => moves = null}>{t("Close")}</button></div>{#if error}<div class="banner error" role="alert">{error}</div>{/if}<p class="muted">{t("Only managed active files move. Originals, undo copies and original-folder albums stay intact.")}</p><div class="move-list">{#each moves as move}<div><code>{move.from}</code><small>{t("becomes")}</small><code>{move.to}</code></div>{/each}{#if !moves.length}<p>{t("Everything already follows the saved layout.")}</p>{/if}</div><div class="modal-bottom button-row"><span>{moves.length} {t("file(s) to reorganize")}</span><button class="primary" disabled={working || !moves.length} onclick={applyMoves}>{t("Confirm reorganization...")}</button></div></div></div>
+  <div class="modal-backdrop" onclick={(event) => { if (!working && event.target === event.currentTarget) moves = null; }}><div class="modal" role="dialog" aria-modal="true" aria-label={t("Archive reorganization preview")} tabindex="-1" {@attach focusOnMount}><div class="modal-top"><div><small>{t("PREVIEW BEFORE MOVING")}</small><h2>{t("Reorganize your archive.")}</h2></div><button class="secondary" disabled={working} onclick={() => moves = null}>{t("Close")}</button></div>{#if error}<div class="banner error" role="alert">{error}</div>{/if}<p class="muted">{t("Only pictures in your library move. Source files, spare copies of removed duplicates and original folder names stay unchanged.")}</p><div class="move-list">{#each moves as move}<div><code>{move.from}</code><small>{t("becomes")}</small><code>{move.to}</code></div>{/each}{#if !moves.length}<p>{t("Everything already follows the saved layout.")}</p>{/if}</div><div class="modal-bottom button-row"><span>{moves.length} {t("file(s) to reorganize")}</span><button class="primary" disabled={working || !moves.length} onclick={applyMoves}>{t("Confirm reorganization...")}</button></div></div></div>
 {/if}
 
 {#if undoAction}
   <div class="toast" role="status">
-    <span>{t("Kept")} <strong>{undoAction.keptName}</strong>. {t("The other copy moved to archive undo.")}</span>
+    <span>{t("Kept")} <strong>{undoAction.keptName}</strong>. {t("The duplicate was removed; a spare copy is kept.")}</span>
     <button class="text-button" disabled={working} onclick={undoKeep}>{t("Undo")}</button>
     <button class="text-button" aria-label={t("Dismiss")} onclick={() => { clearTimeout(undoTimer); undoAction = null; }}>×</button>
   </div>
