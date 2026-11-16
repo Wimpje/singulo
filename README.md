@@ -7,15 +7,15 @@ The interface is available in English and Dutch. Choose a language on the Settin
 ## Use it
 
 1. Choose a dedicated archive folder, usually on an external disk.
-2. Drop source folders onto the main app or its floating, always-on-top drop window.
-3. Browse the library or separate viewer. Search original folder names such as **Holiday Germany**; folder history survives deduplication.
-4. Compare uncertain matches in **Similarity review**. The overview shows thumbnails of both files. Use **Review next match** to work through them one by one; after keeping or dismissing a match, the next one opens automatically. You can opt out of the keeper confirmation there. Keep both when they are different edits, crops, burst frames or RAW/JPEG companions.
+2. Click **Add folders** in the sidebar, or drop source folders anywhere on the main window or its floating, always-on-top drop window. Import progress stays visible in the sidebar.
+3. Browse **Photos**, the app's start page, or the separate viewer. Search original folder names such as **Holiday Germany**; folder history survives deduplication.
+4. Compare uncertain matches in **Similarity review**. The overview shows thumbnails of both files. **Start reviewing** opens them one by one with a match counter; after keeping or dismissing a match, the next one opens automatically. Keyboard: `1` / `2` keep the left / right copy, `B` keeps both, `S` or `→` skips, `←` goes back, `Z` zooms both pictures, `Esc` closes. Click a picture to zoom both at the same spot. Keep both when they are different edits, crops, burst frames or RAW/JPEG companions.
 
-Keeping one copy moves the other to archive undo. A picture with related RAW/JPEG, sidecar or Live Photo files cannot be moved to undo on its own. If only one picture has related files, you can keep it and move the other to undo. If both have related files, choose **Keep both / dismiss match**; both remain active and the review is cleared.
+Keeping one copy moves the other to archive undo, without a confirmation dialog: a message offers **Undo** (or Cmd/Ctrl+Z) for a few seconds, which restores the copy and puts the match back in review. The copy also stays restorable later through **Retained undo copies** in Photos. A picture with related RAW/JPEG, sidecar or Live Photo files cannot be moved to undo on its own. If only one picture has related files, you can keep it and move the other to undo. If both have related files, choose **Keep both / dismiss match**; both remain active and the review is cleared.
 
-In comparisons, a file size or pixel count at least twice the other is highlighted. A **Probably better** label appears only when the other available measurement does not favor the other picture. These are hints, not guarantees of image quality; inspect both before deciding.
+In comparisons, a table lists resolution, file size, type, date, original folders, related files and location, with differing rows highlighted. A file size or pixel count at least twice the other is highlighted. A **Probably better** label appears only when the other available measurement does not favor the other picture. These are hints, not guarantees of image quality; inspect both before deciding.
 
-The library and separate viewer let you choose a year and month (or unknown dates) and show up to 60 thumbnails per page. Search and filters apply across the archive; the year and month choices show matching photos. The separate viewer is browsing-only, without import or settings controls. Click a thumbnail for a large photo, use Previous/Next or the arrow keys to browse across pages within the selected month, and Escape to return to thumbnails. Videos have a Play video button.
+The library and separate viewer show a timeline of years and months (or unknown dates) next to the photo grid; more photos load as you scroll. Use **Newer** / **Older** to step between months, and the size slider to change thumbnail size. Search and filters apply across the archive, and the timeline shows matching photos. The separate viewer is browsing-only, without import, settings or editing controls. Click a thumbnail to open it full-window; use the arrows or arrow keys to browse, continuing into the next or previous month, `I` to toggle the info panel, and Escape to return to the same spot in the grid. The info panel shows date and its source, dimensions, original folders and a **Show in Finder / Explorer** button. Videos have a Play video button.
 
 Video playback tries the archived original first. If the built-in player cannot play it, the app prepares and caches a playable copy in the background; the original is never changed. Playback support depends on the system and the video's container and codecs.
 
@@ -51,7 +51,7 @@ After cleanup the archive may be your only copy. Keep another backup, especially
 
 ### Interruptions and recovery
 
-Pause/cancel imports from the overview. Retry saved folders after a failure; exact copies are recognized again. Disk disconnection is reported, never replaced by a new archive elsewhere.
+Pause/cancel imports on the **Import & archive** page (the sidebar progress links there). Retry saved folders after a failure; exact copies are recognized again. Disk disconnection is reported, never replaced by a new archive elsewhere.
 
 The archive contains ordinary media files and `.photo-dedupe/` with the SQLite catalog, staging/undo/cache folders, job history, catalog backup and provenance export. Move the whole archive between computers, including this folder. Never edit the catalog while the app is running.
 
@@ -103,7 +103,7 @@ Dropping multiple folders together creates one import job. All folders are scann
 
 Metadata extraction batches up to 64 files per ExifTool process. Exact duplicates are checked before image decoding. Verified staging files are linked into their final location on supporting filesystems (APFS/NTFS); filesystems without hard links retain the verified-copy fallback. Duplicate source-history writes are committed together per batch, and related review entries per incoming file, without relaxing durable writes. If a duplicate-history batch fails, it rolls back and reports errors rather than claiming successful deduplication. UI progress updates are limited to four per second, and the app crate plus image/hash dependencies are optimized even in development builds.
 
-Expand **Import timings** on the overview to see scanning, hashing/exact verification, metadata, input buffering, decoding, matching, placement/catalog writes, recovery backup, and total elapsed time. Completed timings are saved with the job. Decoder time is summed across workers and overlaps other stages, so stage totals are not wall-clock throughput benchmarks. Placement includes durable flushing and any extra staging-to-final copy.
+Expand **Import timings** on the **Import & archive** page to see scanning, hashing/exact verification, metadata, input buffering, decoding, matching, placement/catalog writes, recovery backup, and total elapsed time. Completed timings are saved with the job. Decoder time is summed across workers and overlaps other stages, so stage totals are not wall-clock throughput benchmarks. Placement includes durable flushing and any extra staging-to-final copy.
 
 #### How similarity matching works
 

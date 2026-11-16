@@ -566,8 +566,78 @@ async fn resolve_review(
 }
 
 #[tauri::command]
+async fn undo_review(
+    app: tauri::AppHandle,
+    item: String,
+    candidate: String,
+    reason: String,
+    discarded: String,
+) -> Result<()> {
+    if discarded != item && discarded != candidate {
+        return Err("Only a file from this comparison can be restored.".into());
+    }
+    change(app, move |archive| {
+        // Re-add the review first; it stays hidden until both files are active again.
+        archive.add_review(&item, &candidate, &reason)?;
+        archive.restore(&discarded)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn restore_item(app: tauri::AppHandle, id: String) -> Result<()> {
     change(app, move |a| a.restore(&id)).await
+}
+
+#[tauri::command]
+async fn reveal_item(app: tauri::AppHandle, id: String) -> Result<()> {
+    read(app, move |app| {
+        let state = app.state::<AppState>();
+        let path = {
+            let archive = state.archive.lock().map_err(|e| e.to_string())?;
+            let archive = archive.as_ref().ok_or("Choose an archive first.")?;
+            archive.check()?;
+            let item = archive.item(&id)?;
+            if item.state == "purged" {
+                return Err("This original was purged.".into());
+            }
+            paths::inside(&archive.root, Path::new(&item.path))?
+        };
+        if !path.is_file() {
+            return Err("This file can't be found. Is the archive disk connected?".into());
+        }
+        let mut child = reveal_command(&path)
+            .spawn()
+            .map_err(|e| format!("Could not show the file: {e}"))?;
+        std::thread::spawn(move || child.wait());
+        Ok(())
+    })
+    .await
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_command(path: &Path) -> Command {
+    let mut command = Command::new("open");
+    command.arg("-R").arg(path);
+    command
+}
+
+#[cfg(windows)]
+fn reveal_command(path: &Path) -> Command {
+    use std::os::windows::process::CommandExt;
+    let text = path.to_string_lossy();
+    let plain = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    let mut command = Command::new("explorer");
+    // Explorer needs the unsplit `/select,"path"` form; Windows paths cannot contain quotes.
+    command.raw_arg(format!("/select,\"{plain}\""));
+    command
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn reveal_command(path: &Path) -> Command {
+    let mut command = Command::new("xdg-open");
+    command.arg(path.parent().unwrap_or(path));
+    command
 }
 
 #[tauri::command]
@@ -725,7 +795,9 @@ pub fn run() {
             job_history,
             review_list,
             resolve_review,
+            undo_review,
             restore_item,
+            reveal_item,
             purge_item,
             cleanup_preview,
             clean_sources,

@@ -1,278 +1,26 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { isTauri, convertFileSrc } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open, confirm } from "@tauri-apps/plugin-dialog";
   import Preview from "$lib/Preview.svelte";
   import { comparePictures } from "$lib/comparison";
+  import { locale, t, dateSourceLabel } from "$lib/i18n.svelte";
   import {
     api, bytes, defaults, emptySnapshot, message,
     type Snapshot, type Settings, type Progress, type Item, type Details,
     type Review, type CleanupRow, type MoveRow, type Job, type ToolStatus,
   } from "$lib/api";
 
-  type Tab = "home" | "library" | "review" | "settings";
+  type Tab = "library" | "review" | "import" | "settings";
   type LibraryMonth = { month: string; count: number };
   type VideoPlayback = { id: string; request: number; source: string; phase: "opening" | "original" | "converting" | "proxy" };
+  type UndoAction = { review: Review; discarded: string; keptName: string };
   const pageSize = 60;
-  type Language = "en" | "nl";
-  const dutch: Record<string, string> = {
-    "Language": "Taal",
-    "Choose the interface language": "Kies de taal van de interface",
-    "Main navigation": "Hoofdnavigatie",
-    "Pictures and videos.": "Foto's en video's.",
-    "YOUR ARCHIVE": "JE ARCHIEF",
-    "Overview": "Overzicht",
-    "Photo library": "Fotobibliotheek",
-    "Similarity review": "Vergelijkbare foto's",
-    "Settings": "Instellingen",
-    "Local. Private. Yours.": "Lokaal. Privé. Van jou.",
-    "Your photos never leave your disks. Importing doesn't change the originals.": "Je foto's verlaten je schijven niet. Importeren verandert de originelen niet.",
-    "Open floating drop window": "Zwevend importvenster openen",
-    "Open separate viewer": "Aparte viewer openen",
-    "Your collection": "Je collectie",
-    "Browse your pictures": "Blader door je foto's",
-    "Review similar pictures": "Vergelijkbare foto's beoordelen",
-    "Archive settings": "Archiefinstellingen",
-    "Working on your archive": "Bezig met je archief",
-    "Offline by design": "Bewust offline",
-    "Desktop preview": "Desktopvoorbeeld",
-    "Folder imports and photo previews work in the Tauri desktop app. Run": "Mappen importeren en foto's bekijken kan in de Tauri-desktopapp. Voer uit:",
-    "to use them.": "om deze functies te gebruiken.",
-    "Choose month": "Kies een maand",
-    "originals copied": "originelen gekopieerd",
-    "exact duplicates skipped": "exacte duplicaten overgeslagen",
-    "idle": "Inactief",
-    "scanning": "Scannen",
-    "importing": "Importeren",
-    "paused": "Gepauzeerd",
-    "complete": "Voltooid",
-    "failed": "Mislukt",
-    "cancelled": "Geannuleerd",
-    "queued": "In wachtrij",
-    "copied": "gekopieerd",
-    "exact duplicates": "exacte duplicaten",
-    "estimated": "geschat",
-    "Holiday Germany": "Vakantie Duitsland",
-    "Dismiss": "Sluiten",
-    "Choose the archive destination (a dedicated folder is best)": "Kies de locatie voor het archief (een aparte map is het beste)",
-    "Choose an archive destination first.": "Kies eerst een archieflocatie.",
-    "Choose photo folders to copy": "Kies fotomappen om te kopiëren",
-    "Folders added. Originals stay untouched during import.": "Mappen toegevoegd. Originelen blijven ongewijzigd tijdens het importeren.",
-    "Folders queued after the current import.": "Mappen worden na de huidige import verwerkt.",
-    "The photo list changed. Refresh the library and try again.": "De fotolijst is gewijzigd. Vernieuw de bibliotheek en probeer het opnieuw.",
-    "All similar matches have been reviewed.": "Alle vergelijkbare foto's zijn beoordeeld.",
-    "Select at least one eligible file.": "Selecteer ten minste één geschikt bestand.",
-    "Reorganization undone. Original folder history is preserved.": "Archiefindeling hersteld. De oorspronkelijke mapgeschiedenis is behouden.",
-    "Archive reorganized. Original folder history is preserved.": "Archief opnieuw ingedeeld. De oorspronkelijke mapgeschiedenis is behouden.",
-    "Settings saved for future imports. Existing files haven't moved.": "Instellingen opgeslagen voor toekomstige imports. Bestaande bestanden zijn niet verplaatst.",
-    "Year": "Jaar",
-    "Choose year": "Kies een jaar",
-    "Unknown date": "Onbekende datum",
-    "Month": "Maand",
-    "pictures and videos": "foto's en video's",
-    "Previous page": "Vorige pagina",
-    "Page": "Pagina",
-    "of": "van",
-    "Next page": "Volgende pagina",
-    "Drop to copy safely": "Laat los om veilig te kopiëren",
-    "Drop photo folders here": "Sleep fotomappen hierheen",
-    "Choose an archive first": "Kies eerst een archief",
-    "Originals kept safe": "Originelen blijven veilig",
-    "Open app": "App openen",
-    "Always on top": "Altijd op voorgrond",
-    "Photo Archive Viewer": "Fotoarchiefviewer",
-    "No archive open": "Geen archief geopend",
-    "Open main app": "Hoofdapp openen",
-    "Photo previews are available in the desktop app.": "Fotovoorbeelden zijn beschikbaar in de desktopapp.",
-    "Back to thumbnails": "Terug naar miniaturen",
-    "Previous": "Vorige",
-    "Next": "Volgende",
-    "This video proxy could not be played. Check the bundled media tools.": "Deze videovoorvertoning kan niet worden afgespeeld. Controleer de meegeleverde mediaprogramma's.",
-    "Date unknown": "Onbekende datum",
-    "Play video": "Video afspelen",
-    "Opening video...": "Video openen...",
-    "Preparing a playable copy...": "Een afspeelbare kopie voorbereiden...",
-    "This video could not be played, even with a playable copy.": "Deze video kan ook met een afspeelbare kopie niet worden afgespeeld.",
-    "Arrow keys to browse / Escape for thumbnails": "Pijltjestoetsen om te bladeren / Escape voor miniaturen",
-    "Photo information": "Foto-informatie",
-    "Search pictures and original folders": "Zoek foto's en oorspronkelijke mappen",
-    "Search pictures, dates or original folders...": "Zoek foto's, datums of oorspronkelijke mappen...",
-    "Filter viewer": "Viewer filteren",
-    "Filter library": "Bibliotheek filteren",
-    "All pictures and videos": "Alle foto's en video's",
-    "Videos": "Video's",
-    "Unknown dates": "Onbekende datums",
-    "Estimated dates": "Geschatte datums",
-    "Retained undo copies": "Bewaarde herstelkopieën",
-    "No pictures to show yet.": "Er zijn nog geen foto's om te tonen.",
-    "Open your archive in the main app.": "Open je archief in de hoofdapp.",
-    "No matching pictures. Try another search.": "Geen overeenkomende foto's. Probeer een andere zoekopdracht.",
-    "Imported pictures and videos will appear here.": "Geïmporteerde foto's en video's verschijnen hier.",
-    "PICTURE ARCHIVE": "FOTOARCHIEF",
-    "Organize your pictures.": "Orden je foto's.",
-    "Bring scattered folders together. We'll organize the dates": "Breng verspreide mappen samen. Wij orden de datums",
-    "and help you keep the best copies.": "en helpen je de beste kopieën te bewaren.",
-    "import/recovery issue(s) need attention": "import-/herstelprobleem(en) vragen aandacht",
-    "PICTURES AND VIDEOS": "FOTO'S EN VIDEO'S",
-    "in your archive": "in je archief",
-    "ARCHIVE SIZE": "ARCHIEFGROOTTE",
-    "verified original files": "geverifieerde originele bestanden",
-    "SAFELY RETAINED": "VEILIG BEWAARD",
-    "undo copies": "herstelkopieën",
-    "ARCHIVE DESTINATION": "ARCHIEFLOCATIE",
-    "Choose a folder on your external disk": "Kies een map op je externe schijf",
-    "Photos stay as ordinary files, with original folder history.": "Foto's blijven gewone bestanden, met behoud van de oorspronkelijke mapgeschiedenis.",
-    "A dedicated archive folder keeps things tidy.": "Met een aparte archiefmap blijft alles overzichtelijk.",
-    "Change": "Wijzigen",
-    "Choose folder": "Map kiezen",
-    "Ready. Drop your folders.": "Klaar. Sleep je mappen hierheen.",
-    "Or click to choose folders from your computer.": "Of klik om mappen op je computer te kiezen.",
-    "Choose source folders": "Bronmappen kiezen",
-    "PHOTOS, RAW FILES & VIDEOS": "FOTO'S, RAW-BESTANDEN & VIDEO'S",
-    "COPIED, NEVER MOVED DURING IMPORT": "GEKOPIEERD, NOOIT VERPLAATST TIJDENS IMPORT",
-    "files": "bestanden",
-    "Resume": "Hervatten",
-    "Pause": "Pauzeren",
-    "Cancel import": "Import annuleren",
-    "Clean up old pictures?": "Oude fotos opruimen?",
-    "Once copies are verified, review source files for cleanup.": "Check de kopieën eerst, dan kunnen de bronbestanden worden opgeruimd.",
-    "Nothing leaves your source folders without your say-so.": "Er wordt niets uit je bronmappen verwijderd zonder jouw toestemming.",
-    "Review source cleanup": "Bronbestanden opschonen",
-    "Recent imports": "Recente imports",
-    "Original folder names stay searchable": "Oorspronkelijke mapnamen blijven doorzoekbaar",
-    "Retry folders": "Mappen opnieuw proberen",
-    "PICTURE LIBRARY": "FOTOBIBLIOTHEEK",
-    "Your picture library.": "Je fotobibliotheek.",
-    "Search a date, a filename, or an original folder like \"Holiday Germany\".": "Zoek op datum, bestandsnaam of oorspronkelijke map, zoals \"Vakantie Duitsland\".",
-    "Add folders +": "Mappen toevoegen +",
-    "Search pictures or original folders...": "Zoek foto's of oorspronkelijke mappen...",
-    "Your pictures will appear here.": "Je foto's verschijnen hier.",
-    "Start with an archive folder.": "Begin met een archiefmap.",
-    "No matches. Try another filename, date or original folder.": "Geen resultaten. Probeer een andere bestandsnaam, datum of oorspronkelijke map.",
-    "Import folders from the overview to fill your library.": "Importeer mappen via het overzicht om je bibliotheek te vullen.",
-    "Go to overview": "Naar overzicht",
-    "SIMILAR DOESN'T ALWAYS MEAN THE SAME": "GELIJKEND IS NIET ALTIJD HETZELFDE",
-    "A second look.": "Nog eens goed kijken.",
-    "Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.": "Vergelijk onzekere overeenkomsten. Bewerkingen, reeksen en RAW/JPEG-paren mogen naast elkaar blijven.",
-    "to review": "te beoordelen",
-    "Review next match": "Volgende overeenkomst beoordelen",
-    "Skip confirmation when keeping a copy": "Bevestiging overslaan bij bewaren van een kopie",
-    "Applies on this computer. The other original still goes to archive undo.": "Geldt op deze computer. Het andere origineel gaat nog steeds naar de herstelmap van het archief.",
-    "Compare similar pictures": "Vergelijkbare foto's vergelijken",
-    "Two similar pictures": "Twee vergelijkbare foto's",
-    "Compare files": "Bestanden vergelijken",
-    "Nothing needs a second look.": "Er hoeft niets opnieuw bekeken te worden.",
-    "Uncertain matches will appear here. Exact duplicates are handled automatically.": "Onzekere overeenkomsten verschijnen hier. Exacte duplicaten worden automatisch verwerkt.",
-    "SIMPLE SETTINGS, YOUR WAY": "EENVOUDIGE INSTELLINGEN, ZOALS JIJ WILT",
-    "A place for everything.": "Een plek voor alles.",
-    "Archive settings travel with your disk. Changes apply to future imports.": "Archiefinstellingen reizen mee met je schijf. Wijzigingen gelden voor toekomstige imports.",
-    "Folder organization": "Mapindeling",
-    "Choose a layout": "Kies een indeling",
-    "Year / month / day": "Jaar / maand / dag",
-    "Year / month": "Jaar / maand",
-    "Date folders": "Datumsmappen",
-    "Photos & videos / year / month / day": "Foto's & video's / jaar / maand / dag",
-    "Custom layout": "Aangepaste indeling",
-    "Advanced folder template": "Geavanceerd mapsjabloon",
-    "Template": "Sjabloon",
-    "Supported:": "Ondersteund:",
-    "Safe literal folder names are welcome.": "Je kunt ook gewone mapnamen gebruiken.",
-    "Filenames": "Bestandsnamen",
-    "Keep original filenames": "Oorspronkelijke bestandsnamen behouden",
-    "Use photo date / time": "Foto- en tijdstip gebruiken",
-    "Unknown-date folder": "Map voor onbekende datums",
-    "YOUR FILES WOULD LOOK LIKE THIS": "ZO ZIEN JE BESTANDEN ERUIT",
-    "Name collisions receive a unique suffix. Estimated dates stay marked; missing times aren't invented.": "Bij gelijke namen wordt een unieke toevoeging gebruikt. Geschatte datums blijven gemarkeerd; ontbrekende tijden worden niet verzonnen.",
-    "Automatically group very confident matches": "Zeer zekere overeenkomsten automatisch groeperen",
-    "Keep a clearly better equivalent copy active. All other originals remain in undo. Ambiguous variants go to review.": "Bewaar de duidelijk betere, gelijkwaardige kopie actief. Alle andere originelen blijven herstelbaar. Twijfelgevallen worden ter beoordeling aangeboden.",
-    "Save archive settings": "Archiefinstellingen opslaan",
-    "Deep video comparison (slower)": "Uitgebreide videovergelijking (langzamer)",
-    "Off by default: exact video duplicates are recognized by hash; possible matches from a preview or capture date and duration go to manual review. Enable to compare every frame and audio before automatically grouping a clearly higher-resolution equivalent. Requires automatic grouping above and can slow imports substantially.": "Standaard uit: exacte videokopieën worden herkend via hun hash; mogelijke overeenkomsten op basis van een voorbeeld of opnamedatum en duur gaan naar handmatige beoordeling. Schakel dit in om elk frame en de audio te vergelijken voordat een duidelijk hogere-resolutiekopie automatisch wordt gegroepeerd. Vereist automatisch groeperen hierboven en kan imports aanzienlijk vertragen.",
-    "Choosing an external disk": "Een externe schijf kiezen",
-    "Mac only: prefer APFS. Windows only: prefer NTFS. For use on both, exFAT is convenient, but lacks journaling and may require extra copying during import. Always eject safely and keep another backup.": "Alleen Mac: bij voorkeur APFS. Alleen Windows: bij voorkeur NTFS. Voor gebruik op beide is exFAT handig, maar het heeft geen journaling en kan extra kopieerwerk tijdens import vereisen. Werp de schijf altijd veilig uit en bewaar een extra back-up.",
-    "You do not need to reformat an existing disk. Formatting erases its files; this app never formats disks.": "Je hoeft een bestaande schijf niet opnieuw te formatteren. Formatteren wist de bestanden; deze app formatteert nooit schijven.",
-    "Import timings": "Importtijden",
-    "Reading and hashing": "Lezen en hashen",
-    "Metadata": "Metadata",
-    "Buffering": "Bufferen",
-    "Decoding (combined worker time)": "Decoderen (opgetelde werktijd)",
-    "Matching": "Vergelijken",
-    "Copying and catalog writes": "Kopiëren en catalogus bijwerken",
-    "Recovery backup": "Herstelback-up",
-    "Total elapsed": "Totale verstreken tijd",
-    "Stage times overlap while decoding runs in parallel; hashing includes exact-match verification.": "Fasetijden overlappen doordat decoderen parallel gebeurt; hashen omvat ook verificatie van exacte kopieën.",
-    "Reset defaults": "Standaardwaarden herstellen",
-    "Apply the saved layout to older imports?": "Opgeslagen indeling toepassen op eerdere imports?",
-    "Preview existing file moves first. Sources and folder history stay untouched.": "Bekijk eerst welke bestaande bestanden worden verplaatst. Bronnen en mapgeschiedenis blijven ongewijzigd.",
-    "Preview reorganization": "Herindeling bekijken",
-    "Preview undo of last reorganization": "Laatste herindeling ongedaan maken (voorbeeld)",
-    "Media tools": "Mediaprogramma's",
-    "RAW and video formats depend on the bundled decoders. Unsupported originals can still be archived without a preview.": "RAW- en videoformaten zijn afhankelijk van de meegeleverde decoders. Niet-ondersteunde originelen kunnen zonder voorbeeld worden gearchiveerd.",
-    "Available": "Beschikbaar",
-    "Sources stay safe until you explicitly clean them up.": "Bronbestanden blijven veilig totdat je ze zelf opschoont.",
-    "COMPARE THE ORIGINALS": "VERGELIJK DE ORIGINELEN",
-    "PICTURE DETAILS": "FOTODETAILS",
-    "Which copy would you keep?": "Welke kopie wil je bewaren?",
-    "Close": "Sluiten",
-    "Keep this copy active": "Deze kopie bewaren",
-    "Unavailable because the other picture has related files and cannot be moved to undo on its own.": "Niet beschikbaar: de andere foto heeft bijbehorende bestanden en kan niet afzonderlijk naar de herstelmap worden verplaatst.",
-    "Keep both / dismiss match": "Beide bewaren / overeenkomst negeren",
-    "Keeping one picture moves the other to archive undo. Keep both / dismiss match leaves both active and clears this review.": "Als je één foto bewaart, gaat de andere naar de herstelmap. Met beide bewaren / overeenkomst negeren blijven ze allebei actief en wordt deze beoordeling afgesloten.",
-    "Highlighted measurements are at least twice as large. File size and pixel count do not guarantee better quality; compare the originals before choosing.": "Gemarkeerde waarden zijn minstens twee keer zo hoog. Bestandsgrootte en aantal pixels garanderen geen betere kwaliteit; vergelijk de originelen voordat je kiest.",
-    "Resolution and file size favor different pictures, so neither is recommended.": "Resolutie en bestandsgrootte wijzen elk een andere foto aan; er wordt geen voorkeur gegeven.",
-    "Both pictures have related files and cannot be moved to undo on their own. Choose Keep both / dismiss match to finish this review without moving either picture.": "Beide foto's hebben bijbehorende bestanden en kunnen niet afzonderlijk naar de herstelmap. Kies Beide bewaren / overeenkomst negeren om deze beoordeling af te sluiten zonder foto's te verplaatsen.",
-    "The picture with related files cannot be moved to undo on its own. To move the other picture to undo, choose Keep this copy active for the picture with related files. Or choose Keep both / dismiss match.": "De foto met bijbehorende bestanden kan niet afzonderlijk naar de herstelmap. Kies Deze kopie bewaren bij die foto om de andere te verplaatsen. Of kies Beide bewaren / overeenkomst negeren.",
-    "This video proxy could not be played. Check the bundled decoder/encoder.": "Deze videovoorvertoning kan niet worden afgespeeld. Controleer de meegeleverde decoder/encoder.",
-    "The comparison video could not be played.": "De vergelijkingsvideo kan niet worden afgespeeld.",
-    "Prepare playable video preview": "Videovoorvertoning voorbereiden",
-    "Probably better": "Waarschijnlijk beter",
-    "at least 2x pixels": "minstens 2x zoveel pixels",
-    "at least 2x size": "minstens 2x zo groot",
-    "Related RAW/JPEG, sidecar or Live Photo files detected. This picture cannot be moved to archive undo on its own.": "Bijbehorende RAW/JPEG-, sidecar- of Live Photo-bestanden gevonden. Deze foto kan niet afzonderlijk naar de herstelmap worden verplaatst.",
-    "Original folders & import history": "Oorspronkelijke mappen en importgeschiedenis",
-    "Cleanup recovery needed": "Herstel van opschoning nodig",
-    "Source moved to OS trash": "Bron naar de prullenmand verplaatst",
-    "Source retained": "Bron behouden",
-    "Metadata & quality notes": "Metadata en kwaliteitsnotities",
-    "Play both from start": "Beide vanaf het begin afspelen",
-    "Pause both": "Beide pauzeren",
-    "Restore this original": "Dit origineel herstellen",
-    "Permanently purge undo copy": "Herstelkopie definitief verwijderen",
-    "Correct the date": "Datum corrigeren",
-    "Save date & reorganize this file": "Datum opslaan en dit bestand herindelen",
-    "Source cleanup preview": "Voorbeeld bronbestanden opschonen",
-    "EXPLICITLY VERIFIED, NEVER AUTOMATIC": "EXPLICIET GECONTROLEERD, NOOIT AUTOMATISCH",
-    "Clean up source folders.": "Bronmappen opschonen.",
-    "Only byte-identical archived originals qualify. Cleanup may leave one copy. Trash usually needs emptying before space is freed.": "Alleen byte-identieke originelen in het archief komen in aanmerking. Na opschoning kan één kopie overblijven. Leeg de prullenmand om schijfruimte vrij te maken.",
-    "No pending imported sources to clean up.": "Er zijn geen geïmporteerde bronbestanden om op te schonen.",
-    "Also remove genuinely empty imported subfolders": "Echt lege geïmporteerde submappen ook verwijderen",
-    "No recursive deletion. Dropped roots, hidden files and nonempty folders remain.": "Geen recursieve verwijdering. Bronmappen, verborgen bestanden en niet-lege mappen blijven behouden.",
-    "selected": "geselecteerd",
-    "to trash": "naar de prullenmand",
-    "Confirm cleanup...": "Opschonen bevestigen...",
-    "Archive reorganization preview": "Voorbeeld archiefherindeling",
-    "PREVIEW BEFORE MOVING": "BEKIJKEN VOORDAT JE VERPLAATST",
-    "Reorganize your archive.": "Je archief herindelen.",
-    "Only managed active files move. Originals, undo copies and original-folder albums stay intact.": "Alleen actieve archiefbestanden worden verplaatst. Originelen, herstelkopieën en albums met oorspronkelijke mappen blijven intact.",
-    "becomes": "wordt",
-    "Everything already follows the saved layout.": "Alles volgt al de opgeslagen indeling.",
-    "file(s) to reorganize": "bestand(en) opnieuw in te delen",
-    "Confirm reorganization...": "Herindeling bevestigen...",
-    "Confirm your keeper": "Bevestig welke kopie je bewaart",
-    "Keep the chosen file active and move the other original into archive undo? Meaningful edits and RAW/JPEG pairs should be kept together.": "Het gekozen bestand actief houden en het andere origineel naar de herstelmap verplaatsen? Bewerkingen en RAW/JPEG-paren horen bij elkaar.",
-    "Clean up verified sources": "Geverifieerde bronbestanden opschonen",
-    "Reorganize archive": "Archief herindelen",
-    "Permanently purge original": "Origineel definitief verwijderen",
-    "Previous archive unavailable": "Vorig archief niet beschikbaar",
-    "Connect the disk or choose a folder.": "Sluit de schijf aan of kies een map.",
-  };
-  let language = $state<Language>("en");
-  const t = (text: string) => language === "nl" ? dutch[text] ?? text : text;
   let native = $state(false);
   let mode = $state("main");
-  let tab = $state<Tab>("home");
+  let tab = $state<Tab>("library");
   let snapshot = $state<Snapshot>(structuredClone(emptySnapshot));
   let config = $state<Settings>({ ...defaults });
   let error = $state("");
@@ -280,6 +28,7 @@
   let working = $state(false);
   let dropping = $state(false);
   let items = $state<Item[]>([]);
+  let itemsStart = $state(0);
   let reviews = $state<Review[]>([]);
   let jobs = $state<Job[]>([]);
   let tools = $state<ToolStatus[]>([]);
@@ -287,14 +36,20 @@
   let filter = $state("all");
   let months = $state<LibraryMonth[]>([]);
   let month = $state("");
-  let page = $state(0);
   let libraryLoading = $state(false);
+  let loadingMore = $state(false);
   let examples = $state<string[]>([]);
   let configError = $state("");
   let selected = $state<Details | null>(null);
   let comparing = $state<Details | null>(null);
   let currentReview = $state<Review | null>(null);
-  let skipKeeperConfirmation = $state(false);
+  let reviewIndex = $state(0);
+  let opening = $state(false);
+  let showInfo = $state(true);
+  let thumbSize = $state(200);
+  let zoom = $state<{ x: number; y: number } | null>(null);
+  let undoAction = $state<UndoAction | null>(null);
+  let undoTimer: ReturnType<typeof setTimeout> | undefined;
   let dateEntry = $state("");
   let videos = $state<(VideoPlayback | null)[]>([null, null]);
   let videoRequest = 0;
@@ -308,16 +63,35 @@
   let undoingMoves = $state(false);
   let onTop = $state(true);
   let loaded = $state(false);
+  let revealLabel = $state("Show in folder");
   let lastQuery = "";
   let searchSeq = 0;
+  let detailSeq = 0;
   let mutating = false;
+  let moreRequest: Promise<void> | null = null;
   const busy = $derived(working || ["scanning", "importing", "paused"].includes(snapshot.progress.status));
+  const hasArchive = $derived(!!snapshot.root);
   const percent = $derived(snapshot.progress.total ? Math.round(snapshot.progress.done / snapshot.progress.total * 100) : 0);
   const viewerIndex = $derived(selected ? items.findIndex((item) => item.id === selected?.item.id) : -1);
+  const absoluteIndex = $derived(viewerIndex < 0 ? -1 : itemsStart + viewerIndex);
   const pictureComparison = $derived(selected && comparing ? comparePictures(selected.item.media, comparing.item.media) : null);
   const monthCount = $derived(months.find((entry) => entry.month === month)?.count ?? 0);
-  const years = $derived([...new Set(months.map((entry) => entry.month === "unknown" ? "unknown" : entry.month.slice(0, 4)))]);
+  const monthPosition = $derived(months.findIndex((entry) => entry.month === month));
   const year = $derived(month === "unknown" ? "unknown" : month.slice(0, 4));
+  const years = $derived.by(() => {
+    const result: { year: string; count: number }[] = [];
+    for (const entry of months) {
+      const value = entry.month === "unknown" ? "unknown" : entry.month.slice(0, 4);
+      const last = result.at(-1);
+      if (last?.year === value) last.count += entry.count;
+      else result.push({ year: value, count: entry.count });
+    }
+    return result;
+  });
+  const canPrevious = $derived(absoluteIndex > 0 || (absoluteIndex === 0 && monthPosition > 0));
+  const canNext = $derived(absoluteIndex >= 0 && (absoluteIndex < monthCount - 1 || monthPosition < months.length - 1));
+  const settingsDirty = $derived((Object.keys(defaults) as (keyof Settings)[]).some((key) => config[key] !== snapshot.settings[key]));
+  const filtered = $derived(search.trim() !== "" || filter !== "all");
   const presets = [
     ["{yyyy}/{mm}/{dd}", "Year / month / day"],
     ["{yyyy}/{mm}", "Year / month"],
@@ -326,16 +100,44 @@
   ];
 
   $effect(() => {
-    document.documentElement.lang = language;
+    document.documentElement.lang = locale.language;
+  });
+
+  $effect(() => {
+    document.body.style.overflow = selected && !comparing ? "hidden" : "";
   });
 
   function changeLanguage(event: Event) {
-    language = (event.currentTarget as HTMLSelectElement).value === "nl" ? "nl" : "en";
-    window.localStorage.setItem("photo-dedupe.language", language);
+    locale.language = (event.currentTarget as HTMLSelectElement).value === "nl" ? "nl" : "en";
+    window.localStorage.setItem("photo-dedupe.language", locale.language);
   }
 
   function syncLanguage(event: StorageEvent) {
-    if (event.key === "photo-dedupe.language") language = event.newValue === "nl" ? "nl" : "en";
+    if (event.key === "photo-dedupe.language") locale.language = event.newValue === "nl" ? "nl" : "en";
+  }
+
+  function monthLabel(value: string, style: "long" | "short" = "long") {
+    if (!value) return "";
+    if (value === "unknown") return t("Unknown date");
+    const [y, m] = value.split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString(locale.language === "nl" ? "nl-NL" : "en-US", style === "long"
+      ? { month: "long", year: "numeric", timeZone: "UTC" }
+      : { month: "short", timeZone: "UTC" });
+  }
+
+  function formatDate(value: string | null) {
+    if (!value) return t("Date unknown");
+    const [y, m, d] = value.slice(0, 10).split("-").map(Number);
+    if (!y || !m || !d) return value;
+    const date = new Date(Date.UTC(y, m - 1, d)).toLocaleDateString(locale.language === "nl" ? "nl-NL" : "en-US", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+    const time = value.slice(11, 16);
+    return /^\d\d:\d\d$/.test(time) ? `${date}, ${time}` : date;
+  }
+
+  function focusOnMount(node: HTMLElement) {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    node.focus({ preventScroll: true });
+    return () => { if (previous?.isConnected) previous.focus({ preventScroll: true }); };
   }
 
   async function run(action: () => Promise<void>) {
@@ -356,9 +158,9 @@
       await loadLibrary(preservePages);
     } else {
       items = [];
+      itemsStart = 0;
       months = [];
       month = "";
-      page = 0;
       lastQuery = "";
       libraryLoading = false;
       searchSeq += 1;
@@ -371,6 +173,14 @@
     finally { mutating = false; }
   }
 
+  async function fetchRange(term: string, kind: string, target: string, start: number, end: number) {
+    const offsets: number[] = [];
+    for (let offset = start; offset < end; offset += pageSize) offsets.push(offset);
+    if (!offsets.length) offsets.push(start);
+    const pages = await Promise.all(offsets.map((offset) => api<Item[]>("library", { search: term, filter: kind, month: target, offset })));
+    return pages.flat();
+  }
+
   async function loadLibrary(preservePage = false, seq = ++searchSeq) {
     const key = `${search}\0${filter}`;
     const currentSearch = search;
@@ -379,41 +189,92 @@
     if (seq !== searchSeq) return;
     const nextMonth = result.some((entry) => entry.month === month) ? month : result[0]?.month ?? "";
     const count = result.find((entry) => entry.month === nextMonth)?.count ?? 0;
-    const nextPage = preservePage && key === lastQuery && nextMonth === month
-      ? Math.min(page, Math.max(0, Math.ceil(count / pageSize) - 1)) : 0;
-    const nextItems = nextMonth
-      ? await api<Item[]>("library", { search: currentSearch, filter: currentFilter, month: nextMonth, offset: nextPage * pageSize })
-      : [];
+    // Keep the loaded window when the catalog changes underneath, so scrolling and the open photo stay put.
+    const keep = preservePage && key === lastQuery && nextMonth === month;
+    const start = keep ? Math.min(itemsStart, Math.max(0, Math.floor((count - 1) / pageSize) * pageSize)) : 0;
+    const end = Math.min(count, keep ? Math.max(itemsStart + items.length, start + pageSize) : pageSize);
+    const nextItems = nextMonth ? await fetchRange(currentSearch, currentFilter, nextMonth, start, end) : [];
     if (seq !== searchSeq) return;
     months = result;
     month = nextMonth;
-    page = nextPage;
+    itemsStart = start;
     items = nextItems;
     lastQuery = key;
     libraryLoading = false;
   }
 
-  async function changeMonth(nextMonth: string) {
-    if (nextMonth === month || working) return;
-    await run(async () => {
-      const seq = ++searchSeq;
-      const result = await api<Item[]>("library", { search, filter, month: nextMonth, offset: 0 });
-      if (seq !== searchSeq) return;
+  async function changeMonth(nextMonth: string, at: "start" | "end" = "start", scroll = true) {
+    // Ignore month changes while a new search/filter is still loading; its months list isn't ready yet.
+    if (!nextMonth || `${search}\0${filter}` !== lastQuery) return false;
+    const seq = ++searchSeq;
+    const count = months.find((entry) => entry.month === nextMonth)?.count ?? 0;
+    const start = at === "end" ? Math.max(0, Math.floor((count - 1) / pageSize) * pageSize) : 0;
+    libraryLoading = true;
+    try {
+      const result = await api<Item[]>("library", { search, filter, month: nextMonth, offset: start });
+      if (seq !== searchSeq) return false;
       month = nextMonth;
-      page = 0;
+      itemsStart = start;
       items = result;
-    });
+      if (scroll) window.scrollTo({ top: 0 });
+      return true;
+    } finally {
+      if (seq === searchSeq) libraryLoading = false;
+    }
   }
 
-  async function changePage(nextPage: number) {
-    if (working || nextPage < 0 || nextPage * pageSize >= monthCount) return;
-    await run(async () => {
-      const seq = ++searchSeq;
-      const result = await api<Item[]>("library", { search, filter, month, offset: nextPage * pageSize });
-      if (seq !== searchSeq) return;
-      page = nextPage;
-      items = result;
-    });
+  function loadMore(): Promise<void> {
+    if (moreRequest) return moreRequest;
+    const offset = itemsStart + items.length;
+    if (!month || offset >= monthCount) return Promise.resolve();
+    const seq = searchSeq;
+    const current = month;
+    loadingMore = true;
+    moreRequest = api<Item[]>("library", { search, filter, month: current, offset })
+      .then((result) => {
+        if (seq === searchSeq && month === current && itemsStart + items.length === offset) items = [...items, ...result];
+      })
+      .catch((reason: unknown) => { error = message(reason); })
+      .finally(() => { moreRequest = null; loadingMore = false; });
+    return moreRequest;
+  }
+
+  async function loadEarlier() {
+    if (itemsStart <= 0 || loadingMore) return;
+    const seq = searchSeq;
+    const current = month;
+    const offset = Math.max(0, itemsStart - pageSize);
+    loadingMore = true;
+    try {
+      const result = await api<Item[]>("library", { search, filter, month: current, offset });
+      if (seq !== searchSeq || month !== current) return;
+      items = [...result.slice(0, itemsStart - offset), ...items];
+      itemsStart = offset;
+    } catch (reason: unknown) { error = message(reason); }
+    finally { loadingMore = false; }
+  }
+
+  function loadOnScroll(node: HTMLElement) {
+    let active = true;
+    const check = async () => {
+      const before = items.length;
+      await loadMore();
+      if (active && items.length > before && node.getBoundingClientRect().top < window.innerHeight + 800) void check();
+    };
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void check();
+    }, { rootMargin: "800px" });
+    observer.observe(node);
+    return () => { active = false; observer.disconnect(); };
+  }
+
+  function clearSearch() {
+    search = "";
+    filter = "all";
+  }
+
+  function updateThumbSize() {
+    window.localStorage.setItem("photo-dedupe.thumbSize", String(thumbSize));
   }
 
   async function chooseArchive() {
@@ -430,8 +291,11 @@
   }
 
   async function importFolders(paths?: string[]) {
+    if (!snapshot.root) {
+      await chooseArchive();
+      if (!snapshot.root) return;
+    }
     await run(async () => {
-      if (!snapshot.root) throw new Error(t("Choose an archive destination first."));
       const folders = paths ?? await open({ directory: true, multiple: true, title: t("Choose photo folders to copy") });
       if (!folders) return;
       const started = await api<boolean>("start_import", { roots: typeof folders === "string" ? [folders] : folders });
@@ -440,81 +304,197 @@
     });
   }
 
-  async function selectItem(id: string) {
-    await run(async () => {
-      selected = await api<Details>("item_details", { id });
-      comparing = null;
-      currentReview = null;
-      dateEntry = selected.item.media.date?.slice(0, 10) ?? "";
-      resetVideos();
-    });
-  }
-
-  async function navigatePhoto(direction: -1 | 1) {
-    if (working || viewerIndex < 0) return;
-    const absoluteIndex = page * pageSize + viewerIndex + direction;
-    if (absoluteIndex < 0 || absoluteIndex >= monthCount) return;
-    await run(async () => {
-      const nextPage = Math.floor(absoluteIndex / pageSize);
-      const seq = ++searchSeq;
-      const nextItems = nextPage === page ? items
-        : await api<Item[]>("library", { search, filter, month, offset: nextPage * pageSize });
-      const item = nextItems[absoluteIndex % pageSize];
-      if (!item) throw new Error(t("The photo list changed. Refresh the library and try again."));
-      const detail = await api<Details>("item_details", { id: item.id });
-      if (seq !== searchSeq) return;
-      items = nextItems;
-      page = nextPage;
-      selected = detail;
-      dateEntry = detail.item.media.date?.slice(0, 10) ?? "";
-      resetVideos();
-    });
-  }
-
-  function viewerKey(event: KeyboardEvent) {
-    if (working) return;
-    const target = event.target;
-    if (target instanceof HTMLElement && (target.isContentEditable || target.closest("input, select, textarea, video"))) return;
-    if (event.key === "Escape" && selected) {
-      closeDetails();
-      return;
-    }
-    if (selected && !comparing && !currentReview && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
-      event.preventDefault();
-      void navigatePhoto(event.key === "ArrowLeft" ? -1 : 1);
-    }
-  }
-
-  async function loadComparison(review: Review) {
-    [selected, comparing] = await Promise.all([
-      api<Details>("item_details", { id: review.item }),
-      api<Details>("item_details", { id: review.candidate }),
-    ]);
-    currentReview = review;
+  function showDetail(detail: Details) {
+    selected = detail;
+    comparing = null;
+    currentReview = null;
+    zoom = null;
+    dateEntry = detail.item.media.date?.slice(0, 10) ?? "";
     resetVideos();
   }
 
-  async function compare(review: Review) {
-    await run(async () => { await loadComparison(review); });
+  async function openItem(id: string) {
+    const seq = ++detailSeq;
+    opening = true;
+    try {
+      const detail = await api<Details>("item_details", { id });
+      if (seq === detailSeq) showDetail(detail);
+    } catch (reason: unknown) { error = message(reason); }
+    finally { if (seq === detailSeq) opening = false; }
+  }
+
+  async function navigatePhoto(direction: -1 | 1) {
+    if (opening || working || !selected || comparing || absoluteIndex < 0) return;
+    const target = absoluteIndex + direction;
+    const seq = ++detailSeq;
+    opening = true;
+    error = "";
+    try {
+      let item: Item | undefined;
+      if (target >= 0 && target < monthCount) {
+        if (target === itemsStart + items.length) await loadMore();
+        else if (target === itemsStart - 1) await loadEarlier();
+        item = items[target - itemsStart];
+      } else {
+        const next = months[monthPosition + direction];
+        if (!next) return;
+        if (!await changeMonth(next.month, direction < 0 ? "end" : "start", false) || month !== next.month) {
+          throw new Error(t("The photo list changed. Refresh the library and try again."));
+        }
+        item = direction < 0 ? items.at(-1) : items[0];
+      }
+      if (!item) throw new Error(t("The photo list changed. Refresh the library and try again."));
+      const detail = await api<Details>("item_details", { id: item.id });
+      if (seq === detailSeq) showDetail(detail);
+    } catch (reason: unknown) { error = message(reason); }
+    finally { if (seq === detailSeq) opening = false; }
+  }
+
+  async function reveal(item: Item) {
+    error = "";
+    try { await api("reveal_item", { id: item.id }); }
+    catch (reason: unknown) { error = message(reason); }
+  }
+
+  function onKey(event: KeyboardEvent) {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const typing = !!target && (target.isContentEditable || !!target.closest("input, select, textarea"));
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z" && undoAction && !typing && !working) {
+      event.preventDefault();
+      void undoKeep();
+      return;
+    }
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.key === "Escape") {
+      if (working) return;
+      if (moves !== null) moves = null;
+      else if (cleanup !== null) cleanup = null;
+      else if (zoom) zoom = null;
+      else if (selected) closeDetails();
+      else return;
+      event.preventDefault();
+      return;
+    }
+    if (typing || target?.closest("video") || cleanup !== null || moves !== null || working) return;
+    if (comparing && currentReview) {
+      reviewKey(event);
+      return;
+    }
+    if (!selected) return;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      void navigatePhoto(event.key === "ArrowLeft" ? -1 : 1);
+    } else if (event.key.toLowerCase() === "i") {
+      toggleInfo();
+    }
+  }
+
+  function toggleInfo() {
+    showInfo = !showInfo;
+    window.localStorage.setItem("photo-dedupe.showInfo", String(showInfo));
+  }
+
+  function reviewKey(event: KeyboardEvent) {
+    if (opening || busy) return;
+    const key = event.key.toLowerCase();
+    // Never let a held-down key resolve several matches the user hasn't seen.
+    if (event.repeat && (key === "1" || key === "2" || key === "b")) return;
+    if (key === "1" || key === "2") {
+      const index = key === "1" ? 0 : 1;
+      const detail = index === 0 ? selected : comparing;
+      const other = index === 0 ? comparing : selected;
+      if (detail && other && !other.companions.length) void resolve(detail.item.id);
+    } else if (key === "b") void resolve(null);
+    else if (key === "s" || event.key === "ArrowRight") void stepReview(1);
+    else if (event.key === "ArrowLeft") void stepReview(-1);
+    else if (key === "z") zoom = zoom ? null : { x: 50, y: 50 };
+    else return;
+    event.preventDefault();
+  }
+
+  async function openReview(index: number) {
+    const review = reviews[index];
+    if (!review) return;
+    const seq = ++detailSeq;
+    opening = true;
+    try {
+      const [first, second] = await Promise.all([
+        api<Details>("item_details", { id: review.item }),
+        api<Details>("item_details", { id: review.candidate }),
+      ]);
+      if (seq !== detailSeq) return;
+      selected = first;
+      comparing = second;
+      currentReview = review;
+      reviewIndex = index;
+      zoom = null;
+      resetVideos();
+    } catch (reason: unknown) { error = message(reason); }
+    finally { if (seq === detailSeq) opening = false; }
+  }
+
+  async function stepReview(direction: -1 | 1) {
+    if (!reviews.length) return;
+    await openReview((reviewIndex + direction + reviews.length) % reviews.length);
   }
 
   async function resolve(keeper: string | null) {
     const review = currentReview;
-    if (!review) return;
+    if (!review || !selected || !comparing || working) return;
+    const index = reviewIndex;
+    const kept = keeper === selected.item.id ? selected : keeper === comparing.item.id ? comparing : null;
+    const discarded = keeper ? (keeper === review.item ? review.candidate : review.item) : null;
     await run(async () => {
-      if (keeper && !skipKeeperConfirmation && !await confirm(t("Keep the chosen file active and move the other original into archive undo? Meaningful edits and RAW/JPEG pairs should be kept together."), { title: t("Confirm your keeper"), kind: "warning" })) return;
       await mutate(async () => {
         await api("resolve_review", { item: review.item, candidate: review.candidate, keeper });
-        closeDetails();
         await refresh(true);
-        if (reviews.length) await loadComparison(reviews[0]);
-        else notice = t("All similar matches have been reviewed.");
       });
+      if (discarded && kept) showUndo({ review, discarded, keptName: kept.item.originalName });
+      if (reviews.length) await openReview(Math.min(index, reviews.length - 1));
+      else {
+        closeDetails();
+        notice = t("All similar matches have been reviewed.");
+      }
     });
   }
 
-  function updateSkipKeeperConfirmation() {
-    window.localStorage.setItem("photo-dedupe.skipKeeperConfirmation", String(skipKeeperConfirmation));
+  function showUndo(action: UndoAction) {
+    clearTimeout(undoTimer);
+    undoAction = action;
+    undoTimer = setTimeout(() => { undoAction = null; }, 12000);
+  }
+
+  async function undoKeep() {
+    const action = undoAction;
+    if (!action) return;
+    clearTimeout(undoTimer);
+    undoAction = null;
+    await run(async () => {
+      await mutate(async () => {
+        await api("undo_review", { item: action.review.item, candidate: action.review.candidate, reason: action.review.reason, discarded: action.discarded });
+        await refresh(true);
+      });
+      const index = reviews.findIndex((review) => review.item === action.review.item && review.candidate === action.review.candidate);
+      if (index >= 0) {
+        tab = "review";
+        await openReview(index);
+      }
+      notice = t("Restored. The match is back in review.");
+    });
+  }
+
+  function zoomAt(event: MouseEvent) {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    zoom = zoom ? null : { x: (event.clientX - rect.left) / rect.width * 100, y: (event.clientY - rect.top) / rect.height * 100 };
+  }
+
+  function panZoom(event: MouseEvent) {
+    if (!zoom) return;
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    zoom = {
+      x: Math.min(100, Math.max(0, (event.clientX - rect.left) / rect.width * 100)),
+      y: Math.min(100, Math.max(0, (event.clientY - rect.top) / rect.height * 100)),
+    };
   }
 
   function resetVideos() {
@@ -572,7 +552,7 @@
   async function cleanSources() {
     await run(async () => {
       if (!cleanupSelection.length) throw new Error(t("Select at least one eligible file."));
-      const cleanupPrompt = language === "nl"
+      const cleanupPrompt = locale.language === "nl"
         ? `Verplaats ${cleanupSelection.length} geverifieerde bronbestanden naar de prullenmand?\n\nJe archief kan hierdoor de enige kopie zijn. Een tweede back-up wordt aanbevolen.\n\nLeeg de prullenmand handmatig om schijfruimte vrij te maken. De app verwijdert bronbestanden nooit definitief.`
         : `Move ${cleanupSelection.length} verified source files to OS Trash/Recycle Bin?\n\nThis may leave your archive as the only copy. A second backup is recommended.\n\nTrash must usually be emptied manually before disk space is reclaimed. The app never permanently deletes sources.`;
       const approved = await confirm(
@@ -598,7 +578,7 @@
 
   async function applyMoves() {
     await run(async () => {
-      const movePrompt = language === "nl"
+      const movePrompt = locale.language === "nl"
         ? `De indeling van ${moves?.length ?? 0} gearchiveerde bestanden aanpassen? Bronnen blijven ongewijzigd. Er wordt een herstelbestand in het archief opgeslagen.`
         : `Reorganize ${moves?.length ?? 0} archived files using the saved layout? Sources are untouched. A recovery manifest is saved with the archive.`;
       if (!moves?.length || !await confirm(movePrompt, { title: t("Reorganize archive"), kind: "warning" })) return;
@@ -619,7 +599,7 @@
 
   async function purge(item: Item) {
     await run(async () => {
-      const purgePrompt = language === "nl"
+      const purgePrompt = locale.language === "nl"
         ? `Deze herstelkopie definitief verwijderen: ${item.originalName}?\n\nDit kan het LAATSTE byte-identieke origineel zijn, vooral als de bron is opgeschoond. De beter ogende foto is geen exacte back-up. Dit kan niet ongedaan worden gemaakt.`
         : `Permanently delete this archive undo copy: ${item.originalName}?\n\nIt may be the LAST byte-identical original, especially if its source was cleaned up. The better-looking keeper is not an exact backup. This cannot be undone.`;
       if (!await confirm(purgePrompt, { title: t("Permanently purge original"), kind: "warning" })) return;
@@ -631,8 +611,30 @@
     });
   }
 
+  async function saveDate() {
+    await run(async () => {
+      if (!selected) return;
+      const id = selected.item.id;
+      await mutate(async () => {
+        await api("set_date", { id, date: dateEntry });
+        closeDetails();
+        await refresh(true);
+      });
+    });
+  }
+
   function closeDetails() {
-    selected = null; comparing = null; currentReview = null; resetVideos();
+    const id = selected && !comparing ? selected.item.id : null;
+    detailSeq += 1;
+    opening = false;
+    selected = null; comparing = null; currentReview = null; zoom = null; resetVideos();
+    if (!id) return;
+    // Return to the last viewed photo in the grid, so keyboard and scroll position follow the lightbox.
+    void tick().then(() => {
+      const card = document.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`);
+      card?.scrollIntoView({ block: "nearest" });
+      card?.focus({ preventScroll: true });
+    });
   }
 
   $effect(() => {
@@ -650,16 +652,17 @@
     const term = search;
     const selectedFilter = filter;
     const key = `${term}\0${selectedFilter}`;
-    if (!loaded || !native || !snapshot.root) return;
+    if (!loaded || !native || !hasArchive) return;
     if (key === lastQuery) { libraryLoading = false; return; }
     const seq = ++searchSeq;
     libraryLoading = true;
     const timer = setTimeout(() => {
       if (seq !== searchSeq) return;
       void loadLibrary(false, seq)
+        .then(() => { if (seq === searchSeq) window.scrollTo({ top: 0 }); })
         .catch((reason: unknown) => {
           if (seq !== searchSeq) return;
-          items = []; months = []; month = ""; page = 0; lastQuery = "";
+          items = []; itemsStart = 0; months = []; month = ""; lastQuery = "";
           libraryLoading = false;
           error = message(reason);
         });
@@ -668,11 +671,12 @@
   });
 
   onMount(() => {
-    language = window.localStorage.getItem("photo-dedupe.language") === "nl" ? "nl" : "en";
+    locale.language = window.localStorage.getItem("photo-dedupe.language") === "nl" ? "nl" : "en";
+    thumbSize = Number(window.localStorage.getItem("photo-dedupe.thumbSize")) || 200;
+    showInfo = window.localStorage.getItem("photo-dedupe.showInfo") !== "false";
+    revealLabel = /Mac/i.test(navigator.userAgent) ? "Show in Finder" : /Windows/i.test(navigator.userAgent) ? "Show in Explorer" : "Show in folder";
     native = isTauri();
     mode = native ? getCurrentWindow().label : new URLSearchParams(window.location.search).get("window") ?? "main";
-    skipKeeperConfirmation = window.localStorage.getItem("photo-dedupe.skipKeeperConfirmation") === "true";
-    if (mode === "viewer") tab = "library";
     if (!native) return;
     const removers: UnlistenFn[] = [];
     let disposed = false;
@@ -706,50 +710,83 @@
         }
       }
       config = { ...snapshot.settings };
+      if (!snapshot.root && mode === "main") tab = "import";
       if (mode === "main") tools = await api<ToolStatus[]>("tool_status");
       await refresh();
       loaded = true;
     });
-    return () => { disposed = true; for (const remove of removers) remove(); };
+    return () => { disposed = true; clearTimeout(undoTimer); for (const remove of removers) remove(); };
   });
 </script>
 
 <svelte:head><title>Photo Archive</title><meta name="description" content="An offline archive for pictures and videos" /></svelte:head>
-<svelte:window onkeydown={viewerKey} onstorage={syncLanguage} />
+<svelte:window onkeydown={onKey} onstorage={syncLanguage} />
 
-{#snippet datePicker()}
+{#snippet libraryView(viewer: boolean)}
+  <div class="library-toolbar">
+    <div class="search-field">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>
+      <input class="search" aria-label={t("Search pictures and original folders")} bind:value={search} placeholder={t("Search pictures, dates or original folders...")} />
+      {#if search}<button class="clear-search" aria-label={t("Clear search")} onclick={() => search = ""}>×</button>{/if}
+    </div>
+    <select aria-label={t("Filter library")} bind:value={filter}>
+      <option value="all">{t("All pictures and videos")}</option><option value="video">{t("Videos")}</option><option value="unknown">{t("Unknown dates")}</option><option value="estimated">{t("Estimated dates")}</option>
+      {#if !viewer}<option value="undo">{t("Retained undo copies")}</option>{/if}
+    </select>
+    <label class="size-slider" title={t("Thumbnail size")}>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" /></svg>
+      <input type="range" min="120" max="320" step="20" aria-label={t("Thumbnail size")} bind:value={thumbSize} onchange={updateThumbSize} />
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="2" y="2" width="20" height="20" rx="3" /></svg>
+    </label>
+  </div>
   {#if months.length}
-    <div class="date-picker">
-      <label>{t("Year")}
-        <select aria-label={t("Choose year")} value={year} disabled={working || libraryLoading} onchange={(event) => {
-          const value = event.currentTarget.value;
-          const entry = months.find((candidate) => value === "unknown" ? candidate.month === "unknown" : candidate.month.startsWith(`${value}-`));
-          if (entry) void changeMonth(entry.month);
-        }}>
-          {#each years as value}<option value={value}>{value === "unknown" ? t("Unknown date") : value}</option>{/each}
-        </select>
-      </label>
-      {#if year !== "unknown"}
-        <label>{t("Month")}
-          <select aria-label={t("Choose month")} value={month} disabled={working || libraryLoading} onchange={(event) => changeMonth(event.currentTarget.value)}>
-            {#each months.filter((entry) => entry.month.startsWith(`${year}-`)) as entry}
-              <option value={entry.month}>{entry.month.slice(5, 7)} ({entry.count.toLocaleString()})</option>
-            {/each}
-          </select>
-        </label>
-      {/if}
-      <span>{monthCount.toLocaleString()} {t("pictures and videos")}</span>
+    <div class="library-layout">
+      <nav class="timeline" aria-label={t("Timeline")}>
+        {#each years as entry (entry.year)}
+          <button class="timeline-year" class:active={entry.year === year} onclick={() => {
+            const first = months.find((candidate) => entry.year === "unknown" ? candidate.month === "unknown" : candidate.month.startsWith(`${entry.year}-`));
+            if (first && first.month !== month) void changeMonth(first.month).catch((reason: unknown) => { error = message(reason); });
+          }}><span>{entry.year === "unknown" ? t("Unknown date") : entry.year}</span><small>{entry.count.toLocaleString()}</small></button>
+          {#if entry.year === year && year !== "unknown"}
+            <div class="timeline-months">
+              {#each months.filter((candidate) => candidate.month.startsWith(`${year}-`)) as entry (entry.month)}
+                <button class:active={entry.month === month} aria-current={entry.month === month ? "true" : undefined} onclick={() => { if (entry.month !== month) void changeMonth(entry.month).catch((reason: unknown) => { error = message(reason); }); }}><span>{monthLabel(entry.month, "short")}</span><small>{entry.count.toLocaleString()}</small></button>
+              {/each}
+            </div>
+          {/if}
+        {/each}
+      </nav>
+      <section class="library-main" aria-busy={libraryLoading}>
+        <div class="month-header">
+          <div><h2>{monthLabel(month)}</h2><span>{monthCount.toLocaleString()} {t("pictures and videos")}{filtered ? ` · ${t("filtered")}` : ""}</span></div>
+          <div class="button-row">
+            <button class="secondary" disabled={monthPosition <= 0} onclick={() => changeMonth(months[monthPosition - 1].month).catch((reason: unknown) => { error = message(reason); })}>← {t("Newer")}</button>
+            <button class="secondary" disabled={monthPosition < 0 || monthPosition >= months.length - 1} onclick={() => changeMonth(months[monthPosition + 1].month).catch((reason: unknown) => { error = message(reason); })}>{t("Older")} →</button>
+          </div>
+        </div>
+        {#if itemsStart > 0}<button class="text-button load-earlier" disabled={loadingMore} onclick={loadEarlier}>{t("Show more recent pictures from this month")}</button>{/if}
+        <div class="photo-grid" class:loading={libraryLoading} style={`--thumb:${thumbSize}px`}>
+          {#each items as item (item.id)}
+            <button class="photo-card" data-id={item.id} title={item.originalName} onclick={() => openItem(item.id)}>
+              <Preview {item} />
+              <span class="photo-caption"><strong>{item.originalName}</strong><small>{item.media.date?.slice(0, 10) ?? t("Date unknown")}{item.media.dateSource.startsWith("estimated") ? ` · ${t("estimated")}` : ""}</small></span>
+              {#if item.state === "undo"}<span class="card-badge">{t("Undo copy")}</span>{/if}
+            </button>
+          {/each}
+        </div>
+        {#if itemsStart + items.length < monthCount}
+          {#key items.length}<div class="load-more" {@attach loadOnScroll}>{loadingMore ? t("Loading more pictures...") : ""}</div>{/key}
+        {/if}
+      </section>
     </div>
-  {/if}
-{/snippet}
-
-{#snippet pageControls()}
-  {#if monthCount > pageSize}
-    <div class="page-controls">
-      <button class="secondary" disabled={working || libraryLoading || page === 0} onclick={() => changePage(page - 1)}>{t("Previous page")}</button>
-      <span>{t("Page")} {page + 1} {t("of")} {Math.ceil(monthCount / pageSize)}</span>
-      <button class="secondary" disabled={working || libraryLoading || (page + 1) * pageSize >= monthCount} onclick={() => changePage(page + 1)}>{t("Next page")}</button>
-    </div>
+  {:else if libraryLoading}
+    <div class="empty"><p>{t("Loading your pictures...")}</p></div>
+  {:else if !snapshot.root}
+    <div class="empty"><h2>{viewer ? t("Open your archive in the main app.") : t("Start with an archive folder.")}</h2><p>{t("A dedicated archive folder keeps things tidy.")}</p>{#if !viewer}<button class="primary" disabled={!native} onclick={chooseArchive}>{t("Choose folder")}</button>{/if}</div>
+  {:else if filtered}
+    <div class="empty"><h2>{search ? `${t("No matches for")} “${search}”` : t("No pictures match this filter.")}</h2><p>{t("Try another filename, date or original folder.")}</p><button class="secondary" onclick={clearSearch}>{t("Clear search")}</button></div>
+  {:else}
+    <div class="empty"><h2>{t("Your pictures will appear here.")}</h2><p>{viewer ? t("Imported pictures and videos will appear here.") : t("Add folders to fill your library. Originals stay untouched.")}</p>{#if !viewer}<button class="primary" disabled={!native} onclick={() => importFolders()}>{t("Add folders +")}</button>{/if}</div>
   {/if}
 {/snippet}
 
@@ -771,75 +808,58 @@
       <div><strong>{t("Photo Archive Viewer")}</strong><small>{snapshot.root?.split(/[\\/]/).pop() ?? t("No archive open")}</small></div>
       <button class="secondary" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>{t("Open main app")}</button>
     </header>
-    {#if error}<div class="banner error" role="alert">{error}</div>{/if}
+    {#if error && !selected}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
     {#if !native}<div class="banner warning">{t("Photo previews are available in the desktop app.")}</div>{/if}
-    {#if selected}
-      <div class="viewer-navigation">
-        <button class="secondary" disabled={working} onclick={closeDetails}>{t("Back to thumbnails")}</button>
-        <span>{selected.item.originalName}</span>
-        <div class="button-row">
-          <button class="secondary" disabled={working || viewerIndex < 0 || page * pageSize + viewerIndex <= 0} onclick={() => navigatePhoto(-1)}>{t("Previous")}</button>
-          <button class="secondary" disabled={working || viewerIndex < 0 || page * pageSize + viewerIndex >= monthCount - 1} onclick={() => navigatePhoto(1)}>{t("Next")}</button>
-        </div>
-      </div>
-      <section class="viewer-stage" aria-label={selected.item.originalName}>
-        {#if videos[0]?.source}
-          {@const video = videos[0]}
-          <video src={video.source} controls autoplay onerror={() => videoFailed(0, video.id, video.source)}><track kind="captions" /></video>
-        {:else}
-          <Preview item={selected.item} large />
-        {/if}
-      </section>
-      <div class="viewer-caption">
-        <div><strong>{selected.item.media.date?.slice(0, 10) ?? t("Date unknown")}</strong><small>{selected.item.albums.join(" / ")}</small><small>{selected.item.media.dateSource} / {selected.item.media.width} x {selected.item.media.height} / {bytes(selected.item.media.bytes)}</small></div>
-        {#if selected.item.media.kind === "video" && !videos[0]?.source}
-          {#if videos[0]}<small role="status">{t(videos[0].phase === "converting" ? "Preparing a playable copy..." : "Opening video...")}</small>
-          {:else}<button class="secondary" disabled={working} onclick={() => selected && playVideo(selected.item)}>{t("Play video")}</button>{/if}
-        {/if}
-        <small>{t("Arrow keys to browse / Escape for thumbnails")}</small>
-      </div>
-      {#if selected.item.media.warnings.length}<details><summary>{t("Photo information")}</summary>{#each selected.item.media.warnings as warning}<p class="muted">{warning}</p>{/each}</details>{/if}
-    {:else}
-      <div class="library-toolbar">
-        <input class="search" aria-label={t("Search pictures and original folders")} bind:value={search} placeholder={t("Search pictures, dates or original folders...")} />
-        <select aria-label={t("Filter viewer")} bind:value={filter}><option value="all">{t("All pictures and videos")}</option><option value="video">{t("Videos")}</option><option value="unknown">{t("Unknown dates")}</option><option value="estimated">{t("Estimated dates")}</option></select>
-      </div>
-      {@render datePicker()}
-      {#if items.length}
-        <div class="photo-grid">{#each items as item (item.id)}<button class="photo-card" disabled={working || libraryLoading} onclick={() => selectItem(item.id)}><Preview {item} /><div class="photo-info"><strong>{item.originalName}</strong><span>{item.media.date?.slice(0, 10) ?? "Date unknown"}</span><small>{item.albums.join(" / ")}</small></div></button>{/each}</div>
-        {@render pageControls()}
-      {:else}
-        <div class="empty"><h2>{snapshot.root ? t("No pictures to show yet.") : t("Open your archive in the main app.")}</h2><p>{search ? t("No matching pictures. Try another search.") : t("Imported pictures and videos will appear here.")}</p></div>
-      {/if}
-    {/if}
+    {@render libraryView(true)}
   </main>
 {:else}
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand"><span class="brand-symbol"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m3 19 6-10 4 5 3-8 5 13H3Z" /><circle cx="7" cy="5" r="1.5" /></svg></span><div><strong>Photo Archive</strong><small>{t("Pictures and videos.")}</small></div></div>
-      <div class="nav-caption">{t("YOUR ARCHIVE")}</div>
+      <button class="primary full add-folders" disabled={!native} onclick={() => importFolders()}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>{t("Add folders")}
+      </button>
+      <p class="drop-hint">{t("Or drop folders anywhere in this window.")}</p>
+      {#if busy && snapshot.progress.status !== "idle"}
+        <button class="sidebar-progress" onclick={() => tab = "import"}>
+          <span><strong>{t(snapshot.progress.status)}</strong><small>{percent}%</small></span>
+          <span class="progress-track"><span style={`width:${percent}%`}></span></span>
+        </button>
+      {/if}
       <nav aria-label={t("Main navigation")}>
-        <button class:active={tab === "home"} onclick={() => tab = "home"}><span class="nav-icon">01</span> {t("Overview")}</button>
-        <button class:active={tab === "library"} onclick={() => tab = "library"}><span class="nav-icon">02</span> {t("Photo library")} <span class="nav-count">{snapshot.activeCount || ""}</span></button>
-        <button class:active={tab === "review"} onclick={() => tab = "review"}><span class="nav-icon">03</span> {t("Similarity review")} {#if reviews.length}<span class="nav-count">{reviews.length}</span>{/if}</button>
-        <button class:active={tab === "settings"} onclick={() => { config = { ...snapshot.settings }; tab = "settings"; }}><span class="nav-icon">04</span> {t("Settings")}</button>
+        <button class:active={tab === "library"} aria-current={tab === "library" ? "page" : undefined} onclick={() => tab = "library"}>
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>
+          {t("Photos")} {#if snapshot.activeCount}<span class="nav-count">{snapshot.activeCount.toLocaleString()}</span>{/if}
+        </button>
+        <button class:active={tab === "review"} aria-current={tab === "review" ? "page" : undefined} onclick={() => tab = "review"}>
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2" y="5" width="9" height="14" rx="1.5" /><rect x="13" y="5" width="9" height="14" rx="1.5" /></svg>
+          {t("Similarity review")} {#if reviews.length}<span class="nav-count attention">{reviews.length}</span>{/if}
+        </button>
+        <button class:active={tab === "import"} aria-current={tab === "import" ? "page" : undefined} onclick={() => tab = "import"}>
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3v11m-4-4 4 4 4-4" /><path d="M4 14v6h16v-6" /></svg>
+          {t("Import & archive")} {#if busy && snapshot.progress.status !== "idle"}<span class="nav-count">{percent}%</span>{:else if snapshot.progress.errors.length}<span class="nav-count attention">!</span>{/if}
+        </button>
+        <button class:active={tab === "settings"} aria-current={tab === "settings" ? "page" : undefined} onclick={() => tab = "settings"}>
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" /></svg>
+          {t("Settings")} {#if settingsDirty}<span class="nav-count attention" title={t("Unsaved changes")}>•</span>{/if}
+        </button>
       </nav>
       <div class="sidebar-bottom">
         <div class="safety-note"><span class="safe-dot"></span><strong>{t("Local. Private. Yours.")}</strong><p>{t("Your photos never leave your disks. Importing doesn't change the originals.")}</p></div>
-        <button class="secondary full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "drop" }); })}>{t("Open floating drop window")}</button>
+        <button class="text-button full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "drop" }); })}>{t("Open floating drop window")}</button>
         <button class="text-button full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "viewer" }); })}>{t("Open separate viewer")}</button>
         <small class="version">PHOTO ARCHIVE / 0.1</small>
       </div>
     </aside>
 
     <main class="content">
-      <header class="topbar"><span>{tab === "home" ? t("Your collection") : tab === "library" ? t("Browse your pictures") : tab === "review" ? t("Review similar pictures") : t("Archive settings")}</span><div class="status"><span class="safe-dot"></span>{busy ? t("Working on your archive") : t("Offline by design")}</div></header>
+      <header class="topbar"><span>{tab === "import" ? t("Your collection") : tab === "library" ? t("Browse your pictures") : tab === "review" ? t("Review similar pictures") : t("Archive settings")}</span><div class="status"><span class="safe-dot"></span>{busy ? t("Working on your archive") : t("Offline by design")}</div></header>
       {#if !native}<div class="banner warning"><strong>{t("Desktop preview")}</strong> {t("Folder imports and photo previews work in the Tauri desktop app. Run")} <code>npm run desktop</code> {t("to use them.")}</div>{/if}
-      {#if error}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
+      {#if error && !selected}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
       {#if notice}<div class="banner success" role="status">{notice}</div>{/if}
       {#if snapshot.progress.errors.length}<details class="banner error"><summary>{snapshot.progress.errors.length} {t("import/recovery issue(s) need attention")}</summary>{#each snapshot.progress.errors as issue}<p>{issue}</p>{/each}</details>{/if}
 
-      {#if tab === "home"}
+      {#if tab === "import"}
         <div class="page-heading"><div><p class="eyebrow">{t("PICTURE ARCHIVE")}</p><h1>{t("Organize your pictures.")}</h1><p class="subtitle">{t("Bring scattered folders together. We'll organize the dates")}<br class="wide-only" /> {t("and help you keep the best copies.")}</p></div><span class="hero-mark" aria-hidden="true"><svg width="60" height="60" viewBox="0 0 60 60" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="7" y="12" width="37" height="35" rx="4" transform="rotate(-10 7 12)" /><rect x="15" y="10" width="37" height="35" rx="4" fill="#f5f3ec" /><circle cx="26" cy="21" r="3" /><path d="m16 39 12-12 8 8 7-7 8 11" /></svg></span></div>
         <section class="destination">
           <span class="disk-icon"><svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="3" /><path d="M3 14h18M7 17h1m3 0h1" /></svg></span>
@@ -870,26 +890,20 @@
         <section class="next-steps"><div><h3>{t("Clean up old pictures?")}</h3><p>{t("Once copies are verified, review source files for cleanup.")}<br />{t("Nothing leaves your source folders without your say-so.")}</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={startCleanup}>{t("Review source cleanup")}</button></section>
         {#if jobs.length}<section class="history"><div class="section-line"><h3>{t("Recent imports")}</h3><small>{t("Original folder names stay searchable")}</small></div>{#each jobs.slice(0, 5) as job}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t(job.progress.status ?? "queued")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small></div><button class="text-button" disabled={busy} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button></div>{/each}</section>{/if}
       {:else if tab === "library"}
-        <div class="page-heading"><div><p class="eyebrow">{t("PICTURE LIBRARY")}</p><h1>{t("Your picture library.")}</h1><p class="subtitle">{t("Search a date, a filename, or an original folder like \"Holiday Germany\".")}</p></div><button class="primary" disabled={!native || !snapshot.root} onclick={() => importFolders()}>{t("Add folders +")}</button></div>
-        <div class="library-toolbar"><input class="search" aria-label={t("Search pictures and original folders")} bind:value={search} placeholder={t("Search pictures or original folders...")} /><select aria-label={t("Filter library")} bind:value={filter}><option value="all">{t("All pictures and videos")}</option><option value="video">{t("Videos")}</option><option value="unknown">{t("Unknown dates")}</option><option value="estimated">{t("Estimated dates")}</option><option value="undo">{t("Retained undo copies")}</option></select></div>
-        {@render datePicker()}
-        {#if items.length}
-          <div class="photo-grid">{#each items as item (item.id)}<button class="photo-card" disabled={working || libraryLoading} onclick={() => selectItem(item.id)}><Preview {item} /><div class="photo-info"><strong>{item.originalName}</strong><span>{item.media.date?.slice(0, 10) ?? t("Date unknown")}{item.media.dateSource.startsWith("estimated") ? ` / ${t("estimated")}` : ""}</span><small>{item.albums.join(" / ")}</small></div></button>{/each}</div>
-          {@render pageControls()}
-        {:else}<div class="empty"><h2>{snapshot.root ? t("Your pictures will appear here.") : t("Start with an archive folder.")}</h2><p>{search ? t("No matches. Try another filename, date or original folder.") : t("Import folders from the overview to fill your library.")}</p><button class="secondary" onclick={() => tab = "home"}>{t("Go to overview")}</button></div>{/if}
+        <div class="library-page">{@render libraryView(false)}</div>
       {:else if tab === "review"}
-        <div class="page-heading"><div><p class="eyebrow">{t("SIMILAR DOESN'T ALWAYS MEAN THE SAME")}</p><h1>{t("A second look.")}</h1><p class="subtitle">{t("Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.")}</p></div><div class="review-actions"><span class="pill">{reviews.length} {t("to review")}</span>{#if reviews.length}<button class="primary" disabled={working || busy} onclick={() => compare(reviews[0])}>{t("Review next match")}</button>{/if}</div></div>
-        <label class="check-setting review-confirm-setting"><input type="checkbox" bind:checked={skipKeeperConfirmation} onchange={updateSkipKeeperConfirmation} /><span><strong>{t("Skip confirmation when keeping a copy")}</strong><small>{t("Applies on this computer. The other original still goes to archive undo.")}</small></span></label>
-        {#if reviews.length}<div class="review-list">{#each reviews as review}<div class="review-row" role="button" aria-label={`${t("Compare similar pictures")}: ${review.reason}`} aria-disabled={working || busy} tabindex={working || busy ? -1 : 0} onclick={() => { if (!working && !busy) compare(review); }} onkeydown={(event) => { if ((event.key === "Enter" || event.key === " ") && !working && !busy) { event.preventDefault(); compare(review); } }}><div class="review-thumbnails"><Preview item={review.itemPreview} /><Preview item={review.candidatePreview} /></div><div class="review-description"><strong>{t("Two similar pictures")}</strong><p>{review.reason}</p></div><span class="secondary">{t("Compare files")}</span></div>{/each}</div>{:else}<div class="empty"><span class="empty-check" aria-hidden="true">OK</span><h2>{t("Nothing needs a second look.")}</h2><p>{t("Uncertain matches will appear here. Exact duplicates are handled automatically.")}</p></div>{/if}
+        <div class="page-heading"><div><p class="eyebrow">{t("SIMILAR DOESN'T ALWAYS MEAN THE SAME")}</p><h1>{t("A second look.")}</h1><p class="subtitle">{t("Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.")}</p></div><div class="review-actions"><span class="pill">{reviews.length} {t("to review")}</span>{#if reviews.length}<button class="primary" disabled={working || busy || opening} onclick={() => openReview(0)}>{t("Start reviewing")}</button>{/if}</div></div>
+        {#if busy && reviews.length}<p class="muted">{t("You can review matches once the current import has finished.")}</p>{/if}
+        {#if reviews.length}<div class="review-list">{#each reviews as review, index (`${review.item}:${review.candidate}`)}<div class="review-row" role="button" aria-label={`${t("Compare similar pictures")}: ${review.reason}`} aria-disabled={working || busy} tabindex={working || busy ? -1 : 0} onclick={() => { if (!working && !busy) openReview(index); }} onkeydown={(event) => { if ((event.key === "Enter" || event.key === " ") && !working && !busy) { event.preventDefault(); openReview(index); } }}><div class="review-thumbnails"><Preview item={review.itemPreview} /><Preview item={review.candidatePreview} /></div><div class="review-description"><strong>{t("Two similar pictures")}</strong><p>{review.reason}</p></div><span class="secondary">{t("Compare files")}</span></div>{/each}</div>{:else}<div class="empty"><span class="empty-check" aria-hidden="true">OK</span><h2>{t("Nothing needs a second look.")}</h2><p>{t("Uncertain matches will appear here. Exact duplicates are handled automatically.")}</p></div>{/if}
       {:else}
         <div class="page-heading"><div><p class="eyebrow">{t("SIMPLE SETTINGS, YOUR WAY")}</p><h1>{t("A place for everything.")}</h1><p class="subtitle">{t("Archive settings travel with your disk. Changes apply to future imports.")}</p></div></div>
-        <section class="settings-card"><h3>{t("Language")}</h3><label class="language-setting">{t("Choose the interface language")}<select aria-label={t("Language")} value={language} onchange={changeLanguage}><option value="en">English</option><option value="nl">Nederlands</option></select></label></section>
+        <section class="settings-card"><h3>{t("Language")}</h3><label class="language-setting">{t("Choose the interface language")}<select aria-label={t("Language")} value={locale.language} onchange={changeLanguage}><option value="en">English</option><option value="nl">Nederlands</option></select></label></section>
         <section class="settings-card"><h3>{t("Folder organization")}</h3><label>{t("Choose a layout")}<select bind:value={config.template}>{#each presets as [value, label]}<option {value}>{t(label)}</option>{/each}{#if !presets.some(([value]) => value === config.template)}<option value={config.template}>{t("Custom layout")}</option>{/if}</select></label><details class="advanced"><summary>{t("Advanced folder template")}</summary><label>{t("Template")}<input bind:value={config.template} placeholder={"Family/{yyyy}/{mm}"} /></label><p>{t("Supported:")} <code>{"{yyyy}"}</code> <code>{"{mm}"}</code> <code>{"{dd}"}</code> <code>{"{media_type}"}</code>. {t("Safe literal folder names are welcome.")}</p></details>
           <div class="setting-columns"><label>{t("Filenames")}<select bind:value={config.filenames}><option value="original">{t("Keep original filenames")}</option><option value="date">{t("Use photo date / time")}</option></select></label><label>{t("Unknown-date folder")}<input bind:value={config.unknownFolder} /></label></div>
           <div class="path-preview"><small>{t("YOUR FILES WOULD LOOK LIKE THIS")}</small>{#each examples as example}<code>{example}</code>{/each}{#if !native}<code>2023/07/18/IMG_1234.jpg</code><code>unknown/undated.jpg</code>{/if}{#if configError}<p class="field-error">{configError}</p>{/if}<p>{t("Name collisions receive a unique suffix. Estimated dates stay marked; missing times aren't invented.")}</p></div>
           <label class="check-setting"><input type="checkbox" bind:checked={config.automaticMatches} /><span><strong>{t("Automatically group very confident matches")}</strong><small>{t("Keep a clearly better equivalent copy active. All other originals remain in undo. Ambiguous variants go to review.")}</small></span></label>
           <label class="check-setting"><input type="checkbox" bind:checked={config.deepVideoMatching} disabled={!config.automaticMatches} /><span><strong>{t("Deep video comparison (slower)")}</strong><small>{t("Off by default: exact video duplicates are recognized by hash; possible matches from a preview or capture date and duration go to manual review. Enable to compare every frame and audio before automatically grouping a clearly higher-resolution equivalent. Requires automatic grouping above and can slow imports substantially.")}</small></span></label>
-          <div class="button-row"><button class="primary" disabled={!native || !snapshot.root || busy || !!configError} onclick={() => run(async () => { await mutate(async () => { await api("save_settings", { settings: config }); await refresh(true); }); notice = t("Settings saved for future imports. Existing files haven't moved."); })}>{t("Save archive settings")}</button><button class="text-button" onclick={() => config = { ...defaults }}>{t("Reset defaults")}</button></div>
+          <div class="button-row"><button class="primary" disabled={!native || !snapshot.root || busy || !!configError || !settingsDirty} onclick={() => run(async () => { await mutate(async () => { await api("save_settings", { settings: config }); await refresh(true); }); notice = t("Settings saved for future imports. Existing files haven't moved."); })}>{t("Save archive settings")}</button>{#if settingsDirty}<span class="pill unsaved">{t("Unsaved changes")}</span><button class="text-button" onclick={() => config = { ...snapshot.settings }}>{t("Discard changes")}</button>{/if}<button class="text-button" onclick={() => config = { ...defaults }}>{t("Reset defaults")}</button></div>
         </section>
         <section class="settings-card"><h3>{t("Choosing an external disk")}</h3><p class="muted">{t("Mac only: prefer APFS. Windows only: prefer NTFS. For use on both, exFAT is convenient, but lacks journaling and may require extra copying during import. Always eject safely and keep another backup.")}</p><p class="muted">{t("You do not need to reformat an existing disk. Formatting erases its files; this app never formats disks.")}</p></section>
         <section class="next-steps"><div><h3>{t("Apply the saved layout to older imports?")}</h3><p>{t("Preview existing file moves first. Sources and folder history stay untouched.")}</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={previewMoves}>{t("Preview reorganization")}</button></section>
@@ -899,86 +913,170 @@
       <footer>Photo Archive. <span>{t("Sources stay safe until you explicitly clean them up.")}</span></footer>
     </main>
   </div>
+  {#if dropping}
+    <div class="drop-overlay" aria-hidden="true"><div><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 8V5h7l2 3h9v12H3V8Z" /><path d="M12 10v7m-3-3 3 3 3-3" /></svg><strong>{snapshot.root ? t("Drop to copy into your archive") : t("Drop, then choose an archive folder")}</strong><small>{t("Originals stay untouched.")}</small></div></div>
+  {/if}
 {/if}
 
-{#if selected && mode !== "viewer"}
+{#if selected && !comparing}
+  {@const item = selected.item}
+  <div class="lightbox" role="dialog" aria-modal="true" aria-label={item.originalName} tabindex="-1" {@attach focusOnMount}>
+    <header class="lightbox-top">
+      <button class="lightbox-button" onclick={closeDetails}>← {t("Back to thumbnails")}</button>
+      <div class="lightbox-title"><strong>{item.originalName}</strong><small>{absoluteIndex >= 0 ? `${(absoluteIndex + 1).toLocaleString()} / ${monthCount.toLocaleString()} · ${monthLabel(month)}` : ""}</small></div>
+      <div class="lightbox-tools">
+        <button class="lightbox-button" class:active={showInfo} aria-pressed={showInfo} onclick={toggleInfo}>{t("Info")}</button>
+        <button class="lightbox-button" aria-label={t("Close")} onclick={closeDetails}>×</button>
+      </div>
+    </header>
+    {#if error}<div class="banner error lightbox-error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
+    <div class="lightbox-body">
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="lightbox-stage" onclick={(event) => { const target = event.target as HTMLElement; if (target === event.currentTarget || target.classList.contains("preview")) closeDetails(); }}>
+        <button class="lightbox-nav previous" disabled={!canPrevious || opening} aria-label={t("Previous")} onclick={() => navigatePhoto(-1)}>‹</button>
+        {#if videos[0]?.source}
+          {@const video = videos[0]}
+          <video src={video.source} controls autoplay onerror={() => videoFailed(0, video.id, video.source)}><track kind="captions" /></video>
+        {:else}
+          <Preview {item} large />
+          {#if item.media.kind === "video"}
+            <div class="play-overlay">
+              {#if videos[0]}<span role="status">{t(videos[0].phase === "converting" ? "Preparing a playable copy..." : "Opening video...")}</span>
+              {:else}<button class="primary" onclick={() => playVideo(item)}>▶ {t("Play video")}</button>{/if}
+            </div>
+          {/if}
+        {/if}
+        <button class="lightbox-nav next" disabled={!canNext || opening} aria-label={t("Next")} onclick={() => navigatePhoto(1)}>›</button>
+      </div>
+      {#if showInfo}
+        <aside class="lightbox-info">
+          <dl>
+            <dt>{t("Date")}</dt><dd>{formatDate(item.media.date)}<small>{dateSourceLabel(item.media.dateSource)}</small></dd>
+            <dt>{t("Dimensions")}</dt><dd>{item.media.width} × {item.media.height} · {bytes(item.media.bytes)} · {item.media.kind.toUpperCase()}</dd>
+            {#if item.albums.length}<dt>{t("Original folders")}</dt><dd>{item.albums.join(" / ")}</dd>{/if}
+            <dt>{t("Location in archive")}</dt><dd><code>{item.path}</code></dd>
+          </dl>
+          <button class="secondary full" disabled={!native} onclick={() => reveal(item)}>{t(revealLabel)}</button>
+          {#if selected.companions.length}<p class="banner warning">{t("Related RAW/JPEG, sidecar or Live Photo files detected. This picture cannot be moved to archive undo on its own.")}</p>{/if}
+          {#if item.media.warnings.length}<details><summary>{t("Metadata & quality notes")}</summary>{#each item.media.warnings as warning}<p class="muted">{warning}</p>{/each}</details>{/if}
+          <details><summary>{t("Original folders & import history")}</summary>{#each selected.sources as source}<p class="source-history"><strong>{source.album}</strong><code>{source.relative}</code><small>{source.status.startsWith("staged:") ? t("Cleanup recovery needed") : source.status === "trashed" ? t("Source moved to OS trash") : t("Source retained")}</small></p>{/each}</details>
+          {#if mode !== "viewer"}
+            <div class="lightbox-actions">
+              {#if item.state === "undo"}
+                <button class="primary full" disabled={working} onclick={() => restore(item)}>{t("Restore this original")}</button>
+                <button class="danger-button full" disabled={working} onclick={() => purge(item)}>{t("Permanently purge undo copy")}</button>
+              {:else}
+                <label>{t("Correct the date")}<input type="date" bind:value={dateEntry} /></label>
+                <button class="secondary full" disabled={working || !dateEntry || dateEntry === item.media.date?.slice(0, 10)} onclick={saveDate}>{t("Save date & reorganize this file")}</button>
+              {/if}
+            </div>
+          {/if}
+          <p class="key-hint">{t("← → browse · I info · Esc back")}</p>
+        </aside>
+      {/if}
+    </div>
+  </div>
+{/if}
+
+{#if selected && comparing && mode !== "viewer"}
+  {@const pair = [selected, comparing]}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="modal-backdrop" onclick={(event) => { if (!working && event.target === event.currentTarget) closeDetails(); }}>
-    <dialog open class="modal detail-modal" class:comparison={!!comparing} aria-modal="true" aria-label={comparing ? t("Compare similar pictures") : selected.item.originalName} tabindex="-1">
-      <div class="modal-top"><div><small>{comparing ? t("COMPARE THE ORIGINALS") : t("PICTURE DETAILS")}</small><h2>{comparing ? t("Which copy would you keep?") : selected.item.originalName}</h2></div><button class="secondary" onclick={closeDetails}>{t("Close")}</button></div>
-      {#if error}<div class="banner error" role="alert">{error}</div>{/if}
-      {#if comparing}
-        <div class="comparison-actions">
-          <div class="comparison-choices">
-            {#each [selected, comparing] as detail, index (detail.item.id)}
-              {@const other = index === 0 ? comparing : selected}
-              <div class="comparison-choice">
-                <button class="primary" aria-label={`${t("Keep this copy active")}: ${detail.item.originalName}`} disabled={working || !!other.companions.length} onclick={() => resolve(detail.item.id)}>
-                  <span>{t("Keep this copy active")}</span><small title={detail.item.originalName}>{detail.item.originalName}</small>
-                </button>
-                {#if other.companions.length}<p class="muted">{t("Unavailable because the other picture has related files and cannot be moved to undo on its own.")}</p>{/if}
-              </div>
-            {/each}
-          </div>
-          <button class="secondary comparison-dismiss" disabled={working} onclick={() => resolve(null)}>{t("Keep both / dismiss match")}</button>
+    <div class="modal comparison" role="dialog" aria-modal="true" aria-label={t("Compare similar pictures")} tabindex="-1" {@attach focusOnMount}>
+      <div class="modal-top">
+        <div><small>{t("COMPARE THE ORIGINALS")} · {t("Match")} {reviewIndex + 1} {t("of")} {reviews.length}</small><h2>{t("Which copy would you keep?")}</h2></div>
+        <div class="button-row compact">
+          <button class="secondary" disabled={opening || working || reviews.length < 2} onclick={() => stepReview(-1)}>← {t("Previous")}</button>
+          <button class="secondary" disabled={opening || working || reviews.length < 2} onclick={() => stepReview(1)}>{t("Skip for now")} <kbd>S</kbd></button>
+          <button class="secondary" onclick={closeDetails}>{t("Close")}</button>
         </div>
-        <p class="muted">{t("Keeping one picture moves the other to archive undo. Keep both / dismiss match leaves both active and clears this review.")}</p>
-        <p class="muted">{t("Highlighted measurements are at least twice as large. File size and pixel count do not guarantee better quality; compare the originals before choosing.")}</p>
-        {#if pictureComparison && pictureComparison.resolution.higher !== null && pictureComparison.size.higher !== null && pictureComparison.resolution.higher !== pictureComparison.size.higher}
-          <p class="muted">{t("Resolution and file size favor different pictures, so neither is recommended.")}</p>
-        {/if}
-        {#if selected.companions.length && comparing.companions.length}
-          <p class="banner warning">{t("Both pictures have related files and cannot be moved to undo on their own. Choose Keep both / dismiss match to finish this review without moving either picture.")}</p>
-        {:else if selected.companions.length || comparing.companions.length}
-          <p class="banner warning">{t("The picture with related files cannot be moved to undo on its own. To move the other picture to undo, choose Keep this copy active for the picture with related files. Or choose Keep both / dismiss match.")}</p>
-        {/if}
+      </div>
+      {#if error}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
+      {#if selected.companions.length && comparing.companions.length}
+        <p class="banner warning">{t("Both pictures have related files and cannot be moved to undo on their own. Choose Keep both / dismiss match to finish this review without moving either picture.")}</p>
       {/if}
       <div class="detail-columns">
-        {#each [selected, ...(comparing ? [comparing] : [])] as detail, index (detail.item.id)}
+        {#each pair as detail, index (detail.item.id)}
+          {@const other = index === 0 ? comparing : selected}
           <div class="detail-column">
-            <Preview item={detail.item} large />
-            {#if detail.item.media.kind === "video"}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div class="compare-pane" class:zoomed={!!zoom} style={zoom ? `--zx:${zoom.x}%;--zy:${zoom.y}%` : ""} title={t("Click to zoom both pictures")} onclick={zoomAt} onmousemove={panZoom}>
               {#if videos[index]?.source}
                 {@const video = videos[index]}
                 {#if index === 0}<video bind:this={firstVideo} src={video.source} controls autoplay onerror={() => videoFailed(index, video.id, video.source)}><track kind="captions" /></video>
                 {:else}<video bind:this={secondVideo} src={video.source} controls autoplay onerror={() => videoFailed(index, video.id, video.source)}><track kind="captions" /></video>{/if}
-              {:else if videos[index]}
-                <p class="muted" role="status">{t(videos[index].phase === "converting" ? "Preparing a playable copy..." : "Opening video...")}</p>
               {:else}
-                <button class="secondary full" disabled={working} onclick={() => playVideo(detail.item, index)}>{t("Play video")}</button>
+                <Preview item={detail.item} large />
               {/if}
+              {#if pictureComparison?.recommendation === index}<span class="quality-label">{t("Probably better")}</span>{/if}
+            </div>
+            {#if detail.item.media.kind === "video" && !videos[index]?.source}
+              {#if videos[index]}<p class="muted" role="status">{t(videos[index].phase === "converting" ? "Preparing a playable copy..." : "Opening video...")}</p>
+              {:else}<button class="secondary full" disabled={working} onclick={() => playVideo(detail.item, index)}>▶ {t("Play video")}</button>{/if}
             {/if}
-            <h3>{detail.item.originalName}</h3>
-            {#if pictureComparison?.recommendation === index}<span class="quality-label">{t("Probably better")}</span>{/if}
-            <div class="detail-facts">
-              <span class:quality-higher={pictureComparison?.resolution.substantiallyHigher === index}>{detail.item.media.width} x {detail.item.media.height}{#if pictureComparison?.resolution.substantiallyHigher === index} <small>({t("at least 2x pixels")})</small>{/if}</span>
-              <span class:quality-higher={pictureComparison?.size.substantiallyHigher === index}>{bytes(detail.item.media.bytes)}{#if pictureComparison?.size.substantiallyHigher === index} <small>({t("at least 2x size")})</small>{/if}</span>
-              <span>{detail.item.media.kind.toUpperCase()}</span>
-            </div><p class="detail-date">{detail.item.media.date ?? t("Date unknown")} <small>{detail.item.media.dateSource}</small></p><code class="file-path">{detail.item.path}</code>
-            {#if detail.companions.length}<p class="banner warning">{t("Related RAW/JPEG, sidecar or Live Photo files detected. This picture cannot be moved to archive undo on its own.")}</p>{/if}
-            <details><summary>{t("Original folders & import history")}</summary>{#each detail.sources as source}<p class="source-history"><strong>{source.album}</strong><code>{source.relative}</code><small>{source.status.startsWith("staged:") ? t("Cleanup recovery needed") : source.status === "trashed" ? t("Source moved to OS trash") : t("Source retained")}</small></p>{/each}</details>
-            {#if detail.item.media.warnings.length}<details><summary>{t("Metadata & quality notes")}</summary>{#each detail.item.media.warnings as warning}<p class="muted">{warning}</p>{/each}</details>{/if}
+            <button class="primary keep-button" disabled={working || opening || busy || !!other.companions.length} onclick={() => resolve(detail.item.id)}>
+              <span>{t("Keep this one")} <kbd>{index + 1}</kbd></span><small title={detail.item.originalName}>{detail.item.originalName}</small>
+            </button>
+            {#if other.companions.length && !detail.companions.length}<p class="muted">{t("Unavailable because the other picture has related files and cannot be moved to undo on its own.")}</p>{/if}
           </div>
         {/each}
       </div>
-      {#if comparing}
-        <div class="modal-bottom">{#if currentReview?.reason}<p>{currentReview.reason}</p>{/if}{#if videos[0]?.source && videos[1]?.source}<div class="button-row"><button class="secondary" onclick={() => run(async () => { if (firstVideo && secondVideo) { firstVideo.currentTime = 0; secondVideo.currentTime = 0; await Promise.all([firstVideo.play(), secondVideo.play()]); } })}>{t("Play both from start")}</button><button class="secondary" onclick={() => { firstVideo?.pause(); secondVideo?.pause(); }}>{t("Pause both")}</button></div>{/if}</div>
-      {:else}
-        <div class="modal-bottom">
-          {#if selected.item.state === "undo"}<div class="button-row"><button class="primary" disabled={working} onclick={() => selected && restore(selected.item)}>{t("Restore this original")}</button><button class="danger-button" disabled={working} onclick={() => selected && purge(selected.item)}>{t("Permanently purge undo copy")}</button></div>{:else}<div class="date-edit"><label>{t("Correct the date")}<input type="date" bind:value={dateEntry} /></label><button class="secondary" disabled={working || !dateEntry} onclick={() => run(async () => { if (!selected) return; const id = selected.item.id; await mutate(async () => { await api("set_date", { id, date: dateEntry }); closeDetails(); await refresh(true); }); })}>{t("Save date & reorganize this file")}</button></div>{/if}
-        </div>
+      <button class="secondary comparison-dismiss" disabled={working || opening || busy} onclick={() => resolve(null)}>{t("Keep both / dismiss match")} <kbd>B</kbd></button>
+      {#if videos[0]?.source && videos[1]?.source}<div class="button-row"><button class="secondary" onclick={() => run(async () => { if (firstVideo && secondVideo) { firstVideo.currentTime = 0; secondVideo.currentTime = 0; await Promise.all([firstVideo.play(), secondVideo.play()]); } })}>{t("Play both from start")}</button><button class="secondary" onclick={() => { firstVideo?.pause(); secondVideo?.pause(); }}>{t("Pause both")}</button></div>{/if}
+      <table class="difference-table">
+        <tbody>
+          {#each [
+            { label: t("Resolution"), values: pair.map((d) => `${d.item.media.width} × ${d.item.media.height}`), higher: pictureComparison?.resolution.substantiallyHigher, hint: t("at least 2x pixels") },
+            { label: t("File size"), values: pair.map((d) => bytes(d.item.media.bytes)), higher: pictureComparison?.size.substantiallyHigher, hint: t("at least 2x size") },
+            { label: t("Type"), values: pair.map((d) => `${d.item.media.kind.toUpperCase()} · ${d.item.originalName.split(".").pop()?.toUpperCase() ?? ""}`) },
+            { label: t("Date"), values: pair.map((d) => formatDate(d.item.media.date)), notes: pair.map((d) => dateSourceLabel(d.item.media.dateSource)) },
+            { label: t("Original folders"), values: pair.map((d) => d.item.albums.join(" / ") || "—") },
+            { label: t("Related files"), values: pair.map((d) => d.companions.length ? t("Yes, kept together") : "—") },
+            { label: t("Location in archive"), values: pair.map((d) => d.item.path), code: true },
+          ] as row (row.label)}
+            <tr class:differs={row.values[0] !== row.values[1]}>
+              <th scope="row">{row.label}</th>
+              {#each row.values as value, index}
+                <td class:quality-higher={row.higher === index}>{#if row.code}<code>{value}</code>{:else}{value}{/if}{#if row.higher === index} <small>({row.hint})</small>{/if}{#if row.notes}<small class="cell-note">{row.notes[index]}</small>{/if}</td>
+              {/each}
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+      {#if pictureComparison && pictureComparison.resolution.higher !== null && pictureComparison.size.higher !== null && pictureComparison.resolution.higher !== pictureComparison.size.higher}
+        <p class="muted">{t("Resolution and file size favor different pictures, so neither is recommended.")}</p>
       {/if}
-    </dialog>
+      <details>
+        <summary>{t("Why were these matched?")}</summary>
+        {#if currentReview?.reason}<p class="muted">{currentReview.reason}</p>{/if}
+        <p class="muted">{t("Keeping one picture moves the other to archive undo. Keep both / dismiss match leaves both active and clears this review.")}</p>
+        <p class="muted">{t("Highlighted measurements are at least twice as large. File size and pixel count do not guarantee better quality; compare the originals before choosing.")}</p>
+        {#each pair as detail}
+          <p class="source-history"><strong>{detail.item.originalName}</strong>{#each detail.sources as source}<code>{source.album} / {source.relative}</code>{/each}</p>
+        {/each}
+      </details>
+      <p class="key-hint">{t("1 / 2 keep · B keep both · ← → previous / next match · Z zoom · Esc close")}</p>
+    </div>
   </div>
 {/if}
 
 {#if cleanup !== null}
-  <div class="modal-backdrop"><dialog open class="modal" aria-modal="true" aria-label={t("Source cleanup preview")} tabindex="-1"><div class="modal-top"><div><small>{t("EXPLICITLY VERIFIED, NEVER AUTOMATIC")}</small><h2>{t("Clean up source folders.")}</h2></div><button class="secondary" disabled={working} onclick={() => cleanup = null}>{t("Close")}</button></div><div class="banner warning">{t("Only byte-identical archived originals qualify. Cleanup may leave one copy. Trash usually needs emptying before space is freed.")}</div>{#if error}<div class="banner error" role="alert">{error}</div>{/if}
-    <div class="cleanup-list">{#each cleanup as row}<label class="cleanup-row"><input type="checkbox" bind:group={cleanupSelection} value={row.id} disabled={!row.eligible || working} /><span><strong>{row.source}</strong><small class:field-error={!row.eligible}>{row.reason}</small></span><small>{bytes(row.bytes)}</small></label>{/each}{#if !cleanup.length}<p class="muted">{t("No pending imported sources to clean up.")}</p>{/if}</div><label class="check-setting"><input type="checkbox" bind:checked={emptyFolders} /><span><strong>{t("Also remove genuinely empty imported subfolders")}</strong><small>{t("No recursive deletion. Dropped roots, hidden files and nonempty folders remain.")}</small></span></label>{#each cleanupResults as result}<p class="cleanup-result">{result}</p>{/each}<div class="modal-bottom button-row"><strong>{cleanupSelection.length} {t("selected")} / {bytes(cleanup.filter((row) => cleanupSelection.includes(row.id)).reduce((sum, row) => sum + row.bytes, 0))} {t("to trash")}</strong><button class="primary" disabled={working || !cleanupSelection.length} onclick={cleanSources}>{t("Confirm cleanup...")}</button></div></dialog></div>
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={(event) => { if (!working && event.target === event.currentTarget) cleanup = null; }}><div class="modal" role="dialog" aria-modal="true" aria-label={t("Source cleanup preview")} tabindex="-1" {@attach focusOnMount}><div class="modal-top"><div><small>{t("EXPLICITLY VERIFIED, NEVER AUTOMATIC")}</small><h2>{t("Clean up source folders.")}</h2></div><button class="secondary" disabled={working} onclick={() => cleanup = null}>{t("Close")}</button></div><div class="banner warning">{t("Only byte-identical archived originals qualify. Cleanup may leave one copy. Trash usually needs emptying before space is freed.")}</div>{#if error}<div class="banner error" role="alert">{error}</div>{/if}
+    <div class="cleanup-list">{#each cleanup as row}<label class="cleanup-row"><input type="checkbox" bind:group={cleanupSelection} value={row.id} disabled={!row.eligible || working} /><span><strong>{row.source}</strong><small class:field-error={!row.eligible}>{row.reason}</small></span><small>{bytes(row.bytes)}</small></label>{/each}{#if !cleanup.length}<p class="muted">{t("No pending imported sources to clean up.")}</p>{/if}</div><label class="check-setting"><input type="checkbox" bind:checked={emptyFolders} /><span><strong>{t("Also remove genuinely empty imported subfolders")}</strong><small>{t("No recursive deletion. Dropped roots, hidden files and nonempty folders remain.")}</small></span></label>{#each cleanupResults as result}<p class="cleanup-result">{result}</p>{/each}<div class="modal-bottom button-row"><strong>{cleanupSelection.length} {t("selected")} / {bytes(cleanup.filter((row) => cleanupSelection.includes(row.id)).reduce((sum, row) => sum + row.bytes, 0))} {t("to trash")}</strong><button class="primary" disabled={working || !cleanupSelection.length} onclick={cleanSources}>{t("Confirm cleanup...")}</button></div></div></div>
 {/if}
 
 {#if moves !== null}
-  <div class="modal-backdrop"><dialog open class="modal" aria-modal="true" aria-label={t("Archive reorganization preview")} tabindex="-1"><div class="modal-top"><div><small>{t("PREVIEW BEFORE MOVING")}</small><h2>{t("Reorganize your archive.")}</h2></div><button class="secondary" disabled={working} onclick={() => moves = null}>{t("Close")}</button></div>{#if error}<div class="banner error" role="alert">{error}</div>{/if}<p class="muted">{t("Only managed active files move. Originals, undo copies and original-folder albums stay intact.")}</p><div class="move-list">{#each moves as move}<div><code>{move.from}</code><small>{t("becomes")}</small><code>{move.to}</code></div>{/each}{#if !moves.length}<p>{t("Everything already follows the saved layout.")}</p>{/if}</div><div class="modal-bottom button-row"><span>{moves.length} {t("file(s) to reorganize")}</span><button class="primary" disabled={working || !moves.length} onclick={applyMoves}>{t("Confirm reorganization...")}</button></div></dialog></div>
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={(event) => { if (!working && event.target === event.currentTarget) moves = null; }}><div class="modal" role="dialog" aria-modal="true" aria-label={t("Archive reorganization preview")} tabindex="-1" {@attach focusOnMount}><div class="modal-top"><div><small>{t("PREVIEW BEFORE MOVING")}</small><h2>{t("Reorganize your archive.")}</h2></div><button class="secondary" disabled={working} onclick={() => moves = null}>{t("Close")}</button></div>{#if error}<div class="banner error" role="alert">{error}</div>{/if}<p class="muted">{t("Only managed active files move. Originals, undo copies and original-folder albums stay intact.")}</p><div class="move-list">{#each moves as move}<div><code>{move.from}</code><small>{t("becomes")}</small><code>{move.to}</code></div>{/each}{#if !moves.length}<p>{t("Everything already follows the saved layout.")}</p>{/if}</div><div class="modal-bottom button-row"><span>{moves.length} {t("file(s) to reorganize")}</span><button class="primary" disabled={working || !moves.length} onclick={applyMoves}>{t("Confirm reorganization...")}</button></div></div></div>
+{/if}
+
+{#if undoAction}
+  <div class="toast" role="status">
+    <span>{t("Kept")} <strong>{undoAction.keptName}</strong>. {t("The other copy moved to archive undo.")}</span>
+    <button class="text-button" disabled={working} onclick={undoKeep}>{t("Undo")}</button>
+    <button class="text-button" aria-label={t("Dismiss")} onclick={() => { clearTimeout(undoTimer); undoAction = null; }}>×</button>
+  </div>
 {/if}
 
 <style>
@@ -1002,27 +1100,12 @@
   .viewer-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px 0; margin-bottom: 20px; border-bottom: 1px solid #dfe3d8; }
   .viewer-header strong { display: block; font-size: 16px; }
   .viewer-header small { display: block; color: #85917c; margin-top: 6px; }
-  .viewer-navigation { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
-  .viewer-navigation > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .viewer-navigation .button-row { margin: 0; flex-wrap: nowrap; }
-  .viewer-stage { background: #172721; border-radius: 12px; overflow: hidden; }
-  .viewer-stage :global(.preview.large) { height: max(320px, calc(100vh - 260px)); }
-  .viewer-stage video { display: block; margin: 0; height: max(320px, calc(100vh - 260px)); max-height: none; object-fit: contain; }
-  .viewer-caption { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-top: 18px; }
-  .viewer-caption strong, .viewer-caption small { display: block; }
-  .viewer-caption small { color: #85917c; margin-top: 5px; }
   .sidebar { width: 235px; flex-shrink: 0; background: #fdfcf8; border-right: 1px solid #e2e5dc; display: flex; flex-direction: column; padding: 30px 19px 24px; position: sticky; top: 0; height: 100vh; }
-  .brand { display: flex; align-items: center; gap: 10px; margin: 0 4px 48px; }
   .brand-symbol { display: grid; place-items: center; width: 41px; height: 41px; background: #274b38; color: #f2e9c9; border-radius: 11px; flex-shrink: 0; }
   .brand strong { display: block; font-size: 15px; letter-spacing: -.25px; }
   .brand small { display: block; margin-top: 4px; font-size: 10px; color: #8b9285; }
-  .nav-caption, .eyebrow { font-size: 9px; font-weight: 700; letter-spacing: .14em; }
-  .nav-caption { color: #9b9f93; margin: 0 13px 12px; }
-  nav { display: flex; flex-direction: column; gap: 6px; }
-  nav button { border: 0; background: transparent; color: #697664; text-align: left; padding: 13px 11px; display: flex; align-items: center; gap: 11px; font-size: 12px; border-radius: 8px; }
-  nav button.active { color: #274b38; background: #eaf0e4; font-weight: 600; }
-  .nav-icon { font-size: 9px; opacity: .65; width: 17px; }
-  .nav-count { margin-left: auto; border-radius: 5px; background: #dde8d4; padding: 2px 6px; font-size: 10px; }
+  .eyebrow { font-size: 9px; font-weight: 700; letter-spacing: .14em; }
+  nav { display: flex; flex-direction: column; gap: 4px; }
   .sidebar-bottom { margin-top: auto; padding-top: 20px; }
   .language-setting { display: flex; flex-direction: column; gap: 6px; margin-top: 13px; color: #788273; font-size: 10px; }
   .language-setting select { width: 100%; padding: 8px 10px; font-size: 11px; }
@@ -1086,27 +1169,12 @@
   .history-row { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e1e5d9; padding: 13px 0; }
   .history-row strong { display: block; font-size: 12px; margin-bottom: 5px; }
   .history-row small { color: #8c987f; }
-  .library-toolbar { display: flex; gap: 13px; margin: 0 0 25px; }
-  .date-picker { display: flex; align-items: end; flex-wrap: wrap; gap: 14px; margin: 0 0 22px; color: #526747; font-size: 12px; }
-  .date-picker label { display: grid; gap: 5px; }
-  .date-picker span { padding-bottom: 12px; }
-  .page-controls { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 16px; margin: 25px 0; color: #526747; font-size: 12px; }
-  .search { flex: 1; }
-  .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 18px; }
-  .photo-card { border: 1px solid #e0e3d8; padding: 8px; border-radius: 12px; background: #fffdf8; text-align: left; min-width: 0; color: #334c2e; }
-  .photo-card:hover { border-color: #8aa371; box-shadow: 0 5px 20px #263d2210; }
-  .photo-info { padding: 12px 6px 7px; }
-  .photo-info strong, .photo-info span, .photo-info small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .photo-info strong { font-size: 12px; font-weight: 600; }
-  .photo-info span { font-size: 10px; color: #879779; margin: 6px 0; }
-  .photo-info small { font-size: 9px; color: #a1aa96; }
   .empty { padding: 80px 20px; text-align: center; color: #748468; background: #f0f2e9; border-radius: 13px; border: 1px dashed #d8dfcd; }
   .empty h2 { font-family: Georgia, serif; font-weight: 400; color: #4a6641; margin-bottom: 12px; }
   .empty p { font-size: 12px; }
   .empty-check { display: inline-grid; place-items: center; background: #e0ebd4; border-radius: 50%; width: 50px; height: 50px; margin-bottom: 19px; font-size: 11px; }
   .pill { border-radius: 30px; background: #e6eddc; padding: 9px 14px; color: #6b8654; font-size: 11px; white-space: nowrap; }
   .review-actions { display: flex; align-items: center; gap: 12px; }
-  .review-confirm-setting { margin: 0 0 20px; }
   .review-list { display: flex; flex-direction: column; gap: 14px; }
   .review-row { display: flex; align-items: center; gap: 19px; padding: 23px; background: #fffdf8; border: 1px solid #dfe4d6; border-radius: 12px; cursor: pointer; }
   .review-row:hover:not([aria-disabled="true"]) { border-color: #aab99a; background: #fbfcf6; }
@@ -1147,14 +1215,6 @@
   footer { font-size: 9px; color: #a7af9a; padding-top: 27px; display: flex; justify-content: space-between; gap: 20px; }
   .modal-backdrop { position: fixed; inset: 0; background: #13261acf; z-index: 10; overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 30px 22px; }
   .modal { position: relative; margin: 0; border: 0; color: inherit; width: min(760px, 100%); background: #fffdf8; border-radius: 15px; padding: 27px; box-shadow: 0 20px 100px #0003; max-height: calc(100vh - 60px); overflow: auto; }
-  .detail-modal { width: min(660px, 100%); }
-  .comparison { width: min(1140px, 100%); }
-  .comparison-actions { position: sticky; top: 0; z-index: 2; background: #fffdf8; padding: 12px 0; border-bottom: 1px solid #e2e6d8; }
-  .comparison-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-  .comparison-choice { min-width: 0; }
-  .comparison-choice .primary { width: 100%; min-width: 0; flex-direction: column; gap: 4px; white-space: normal; }
-  .comparison-choice .primary small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; font-weight: 400; opacity: .8; }
-  .comparison-choice .muted { margin: 6px 0 0; }
   .comparison-dismiss { width: 100%; margin-top: 8px; }
   .modal-top { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
   .modal-top small { font-size: 8px; letter-spacing: .12em; color: #92a17f; }
@@ -1162,21 +1222,9 @@
   .detail-columns { display: grid; grid-template-columns: 1fr; gap: 24px; }
   .comparison .detail-columns { grid-template-columns: 1fr 1fr; }
   .detail-column { min-width: 0; }
-  .detail-column h3 { margin-top: 18px; }
-  .detail-facts { display: flex; flex-wrap: wrap; gap: 8px 15px; color: #8a9a79; font-size: 11px; }
-  .quality-higher { color: #a42626; font-weight: 700; }
-  .quality-higher small { font-size: 10px; }
-  .quality-label { display: inline-block; margin: 0 0 9px; padding: 4px 8px; border-radius: 5px; background: #fae5e2; color: #922323; font-size: 11px; font-weight: 700; }
-  .detail-date { font-size: 12px; margin: 15px 0 10px; }
-  .detail-date small { display: block; font-size: 10px; color: #97a48a; margin-top: 6px; }
-  .file-path { font-size: 11px; color: #8c9d7a; }
   .source-history { margin-top: 12px; font-size: 11px; display: flex; flex-direction: column; gap: 5px; }
   .source-history code, .source-history small { font-size: 10px; color: #96a386; }
   .modal-bottom { border-top: 1px solid #e2e6d8; padding-top: 20px; margin-top: 21px; }
-  .modal-bottom p { font-size: 11px; color: #8a997b; line-height: 1.7; }
-  .date-edit { display: flex; align-items: flex-end; gap: 15px; }
-  .date-edit label { display: flex; flex-direction: column; gap: 8px; color: #859773; font-size: 11px; }
-  video { width: 100%; max-height: 340px; margin-top: 13px; background: #182b1c; border-radius: 8px; }
   .cleanup-list, .move-list { max-height: 350px; overflow: auto; }
   .cleanup-row { display: flex; align-items: flex-start; gap: 12px; border-bottom: 1px solid #e2e6d8; padding: 15px 0; }
   .cleanup-row input { accent-color: #466b3c; }
@@ -1198,6 +1246,126 @@
   .mini-pin { display: flex; align-items: center; gap: 6px; color: #8b9c7a; }
   .mini-pin input { accent-color: #536f40; }
   .mini-error { font-size: 10px; color: #a65b45; overflow-wrap: anywhere; margin-top: 11px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin: 0 4px 26px; }
+  .add-folders { gap: 8px; padding: 12px 14px; font-size: 12px; }
+  .drop-hint { color: #7d8676; font-size: 11px; line-height: 1.5; text-align: center; margin: 9px 0 18px; }
+  .sidebar-progress { display: flex; flex-direction: column; gap: 7px; width: 100%; border: 1px solid #dce3d4; background: #f6f8f0; border-radius: 9px; padding: 10px 12px; margin: -6px 0 18px; color: #3f5a36; text-align: left; }
+  .sidebar-progress > span:first-child { display: flex; justify-content: space-between; font-size: 11px; }
+  .sidebar-progress strong { text-transform: capitalize; }
+  .sidebar-progress .progress-track { display: block; margin: 0; }
+  .sidebar-progress .progress-track span { display: block; height: 100%; background: #6e8d54; transition: width .2s; }
+  nav button { border: 0; background: transparent; color: #5f6c5a; text-align: left; padding: 11px 11px; display: flex; align-items: center; gap: 11px; font-size: 13px; border-radius: 8px; }
+  nav button:hover { background: #f1f4ec; }
+  nav button.active { color: #274b38; background: #eaf0e4; font-weight: 600; }
+  .nav-icon { flex-shrink: 0; opacity: .8; }
+  .nav-count { margin-left: auto; border-radius: 5px; background: #dde8d4; padding: 2px 6px; font-size: 11px; font-weight: 600; }
+  .nav-count.attention { background: #f3e2b8; color: #7a5a17; }
+  .library-page { padding-top: 22px; }
+  .library-toolbar { display: flex; align-items: center; gap: 12px; margin: 0 0 22px; flex-wrap: wrap; }
+  .search-field { flex: 1; min-width: 220px; position: relative; display: flex; align-items: center; color: #7d8a72; }
+  .search-field svg { position: absolute; left: 13px; pointer-events: none; }
+  .search { flex: 1; padding-left: 38px !important; padding-right: 34px !important; }
+  .clear-search { position: absolute; right: 6px; border: 0; background: transparent; color: #6d7a64; font-size: 18px; line-height: 1; padding: 4px 8px; border-radius: 6px; }
+  .clear-search:hover { background: #eef1e7; }
+  .size-slider { display: flex; align-items: center; gap: 7px; color: #8b977f; }
+  .size-slider input { padding: 0; border: 0; background: transparent; width: 110px; accent-color: #496f3c; }
+  .library-layout { display: flex; align-items: flex-start; gap: 26px; }
+  .timeline { position: sticky; top: 16px; width: 128px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; max-height: calc(100vh - 32px); overflow: auto; padding-bottom: 12px; }
+  .timeline button { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; border: 0; background: transparent; color: #5f6c5a; padding: 7px 10px; border-radius: 7px; text-align: left; font-size: 13px; }
+  .timeline button:hover { background: #eef1e7; }
+  .timeline small { color: #8b977f; font-size: 11px; }
+  .timeline-year.active { color: #274b38; font-weight: 700; }
+  .timeline-months { display: flex; flex-direction: column; gap: 1px; margin: 0 0 8px 8px; padding-left: 6px; border-left: 1px solid #dfe4d6; }
+  .timeline-months button { font-size: 12px; padding: 5px 9px; text-transform: capitalize; }
+  .timeline-months button.active { background: #e3ecda; color: #274b38; font-weight: 600; }
+  .library-main { flex: 1; min-width: 0; }
+  .month-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 16px; }
+  .month-header h2 { font-family: Georgia, serif; font-weight: 500; font-size: 26px; margin: 0 0 4px; text-transform: capitalize; }
+  .month-header span { color: #75816c; font-size: 12px; }
+  .month-header .button-row { margin: 0; flex-wrap: nowrap; }
+  .load-earlier { margin: 0 0 12px; }
+  .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--thumb, 200px), 1fr)); gap: 8px; transition: opacity .15s; }
+  .photo-grid.loading { opacity: .55; }
+  .photo-grid :global(.preview) { height: auto; aspect-ratio: 1 / 1; border-radius: 8px; }
+  .photo-card { position: relative; border: 0; padding: 0; border-radius: 8px; background: transparent; text-align: left; min-width: 0; color: white; overflow: hidden; }
+  .photo-card:hover :global(img) { filter: brightness(1.05); }
+  .photo-card:focus-visible { outline-offset: 2px; }
+  .photo-caption { position: absolute; left: 0; right: 0; bottom: 0; padding: 22px 10px 8px; background: linear-gradient(transparent, #0d1a12c2); opacity: 0; transition: opacity .12s; pointer-events: none; border-radius: 0 0 8px 8px; }
+  .photo-card:hover .photo-caption, .photo-card:focus-visible .photo-caption { opacity: 1; }
+  .photo-caption strong, .photo-caption small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .photo-caption strong { font-size: 12px; font-weight: 600; }
+  .photo-caption small { font-size: 11px; opacity: .85; margin-top: 3px; }
+  .card-badge { position: absolute; top: 8px; left: 8px; background: #f5ebcf; color: #6f5418; border-radius: 5px; padding: 3px 7px; font-size: 10px; font-weight: 700; }
+  .load-more { min-height: 60px; display: grid; place-items: center; color: #75816c; font-size: 12px; }
+  .drop-overlay { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: #1d3a2bb8; pointer-events: none; }
+  .drop-overlay div { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 40px 56px; border: 2px dashed #c9dbb6; border-radius: 18px; background: #f5f8ee; color: #2f5233; }
+  .drop-overlay strong { font-family: Georgia, serif; font-weight: 500; font-size: 24px; }
+  .drop-overlay small { font-size: 12px; color: #61745a; }
+  .pill.unsaved { background: #f5ebcf; color: #7a5a17; padding: 7px 12px; }
+  kbd { font: inherit; font-size: 10px; font-weight: 700; border: 1px solid currentColor; border-radius: 4px; padding: 1px 5px; opacity: .75; }
+  .key-hint { color: #7d8a72; font-size: 11px; margin: 14px 0 0; }
+  .lightbox { position: fixed; inset: 0; z-index: 20; background: #0f1b15; color: #eef1e7; display: flex; flex-direction: column; outline: none; }
+  .lightbox-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 14px; border-bottom: 1px solid #ffffff14; }
+  .lightbox-title { flex: 1; min-width: 0; text-align: center; }
+  .lightbox-title strong, .lightbox-title small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lightbox-title strong { font-size: 13px; }
+  .lightbox-title small { color: #a9b6a0; font-size: 11px; margin-top: 3px; text-transform: capitalize; }
+  .lightbox-tools { display: flex; gap: 6px; }
+  .lightbox-button { border: 1px solid #ffffff24; background: transparent; color: #eef1e7; border-radius: 8px; padding: 8px 13px; font-size: 12px; font-weight: 600; }
+  .lightbox-button:hover, .lightbox-button.active { background: #ffffff18; }
+  .lightbox-error { margin: 10px 14px 0; }
+  .lightbox-body { flex: 1; min-height: 0; display: flex; }
+  .lightbox-stage { flex: 1; min-width: 0; position: relative; display: grid; place-items: center; padding: 14px 64px; }
+  .lightbox-stage :global(.preview.large) { width: 100%; height: 100%; background: transparent; border-radius: 0; }
+  .lightbox-stage :global(.placeholder) { color: #a9b6a0; }
+  .lightbox-stage video { width: 100%; height: 100%; max-height: none; margin: 0; object-fit: contain; background: transparent; }
+  .lightbox-nav { position: absolute; top: 50%; transform: translateY(-50%); z-index: 1; width: 46px; height: 64px; border: 0; border-radius: 10px; background: #ffffff12; color: white; font-size: 34px; line-height: 1; }
+  .lightbox-nav:hover:not(:disabled) { background: #ffffff26; }
+  .lightbox-nav:disabled { opacity: .2; }
+  .lightbox-nav.previous { left: 10px; }
+  .lightbox-nav.next { right: 10px; }
+  .play-overlay { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+  .play-overlay > * { pointer-events: auto; }
+  .play-overlay span { background: #0f1b15d0; padding: 10px 16px; border-radius: 8px; font-size: 12px; }
+  .lightbox-info { width: 320px; flex-shrink: 0; overflow: auto; padding: 18px 20px; background: #fffdf8; color: #21372d; border-left: 1px solid #ffffff14; }
+  .lightbox-info dl { margin: 0 0 16px; display: grid; gap: 4px; }
+  .lightbox-info dt { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #7d8a72; margin-top: 10px; }
+  .lightbox-info dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+  .lightbox-info dd small { display: block; color: #75816c; margin-top: 3px; }
+  .lightbox-info dd code { font-size: 11px; color: #5f7850; }
+  .lightbox-actions { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid #e2e6d8; padding-top: 16px; margin-top: 8px; }
+  .lightbox-actions label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #61745a; }
+  .lightbox-info .key-hint { color: #8b977f; }
+  .comparison { width: min(1240px, 100%); }
+  .comparison .modal-top { margin-bottom: 14px; }
+  .button-row.compact { margin: 0; }
+  .compare-pane { position: relative; border-radius: 10px; overflow: hidden; cursor: zoom-in; }
+  .compare-pane :global(.preview.large) { height: clamp(260px, calc(100vh - 380px), 680px); }
+  .compare-pane :global(img) { transition: transform .08s; }
+  .compare-pane.zoomed { cursor: zoom-out; }
+  .compare-pane.zoomed :global(img) { transform: scale(2.6); transform-origin: var(--zx) var(--zy); }
+  .compare-pane video { margin: 0; }
+  .keep-button { width: 100%; flex-direction: column; gap: 4px; margin-top: 10px; white-space: normal; padding: 12px 16px; font-size: 12px; }
+  .keep-button small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 400; opacity: .85; }
+  .detail-column > .muted { margin: 6px 0 0; }
+  .comparison-dismiss { width: 100%; margin-top: 10px; }
+  .quality-label { position: absolute; top: 10px; left: 10px; padding: 5px 9px; border-radius: 6px; background: #e1efd8; color: #24521f; font-size: 12px; font-weight: 700; box-shadow: 0 2px 8px #0002; }
+  .quality-higher { color: #2c6a26; font-weight: 700; }
+  .quality-higher small { font-size: 11px; }
+  .difference-table { width: 100%; border-collapse: collapse; margin-top: 18px; font-size: 12px; table-layout: fixed; }
+  .difference-table th { width: 150px; text-align: left; font-weight: 600; color: #75816c; padding: 8px 10px 8px 0; vertical-align: top; }
+  .difference-table td { padding: 8px 10px; vertical-align: top; overflow-wrap: anywhere; border-top: 1px solid #edf0e6; }
+  .difference-table th { border-top: 1px solid #edf0e6; }
+  .difference-table tr.differs td { background: #f7f9f1; font-weight: 600; }
+  .difference-table code { font-size: 11px; font-weight: 400; color: #5f7850; }
+  .difference-table td > small:not(.cell-note) { margin-left: 5px; }
+  [role="dialog"][tabindex="-1"]:focus { outline: none; }
+  .cell-note { display: block; font-weight: 400; color: #75816c; margin-top: 3px; }
+  video { width: 100%; max-height: 340px; margin-top: 13px; background: #182b1c; border-radius: 8px; }
+  .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 40; display: flex; align-items: center; gap: 8px; max-width: min(640px, calc(100vw - 32px)); padding: 10px 10px 10px 18px; border-radius: 10px; background: #21372d; color: #f3f1e6; box-shadow: 0 10px 40px #0004; font-size: 13px; }
+  .toast span { overflow: hidden; text-overflow: ellipsis; }
+  .toast .text-button { color: #d9e8c6; font-size: 12px; }
+  .toast .text-button:hover { background: #ffffff14; }
   @media (max-width: 1000px) { .sidebar { width: 204px; padding: 25px 13px; } .content { padding: 0 25px 20px; } .hero-mark { display: none; } :global(h1) { font-size: 33px; } footer span { display: none; } }
-  @media (max-width: 760px) { .sidebar { width: 170px; padding: 20px 9px; } .brand small, .safety-note, .nav-icon { display: none; } .brand { margin: 0 3px 30px; } .brand strong { font-size: 12px; } .content { padding: 0 18px 20px; } .stats { gap: 8px; } .stat { padding: 14px 12px; } .stat strong { font-size: 23px; } .next-steps { align-items: flex-start; flex-direction: column; } .comparison .detail-columns { grid-template-columns: 1fr; } .setting-columns { grid-template-columns: 1fr; } .wide-only { display: none; } }
+  @media (max-width: 760px) { .sidebar { width: 170px; padding: 20px 9px; } .brand small, .safety-note, .drop-hint { display: none; } .timeline { width: 96px; } .lightbox-info { position: absolute; left: 0; right: 0; bottom: 0; width: auto; max-height: 42%; box-shadow: 0 -10px 30px #0005; z-index: 2; } .lightbox-body { position: relative; } .size-slider { display: none; } .brand { margin: 0 3px 30px; } .brand strong { font-size: 12px; } .content { padding: 0 18px 20px; } .stats { gap: 8px; } .stat { padding: 14px 12px; } .stat strong { font-size: 23px; } .next-steps { align-items: flex-start; flex-direction: column; } .comparison .detail-columns { grid-template-columns: 1fr; } .setting-columns { grid-template-columns: 1fr; } .wide-only { display: none; } }
 </style>

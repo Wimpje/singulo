@@ -18,7 +18,7 @@ Optimize every change around three priorities, in order:
 
 ## User-Friendliness Guidelines
 
-- **Keep interactions effortless:** modals and overlays should close via backdrop click and `Escape`; keyboard navigation (such as arrow keys and `Review next match`) should flow naturally without extra clicks.
+- **Keep interactions effortless:** modals and overlays should close via backdrop click and `Escape`; keyboard navigation (lightbox arrow keys, review shortcuts `1`/`2`/`B`/`S`) should flow naturally without extra clicks. Prefer an Undo message over a confirmation for reversible actions (e.g. keeping a copy moves the other to archive undo).
 - **Avoid modal fatigue:** reserve blocking confirmations for destructive or hard-to-reverse actions (such as trashing source files or permanently purging undo copies), and respect opt-outs where provided.
 - **Never freeze the UI:** long-running work (imports, video proxy generation, thumbnail decoding) must not block browsing, switching tabs, or closing dialogs. Cancel queued work (e.g. via `AbortController`) when thumbnails scroll out of view.
 - **Write calm, clear copy:** explain states and errors in plain human terms rather than raw internal jargon.
@@ -41,6 +41,7 @@ Optimize every change around three priorities, in order:
 
 - [src/routes/+page.svelte](./src/routes/+page.svelte) — Main app, separate browsing-only `viewer` window, and floating `drop` window UI.
 - [src/lib/Preview.svelte](./src/lib/Preview.svelte) & [src/lib/api.ts](./src/lib/api.ts) — Lazy viewport thumbnail loader, priority/abort queue, and Tauri IPC wrappers.
+- [src/lib/i18n.svelte.ts](./src/lib/i18n.svelte.ts) — English/Dutch strings (`t()`), reactive language state, and plain-language date-source labels. Add a Dutch entry for every new UI string.
 - [src/lib/comparison.js](./src/lib/comparison.js) — Comparison highlight and quality-hint helpers.
 - [src-tauri/src/lib.rs](./src-tauri/src/lib.rs) — Tauri command handlers, concurrency guards, and window management.
 - [src-tauri/src/archive.rs](./src-tauri/src/archive.rs) — SQLite catalog, WAL/migrations, staged file placement, reorganization/rollback, undo/purge, and recovery backups.
