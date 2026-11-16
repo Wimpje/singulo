@@ -188,6 +188,21 @@
     "Automatically group very confident matches": "Zeer zekere overeenkomsten automatisch groeperen",
     "Keep a clearly better equivalent copy active. All other originals remain in undo. Ambiguous variants go to review.": "Bewaar de duidelijk betere, gelijkwaardige kopie actief. Alle andere originelen blijven herstelbaar. Twijfelgevallen worden ter beoordeling aangeboden.",
     "Save archive settings": "Archiefinstellingen opslaan",
+    "Deep video comparison (slower)": "Uitgebreide videovergelijking (langzamer)",
+    "Off by default: exact video duplicates are recognized by hash; possible matches from a preview or capture date and duration go to manual review. Enable to compare every frame and audio before automatically grouping a clearly higher-resolution equivalent. Requires automatic grouping above and can slow imports substantially.": "Standaard uit: exacte videokopieën worden herkend via hun hash; mogelijke overeenkomsten op basis van een voorbeeld of opnamedatum en duur gaan naar handmatige beoordeling. Schakel dit in om elk frame en de audio te vergelijken voordat een duidelijk hogere-resolutiekopie automatisch wordt gegroepeerd. Vereist automatisch groeperen hierboven en kan imports aanzienlijk vertragen.",
+    "Choosing an external disk": "Een externe schijf kiezen",
+    "Mac only: prefer APFS. Windows only: prefer NTFS. For use on both, exFAT is convenient, but lacks journaling and may require extra copying during import. Always eject safely and keep another backup.": "Alleen Mac: bij voorkeur APFS. Alleen Windows: bij voorkeur NTFS. Voor gebruik op beide is exFAT handig, maar het heeft geen journaling en kan extra kopieerwerk tijdens import vereisen. Werp de schijf altijd veilig uit en bewaar een extra back-up.",
+    "You do not need to reformat an existing disk. Formatting erases its files; this app never formats disks.": "Je hoeft een bestaande schijf niet opnieuw te formatteren. Formatteren wist de bestanden; deze app formatteert nooit schijven.",
+    "Import timings": "Importtijden",
+    "Reading and hashing": "Lezen en hashen",
+    "Metadata": "Metadata",
+    "Buffering": "Bufferen",
+    "Decoding (combined worker time)": "Decoderen (opgetelde werktijd)",
+    "Matching": "Vergelijken",
+    "Copying and catalog writes": "Kopiëren en catalogus bijwerken",
+    "Recovery backup": "Herstelback-up",
+    "Total elapsed": "Totale verstreken tijd",
+    "Stage times overlap while decoding runs in parallel; hashing includes exact-match verification.": "Fasetijden overlappen doordat decoderen parallel gebeurt; hashen omvat ook verificatie van exacte kopieën.",
     "Reset defaults": "Standaardwaarden herstellen",
     "Apply the saved layout to older imports?": "Opgeslagen indeling toepassen op eerdere imports?",
     "Preview existing file moves first. Sources and folder history stay untouched.": "Bekijk eerst welke bestaande bestanden worden verplaatst. Bronnen en mapgeschiedenis blijven ongewijzigd.",
@@ -838,6 +853,16 @@
         </button>
         {#if busy || snapshot.progress.total > 0}
           <section class="progress-card"><div class="section-line"><strong>{t(snapshot.progress.status)}</strong><span>{snapshot.progress.done} / {snapshot.progress.total} {t("files")}</span></div><div class="progress-track"><div style={`width:${percent}%`}></div></div><p class="current-file">{snapshot.progress.current || `${snapshot.progress.copied} ${t("originals copied")} / ${snapshot.progress.duplicates} ${t("exact duplicates skipped")}`}</p>
+            {#if snapshot.progress.timings}
+              {@const timings = snapshot.progress.timings}
+              <details class="advanced"><summary>{t("Import timings")}</summary>
+                <p>{t("scanning")}: {(timings.scanMs / 1000).toFixed(1)} s</p>
+                <p>{t("Reading and hashing")}: {(timings.hashMs / 1000).toFixed(1)} s / {t("Metadata")}: {(timings.metadataMs / 1000).toFixed(1)} s / {t("Buffering")}: {(timings.bufferMs / 1000).toFixed(1)} s</p>
+                <p>{t("Decoding (combined worker time)")}: {(timings.decodeMs / 1000).toFixed(1)} s / {t("Matching")}: {(timings.matchMs / 1000).toFixed(1)} s</p>
+                <p>{t("Copying and catalog writes")}: {(timings.placementMs / 1000).toFixed(1)} s / {t("Recovery backup")}: {(timings.backupMs / 1000).toFixed(1)} s / {t("Total elapsed")}: {(timings.totalMs / 1000).toFixed(1)} s</p>
+                <p>{t("Stage times overlap while decoding runs in parallel; hashing includes exact-match verification.")}</p>
+              </details>
+            {/if}
             {#if busy}<div class="button-row"><button class="secondary" onclick={() => run(async () => { await api("control_import", { action: snapshot.progress.status === "paused" ? "resume" : "pause" }); })}>{snapshot.progress.status === "paused" ? t("Resume") : t("Pause")}</button><button class="text-button" onclick={() => run(async () => { await api("control_import", { action: "cancel" }); })}>{t("Cancel import")}</button></div>{/if}
           </section>
         {/if}
@@ -863,8 +888,10 @@
           <div class="setting-columns"><label>{t("Filenames")}<select bind:value={config.filenames}><option value="original">{t("Keep original filenames")}</option><option value="date">{t("Use photo date / time")}</option></select></label><label>{t("Unknown-date folder")}<input bind:value={config.unknownFolder} /></label></div>
           <div class="path-preview"><small>{t("YOUR FILES WOULD LOOK LIKE THIS")}</small>{#each examples as example}<code>{example}</code>{/each}{#if !native}<code>2023/07/18/IMG_1234.jpg</code><code>unknown/undated.jpg</code>{/if}{#if configError}<p class="field-error">{configError}</p>{/if}<p>{t("Name collisions receive a unique suffix. Estimated dates stay marked; missing times aren't invented.")}</p></div>
           <label class="check-setting"><input type="checkbox" bind:checked={config.automaticMatches} /><span><strong>{t("Automatically group very confident matches")}</strong><small>{t("Keep a clearly better equivalent copy active. All other originals remain in undo. Ambiguous variants go to review.")}</small></span></label>
+          <label class="check-setting"><input type="checkbox" bind:checked={config.deepVideoMatching} disabled={!config.automaticMatches} /><span><strong>{t("Deep video comparison (slower)")}</strong><small>{t("Off by default: exact video duplicates are recognized by hash; possible matches from a preview or capture date and duration go to manual review. Enable to compare every frame and audio before automatically grouping a clearly higher-resolution equivalent. Requires automatic grouping above and can slow imports substantially.")}</small></span></label>
           <div class="button-row"><button class="primary" disabled={!native || !snapshot.root || busy || !!configError} onclick={() => run(async () => { await mutate(async () => { await api("save_settings", { settings: config }); await refresh(true); }); notice = t("Settings saved for future imports. Existing files haven't moved."); })}>{t("Save archive settings")}</button><button class="text-button" onclick={() => config = { ...defaults }}>{t("Reset defaults")}</button></div>
         </section>
+        <section class="settings-card"><h3>{t("Choosing an external disk")}</h3><p class="muted">{t("Mac only: prefer APFS. Windows only: prefer NTFS. For use on both, exFAT is convenient, but lacks journaling and may require extra copying during import. Always eject safely and keep another backup.")}</p><p class="muted">{t("You do not need to reformat an existing disk. Formatting erases its files; this app never formats disks.")}</p></section>
         <section class="next-steps"><div><h3>{t("Apply the saved layout to older imports?")}</h3><p>{t("Preview existing file moves first. Sources and folder history stay untouched.")}</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={previewMoves}>{t("Preview reorganization")}</button></section>
         <button class="text-button" disabled={!native || !snapshot.root || busy} onclick={() => run(async () => { moves = await api<MoveRow[]>("rollback_preview"); undoingMoves = true; })}>{t("Preview undo of last reorganization")}</button>
         <section class="settings-card"><h3>{t("Media tools")}</h3><p class="muted">{t("RAW and video formats depend on the bundled decoders. Unsupported originals can still be archived without a preview.")}</p><div class="tool-list">{#each tools as tool}<div><span class:unavailable={!tool.available} class="safe-dot"></span><strong>{tool.name}</strong><small title={tool.detail}>{tool.available ? t("Available") : tool.detail}</small></div>{/each}</div></section>

@@ -4,7 +4,7 @@ use image::{DynamicImage, GenericImageView, ImageReader};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
-    io::{Read, Write},
+    io::{BufRead, Cursor, Read, Seek, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
@@ -303,10 +303,11 @@ pub fn select_date(
 }
 
 fn reader(path: &Path) -> Result<DynamicImage> {
-    let mut reader = ImageReader::open(path)
-        .map_err(|e| e.to_string())?
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?;
+    read_image(ImageReader::open(path).map_err(|e| e.to_string())?)
+}
+
+fn read_image<R: BufRead + Seek>(reader: ImageReader<R>) -> Result<DynamicImage> {
+    let mut reader = reader.with_guessed_format().map_err(|e| e.to_string())?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(30_000);
     limits.max_image_height = Some(30_000);
@@ -450,7 +451,14 @@ pub(crate) fn scaled_jpeg_min(
     min_side: u32,
 ) -> Result<Option<(DynamicImage, u32, u32)>> {
     let file = std::io::BufReader::new(File::open(path).map_err(|e| e.to_string())?);
-    let mut decoder = jpeg_decoder::Decoder::new(file);
+    scaled_jpeg_reader(file, min_side)
+}
+
+pub(crate) fn scaled_jpeg_reader(
+    input: impl Read,
+    min_side: u32,
+) -> Result<Option<(DynamicImage, u32, u32)>> {
+    let mut decoder = jpeg_decoder::Decoder::new(input);
     decoder.read_info().map_err(|e| e.to_string())?;
     let info = decoder.info().ok_or("Missing JPEG header.")?;
     if info.width > 30_000 || info.height > 30_000 {
@@ -502,18 +510,35 @@ pub fn preview(
     kind: &str,
     metadata: &serde_json::Value,
 ) -> Result<Preview> {
+    preview_input(app, path, kind, metadata, None)
+}
+
+fn preview_input(
+    app: &tauri::AppHandle,
+    path: &Path,
+    kind: &str,
+    metadata: &serde_json::Value,
+    bytes: Option<&[u8]>,
+) -> Result<Preview> {
     let jpeg = path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg"));
     let fast = if kind == "photo" && jpeg {
-        scaled_jpeg(path).unwrap_or(None)
+        match bytes {
+            Some(bytes) => scaled_jpeg_reader(Cursor::new(bytes), COMPARE),
+            None => scaled_jpeg(path),
+        }
+        .unwrap_or(None)
     } else {
         None
     };
     let (mut image, mut width, mut height) = match (fast, kind) {
         (Some(fast), _) => fast,
         (None, "photo") => {
-            let image = reader(path)?;
+            let image = match bytes {
+                Some(bytes) => read_image(ImageReader::new(Cursor::new(bytes)))?,
+                None => reader(path)?,
+            };
             let (w, h) = image.dimensions();
             (shrink(image), w, h)
         }
@@ -670,6 +695,7 @@ pub fn metadata_batch(
         "-FileType",
         "-ImageWidth",
         "-ImageHeight",
+        "-Duration",
         "-Orientation",
         "-ContentIdentifier",
         "-BitsPerSample",
@@ -694,14 +720,12 @@ pub fn metadata_batch(
     Ok(result)
 }
 
-pub fn inspect(
-    app: &tauri::AppHandle,
+pub fn prepare_inspection(
     path: &Path,
     hash: String,
     metadata: Result<serde_json::Value>,
-) -> Result<(Media, Option<Preview>)> {
+) -> Result<Media> {
     let kind = kind(path).ok_or("Unsupported media extension.")?;
-    let before = identity(path)?;
     let stat = fs::metadata(path).map_err(|e| e.to_string())?;
     let mut warnings = Vec::new();
     let metadata = if kind == "sidecar" {
@@ -733,44 +757,56 @@ pub fn inspect(
     let (date, date_source, date_warnings) =
         select_date(&metadata, birth.as_deref(), modified.as_deref());
     warnings.extend(date_warnings);
-    let mut width = value(&metadata, "ImageWidth")
+    let width = value(&metadata, "ImageWidth")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
-    let mut height = value(&metadata, "ImageHeight")
+    let height = value(&metadata, "ImageHeight")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
-    let preview = if kind == "sidecar" {
-        None
-    } else {
-        match preview(app, path, kind, &metadata) {
-            Ok(preview) => {
-                if kind != "video" {
-                    (width, height) = (preview.width, preview.height);
-                }
-                Some(preview)
-            }
-            Err(error) => {
-                warnings.push(format!("Preview/similarity unavailable: {error}"));
-                None
-            }
-        }
-    };
-    if identity(path)? != before {
-        return Err("Source changed while it was being inspected; retry it.".into());
-    }
-    let media = Media {
+    let duration_seconds = value(&metadata, "Duration")
+        .and_then(|value| value.as_f64())
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0);
+    Ok(Media {
         kind: kind.into(),
         date,
         date_source,
         warnings,
         width,
         height,
+        duration_seconds,
         hash,
         bytes: stat.len(),
-        signature: preview.as_ref().and_then(|p| p.signature.clone()),
+        signature: None,
         metadata,
+    })
+}
+
+pub fn inspect(
+    app: &tauri::AppHandle,
+    path: &Path,
+    mut media: Media,
+    bytes: Option<&[u8]>,
+) -> (Media, Option<Preview>) {
+    let preview = if media.kind == "sidecar" {
+        None
+    } else {
+        match preview_input(app, path, &media.kind, &media.metadata, bytes) {
+            Ok(preview) => {
+                if media.kind != "video" {
+                    (media.width, media.height) = (preview.width, preview.height);
+                }
+                Some(preview)
+            }
+            Err(error) => {
+                media
+                    .warnings
+                    .push(format!("Preview/similarity unavailable: {error}"));
+                None
+            }
+        }
     };
-    Ok((media, preview))
+    media.signature = preview.as_ref().and_then(|p| p.signature.clone());
+    (media, preview)
 }
 
 pub fn photo_equivalent(left: &Preview, right: &Preview) -> bool {

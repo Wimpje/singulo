@@ -5,6 +5,7 @@ export interface Settings {
   filenames: "original" | "date";
   unknownFolder: string;
   automaticMatches: boolean;
+  deepVideoMatching: boolean;
 }
 
 export interface Media {
@@ -14,6 +15,7 @@ export interface Media {
   warnings: string[];
   width: number;
   height: number;
+  durationSeconds: number | null;
   hash: string;
   bytes: number;
   signature: string | null;
@@ -41,6 +43,19 @@ export interface Progress {
   copied: number;
   duplicates: number;
   errors: string[];
+  timings?: ImportTimings;
+}
+
+export interface ImportTimings {
+  scanMs: number;
+  hashMs: number;
+  metadataMs: number;
+  bufferMs: number;
+  decodeMs: number;
+  matchMs: number;
+  placementMs: number;
+  backupMs: number;
+  totalMs: number;
 }
 
 export interface Snapshot {
@@ -107,6 +122,7 @@ export const defaults: Settings = {
   filenames: "original",
   unknownFolder: "unknown",
   automaticMatches: true,
+  deepVideoMatching: false,
 };
 
 export const emptySnapshot: Snapshot = {

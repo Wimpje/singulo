@@ -10,6 +10,7 @@ fn sample(hash: String) -> Media {
         warnings: vec![],
         width: 100,
         height: 100,
+        duration_seconds: None,
         hash,
         bytes: 4,
         signature: None,
@@ -94,6 +95,36 @@ fn exact_duplicates_keep_provenance_and_require_present_keeper() {
     occurrence.album = "Été".into();
     archive.record_occurrence(&occurrence).unwrap();
     assert_eq!(archive.page("été", "all", None, 0).unwrap().len(), 1);
+    let mut batched = occurrence.clone();
+    batched.id = "batched".into();
+    batched.source = directory
+        .path()
+        .join("another-source.jpg")
+        .to_string_lossy()
+        .into();
+    batched.album = "Uncommitted album".into();
+    let mut invalid = batched.clone();
+    invalid.id = "invalid".into();
+    invalid.source = directory
+        .path()
+        .join("invalid-source.jpg")
+        .to_string_lossy()
+        .into();
+    invalid.item = "missing-item".into();
+    assert!(
+        archive
+            .record_occurrences(&[batched.clone(), invalid])
+            .is_err()
+    );
+    assert!(archive.occurrence("batched").is_err());
+    assert!(
+        archive
+            .page("uncommitted album", "all", None, 0)
+            .unwrap()
+            .is_empty()
+    );
+    archive.record_occurrences(&[batched]).unwrap();
+    assert!(archive.occurrence("batched").is_ok());
     let wanted = Path::new("2023/07/18/New.jpg");
     assert_eq!(archive.unique_import_path(wanted, "first").unwrap(), wanted);
     assert_eq!(
@@ -210,13 +241,88 @@ fn scaled_jpeg_matches_full_decode() {
     }));
     image.save(&path).unwrap();
     let (scaled, width, height) = media::scaled_jpeg(&path).unwrap().unwrap();
+    let bytes = fs::read(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    let (buffered, buffered_width, buffered_height) =
+        media::scaled_jpeg_reader(std::io::Cursor::new(&bytes), 512)
+            .unwrap()
+            .unwrap();
+    assert_eq!((buffered_width, buffered_height), (width, height));
+    assert_eq!(buffered.to_rgb8(), scaled.to_rgb8());
     assert_eq!((width, height), (2400, 1600));
     assert!(scaled.width() < 2400 && scaled.height() >= 512);
-    let full = image::open(&path).unwrap();
+    let full = image::load_from_memory(&bytes).unwrap();
     assert!(media::photo_equivalent(
         &media::Preview::new(&scaled, width, height),
         &media::Preview::new(&full, 2400, 1600)
     ));
+}
+
+#[test]
+fn video_review_candidates_require_capture_day_and_close_duration() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.mov");
+    let target = dir.path().join("archive");
+    fs::create_dir(&target).unwrap();
+    fs::write(&source, b"test").unwrap();
+    let hash = media::hash(&source).unwrap();
+    let mut archive = Archive::open(&target).unwrap();
+    let legacy_settings: Settings = serde_json::from_value(serde_json::json!({
+        "template": "{yyyy}/{mm}/{dd}", "filenames": "original",
+        "unknownFolder": "unknown", "automaticMatches": true
+    }))
+    .unwrap();
+    assert!(!legacy_settings.deep_video_matching);
+    for (id, day, duration, capture) in [
+        ("same", "2023-07-18", Some(100.0), true),
+        ("boundary", "2023-07-18", Some(101.0), true),
+        ("longer", "2023-07-18", Some(101.1), true),
+        ("other-day", "2023-07-19", Some(100.0), true),
+        ("unknown-duration", "2023-07-18", None, true),
+        ("estimated", "2023-07-18", Some(100.0), false),
+        ("undo", "2023-07-18", Some(100.0), true),
+    ] {
+        let mut media = sample(hash.clone());
+        media.kind = "video".into();
+        media.date = Some(format!("{day}T12:00:00"));
+        if !capture {
+            media.date_source = "estimated: file modification".into();
+        }
+        media.duration_seconds = duration;
+        archive
+            .place(
+                &source,
+                Item {
+                    id: id.into(),
+                    path: format!("{id}.mov"),
+                    original_name: format!("{id}.mov"),
+                    state: if id == "undo" { "undo" } else { "active" }.into(),
+                    keeper: None,
+                    media,
+                    settings: Settings::default(),
+                    albums: vec![],
+                },
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    let mut incoming = sample(hash);
+    incoming.kind = "video".into();
+    incoming.duration_seconds = Some(100.0);
+    let matches = archive.video_candidates(&incoming).unwrap();
+    assert_eq!(
+        matches
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["same", "boundary"]
+    );
+    incoming.duration_seconds = None;
+    assert!(archive.video_candidates(&incoming).unwrap().is_empty());
+    incoming.duration_seconds = Some(100.0);
+    incoming.date_source = "estimated: file modification".into();
+    assert!(archive.video_candidates(&incoming).unwrap().is_empty());
 }
 
 #[test]

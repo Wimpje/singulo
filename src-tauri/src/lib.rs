@@ -181,6 +181,7 @@ fn path_examples(settings: Settings) -> Result<Vec<String>> {
             warnings: vec![],
             width: 0,
             height: 0,
+            duration_seconds: None,
             hash: String::new(),
             bytes: 0,
             signature: None,

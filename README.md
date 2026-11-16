@@ -69,7 +69,9 @@ Interrupted copy/relocation jobs are reconciled on opening. Conflicting/incomple
 
 Unsupported/corrupt previews are explicitly marked; recognized originals can still be copied and exact-deduplicated. RAW/JPEG and identifiable Live Photo companions are protected from automatic replacement.
 
-Video candidates are checked across the entire timeline, with matching frame counts, stream properties and audio. Changed audio, trimmed clips, extra streams, HDR/format differences and uncertain quality go to review. Not every re-encode qualifies automatically.
+Videos use exact SHA-256 deduplication by default. Possible matches from a preview fingerprint or the same capture day and a close duration go to manual review; neither original is automatically replaced. Duration matching allows up to 1 second or 1%, whichever is larger, and ignores estimated filesystem dates. Older catalog entries without stored durations still participate through their fingerprints. At most ten candidates are considered per incoming video.
+
+Settings offers **Deep video comparison (slower)**, off by default, including for existing archives. Together with automatic grouping, this enables full-timeline checks of frame counts, stream properties and audio before a clearly higher-resolution equivalent can replace a smaller one. Changed audio, trimmed clips, extra streams, HDR/format differences and uncertain quality cannot qualify automatically. These checks can substantially slow imports.
 
 Targets: Windows 10/11 x64 and macOS 12+ Intel/Apple Silicon. Only combinations actually smoke-tested should be advertised as verified. Do not assume every camera, codec, removable filesystem or network share is supported; one writer per archive, local disks only.
 
@@ -97,7 +99,11 @@ Focused Rust tests and JavaScript comparison-rule tests are included, but they a
 
 The catalog is designed for 100,000+ records: source/companion lookups are indexed, library pages are fetched in SQL, counts are maintained incrementally, and recovery exports are streamed rather than loading all metadata into memory. Folder-name collision checks cache each destination directory once per import instead of rescanning it for every photo.
 
-Metadata extraction batches up to 64 files per ExifTool process. Exact duplicates are checked before image decoding. Verified staging files are linked into their final location on supporting filesystems (APFS/NTFS); filesystems without hard links retain the verified-copy fallback. Database changes are grouped per file without relaxing durable writes. UI progress updates are limited to four per second, and the app crate plus image/hash dependencies are optimized even in development builds.
+Dropping multiple folders together creates one import job. All folders are scanned first, then files are processed in scan order, with XMP sidecars last. Further drops queue behind the current job rather than competing for the disk.
+
+Metadata extraction batches up to 64 files per ExifTool process. Exact duplicates are checked before image decoding. Verified staging files are linked into their final location on supporting filesystems (APFS/NTFS); filesystems without hard links retain the verified-copy fallback. Duplicate source-history writes are committed together per batch, and related review entries per incoming file, without relaxing durable writes. If a duplicate-history batch fails, it rolls back and reports errors rather than claiming successful deduplication. UI progress updates are limited to four per second, and the app crate plus image/hash dependencies are optimized even in development builds.
+
+Expand **Import timings** on the overview to see scanning, hashing/exact verification, metadata, input buffering, decoding, matching, placement/catalog writes, recovery backup, and total elapsed time. Completed timings are saved with the job. Decoder time is summed across workers and overlaps other stages, so stage totals are not wall-clock throughput benchmarks. Placement includes durable flushing and any extra staging-to-final copy.
 
 #### How similarity matching works
 
@@ -105,11 +111,15 @@ Metadata extraction batches up to 64 files per ExifTool process. Exact duplicate
 2. **Fingerprint:** a 64-bit difference hash (dHash) of a small greyscale version. SQLite indexes its 8 bytes, so candidates (≤ 6 differing bits) are found in about a millisecond at 100k photos.
 3. **Pixel check:** before a larger copy replaces a smaller one, both are compared on a 512×512 grid, tile by tile. Protected variants (RAW/JPEG pairs, edits, Live Photos, different capture times) and anything uncertain go to Similarity review instead.
 
-Each new file is decoded **once**, at reduced size, and that preview is reused for both the fingerprint and the pixel check. JPEGs are decoded with DCT scaling (1/2–1/8 size, short side never below 512 px), and RAW uses LibRaw half-size mode. Decoding runs on up to 8 worker threads (CPU cores − 1). File reads, hashing, metadata extraction and archive writes stay on one thread in scan order, so a spinning external drive is not forced to seek between files. Results are committed in the original order, so sidecars still follow their photos. On the development Mac, a 24 MP JPEG went from about 260–360 ms to 65–130 ms per photo on a single core, before parallelism.
+Each new file is decoded **once** for import, at reduced size, and that preview is reused for both the fingerprint and the pixel check. JPEGs are decoded with DCT scaling (1/2–1/8 size, short side never below 512 px), and RAW uses LibRaw half-size mode. Photos up to 16 MiB are read into bounded memory buffers on the coordinator, then decoded on up to 8 CPU-only worker threads (CPU cores - 1). Queued/in-flight compressed inputs have a 64 MiB budget. Larger photos and external RAW/HEIC/video decoders stay on the coordinator, alongside hashing, metadata extraction, candidate reads and archive writes; image workers do not reopen source files. This avoids concurrent source reads, although batching and candidate lookups still involve seeks. Results are committed in the original order, so sidecars still follow their photos.
+
+Comparison previews use a 128-entry least-recently-used cache rather than discarding the whole cache when full. Cached pixels are shared instead of cloned for each comparison. This cache lasts for the import job; archived bytes still require verification before automatic deduplication. Browsing thumbnails are cached separately and can require another decode.
 
 Vision models such as CLIP or DINOv2 are deliberately not used: they still need the decoded image, add hundreds of MB, and group *similar scenes* (bursts, re-shoots, crops), which is useful for browsing but too loose to decide what replaces what.
 
 These changes remove repeated whole-library work, not the necessary cost of reading originals, decoding new photos, verifying copies, or comparing an entire video. External HDD/USB speed and RAW/video content still determine throughput. Pause/cancel before restarting the app to pick up an update; the first open of an existing catalog builds its new indexes.
+
+For a Mac-only external archive, prefer **APFS**; for Windows-only, **NTFS**. **exFAT** is convenient when using the disk on both systems, but has no journaling or hard links: current placement reads verified staging and writes a second copy to the final path. Always eject safely and keep another backup. There is no need to reformat an existing disk; formatting erases its files, and this app never formats disks.
 
 An optional synthetic 100k-catalog check is separate from the basic tests:
 

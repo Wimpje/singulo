@@ -10,6 +10,8 @@ pub struct Settings {
     pub filenames: String,
     pub unknown_folder: String,
     pub automatic_matches: bool,
+    #[serde(default)]
+    pub deep_video_matching: bool,
 }
 
 impl Default for Settings {
@@ -19,6 +21,7 @@ impl Default for Settings {
             filenames: "original".into(),
             unknown_folder: "unknown".into(),
             automatic_matches: true,
+            deep_video_matching: false,
         }
     }
 }
@@ -32,6 +35,8 @@ pub struct Media {
     pub warnings: Vec<String>,
     pub width: u32,
     pub height: u32,
+    #[serde(default)]
+    pub duration_seconds: Option<f64>,
     pub hash: String,
     pub bytes: u64,
     pub signature: Option<String>,
@@ -61,6 +66,22 @@ pub struct Progress {
     pub copied: usize,
     pub duplicates: usize,
     pub errors: Vec<String>,
+    #[serde(default)]
+    pub timings: ImportTimings,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportTimings {
+    pub scan_ms: u64,
+    pub hash_ms: u64,
+    pub metadata_ms: u64,
+    pub buffer_ms: u64,
+    pub decode_ms: u64,
+    pub match_ms: u64,
+    pub placement_ms: u64,
+    pub backup_ms: u64,
+    pub total_ms: u64,
 }
 
 impl Default for Progress {
@@ -73,6 +94,7 @@ impl Default for Progress {
             copied: 0,
             duplicates: 0,
             errors: Vec::new(),
+            timings: ImportTimings::default(),
         }
     }
 }

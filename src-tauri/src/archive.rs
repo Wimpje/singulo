@@ -93,6 +93,7 @@ mod library_tests {
                 warnings: vec![],
                 width: 1,
                 height: 1,
+                duration_seconds: None,
                 hash: "hash".into(),
                 bytes: 1,
                 signature: None,
@@ -189,6 +190,7 @@ mod performance_tests {
                 warnings: vec![],
                 width: 4000,
                 height: 3000,
+                duration_seconds: None,
                 hash: "seed".into(),
                 bytes: 4_000_000,
                 signature: None,
@@ -445,6 +447,10 @@ impl Archive {
              CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, hash TEXT NOT NULL, state TEXT NOT NULL, data TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS item_hash ON items(hash);
+             CREATE INDEX IF NOT EXISTS video_date_duration ON items(
+                 state,substr(json_extract(data,'$.media.date'),1,10),
+                 json_extract(data,'$.media.durationSeconds'))
+                 WHERE json_extract(data,'$.media.kind')='video';
              CREATE TABLE IF NOT EXISTS occurrences (id TEXT PRIMARY KEY, source TEXT NOT NULL, hash TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(source, hash));
              CREATE TABLE IF NOT EXISTS buckets (bucket INTEGER NOT NULL, item TEXT NOT NULL REFERENCES items(id), UNIQUE(bucket,item));
              CREATE INDEX IF NOT EXISTS bucket_lookup ON buckets(bucket);
@@ -664,7 +670,10 @@ impl Archive {
         parse(&data)
     }
 
-    fn transaction<T>(&mut self, action: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+    pub(crate) fn transaction<T>(
+        &mut self,
+        action: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
         if !self.connection.is_autocommit() {
             return action(self);
         }
@@ -921,6 +930,15 @@ impl Archive {
         self.transaction(|archive| archive.record_occurrence_inner(occurrence))
     }
 
+    pub fn record_occurrences(&mut self, occurrences: &[Occurrence]) -> Result<()> {
+        self.transaction(|archive| {
+            for occurrence in occurrences {
+                archive.record_occurrence_inner(occurrence)?;
+            }
+            Ok(())
+        })
+    }
+
     fn record_occurrence_inner(&mut self, occurrence: &Occurrence) -> Result<()> {
         self.connection
             .execute(
@@ -1015,6 +1033,41 @@ impl Archive {
             .query_map([id], |r| r.get::<_, String>(0))
             .map_err(|e| e.to_string())?
             .map(|r| r.map_err(|e| e.to_string()))
+            .collect()
+    }
+
+    pub fn video_candidates(&self, incoming: &Media) -> Result<Vec<Item>> {
+        let Some(duration) = incoming
+            .duration_seconds
+            .filter(|d| d.is_finite() && *d > 0.0)
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(date) = incoming.date.as_deref().and_then(|date| date.get(..10)) else {
+            return Ok(Vec::new());
+        };
+        if incoming.kind != "video" || !incoming.date_source.starts_with("capture") {
+            return Ok(Vec::new());
+        }
+        let tolerance = (duration * 0.01).max(1.0);
+        let mut query = self
+            .connection
+            .prepare_cached(
+                "SELECT data FROM items WHERE state='active'
+             AND json_extract(data,'$.media.kind')='video'
+             AND substr(json_extract(data,'$.media.date'),1,10)=?1
+             AND json_extract(data,'$.media.durationSeconds') BETWEEN ?2 AND ?3
+             AND json_extract(data,'$.media.dateSource') LIKE 'capture%'
+             ORDER BY abs(json_extract(data,'$.media.durationSeconds')-?4),id LIMIT 10",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = query
+            .query_map(
+                params![date, duration - tolerance, duration + tolerance, duration],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|e| e.to_string())?;
+        rows.map(|row| parse(&row.map_err(|e| e.to_string())?))
             .collect()
     }
 

@@ -1,13 +1,59 @@
 use crate::{archive::Archive, media, model::*, paths};
 use std::{
     collections::{HashMap, VecDeque},
+    fs::File,
+    io::Read,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{Mutex, atomic::Ordering, mpsc},
     time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager};
 use uuid::Uuid;
 use walkdir::WalkDir;
+
+const BUFFER_LIMIT: u64 = 16 * 1024 * 1024;
+const BUFFER_BUDGET: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+struct PreviewCache(VecDeque<(String, Rc<media::Preview>)>);
+
+impl PreviewCache {
+    fn get(&mut self, id: &str) -> Option<Rc<media::Preview>> {
+        let index = self.0.iter().position(|(key, _)| key == id)?;
+        let entry = self.0.remove(index)?;
+        let preview = Rc::clone(&entry.1);
+        self.0.push_back(entry);
+        Some(preview)
+    }
+
+    fn insert(&mut self, id: String, preview: media::Preview) -> Rc<media::Preview> {
+        self.remove(&id);
+        if self.0.len() >= 128 {
+            self.0.pop_front();
+        }
+        let preview = Rc::new(preview);
+        self.0.push_back((id, Rc::clone(&preview)));
+        preview
+    }
+
+    fn remove(&mut self, id: &str) {
+        self.0.retain(|(key, _)| key != id);
+    }
+}
+
+fn buffer_source(path: &Path, size: u64, identity: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(size as usize + 1);
+    File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(size + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 != size || media::identity(path)? != identity {
+        return Err("Source changed while buffering; retry it.".into());
+    }
+    Ok(bytes)
+}
 
 pub fn update(app: &tauri::AppHandle, progress: &Progress) -> Result<()> {
     let state = app.state::<AppState>();
@@ -50,6 +96,7 @@ pub fn validate_roots(raw_roots: &[String], archive_root: &Path) -> Result<Vec<P
 }
 
 pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
+    let started = Instant::now();
     let state = app.state::<AppState>();
     let archive_root = {
         let mut archive = state.archive.lock().map_err(|e| e.to_string())?;
@@ -97,6 +144,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
     // Import image companions before XMP so sidecars can inherit their owner's date/path.
     files.sort_by_key(|(_, path)| media::kind(path) == Some("sidecar"));
     progress.total = files.len();
+    progress.timings.scan_ms = started.elapsed().as_millis() as u64;
     progress.status = "importing".into();
     update(app, &progress)?;
     let mut checkpoint = Instant::now();
@@ -107,7 +155,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
     let (task_tx, task_rx) = mpsc::sync_channel::<Task>(workers * 2);
     let task_rx = Mutex::new(task_rx);
     std::thread::scope(|scope| -> Result<()> {
-        let (done_tx, done_rx) = mpsc::channel::<(usize, Inspected)>();
+        let (done_tx, done_rx) = mpsc::channel::<(usize, Inspected, u64)>();
         for _ in 0..workers {
             let (task_rx, done_tx) = (&task_rx, done_tx.clone());
             scope.spawn(move || {
@@ -117,12 +165,21 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                         Err(_) => break,
                     };
                     let Ok(task) = task else { break };
+                    let decoding = Instant::now();
                     let result = if shared.cancel.load(Ordering::Relaxed) {
                         Err("Import cancelled.".into())
                     } else {
-                        media::inspect(app, &task.path, task.hash, task.metadata)
+                        Ok(media::inspect(
+                            app,
+                            &task.path,
+                            task.media,
+                            Some(&task.bytes),
+                        ))
                     };
-                    if done_tx.send((task.index, result)).is_err() {
+                    if done_tx
+                        .send((task.index, result, decoding.elapsed().as_millis() as u64))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -130,11 +187,12 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         }
         drop(done_tx);
         let mut queue = VecDeque::<Entry>::new();
-        let mut candidate_cache = HashMap::<String, media::Preview>::new();
+        let mut candidate_cache = PreviewCache::default();
         let mut base = 0;
-        let receive = |queue: &mut VecDeque<Entry>, base: usize, (index, result)| {
+        let receive = |queue: &mut VecDeque<Entry>, base: usize, (index, result, decode_ms)| {
             if let Some(entry) = queue.get_mut(index - base) {
                 entry.stage = Stage::Inspected(Box::new(result));
+                entry.decode_ms = decode_ms;
             }
         };
         for batch in files.chunks(64) {
@@ -147,6 +205,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
             }
             let mut prepped = Vec::with_capacity(batch.len());
             let mut metadata_paths = Vec::new();
+            let mut exact_occurrences = Vec::new();
             for (root, path) in batch {
                 if shared.cancel.load(Ordering::Relaxed) {
                     break;
@@ -162,13 +221,13 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                 }
                 progress.status = "importing".into();
                 progress.current = path.to_string_lossy().into();
+                progress.timings.total_ms = started.elapsed().as_millis() as u64;
                 update(app, &progress)?;
-                // Disk reads and catalog writes stay on this thread so external drives read
-                // sequentially; exact duplicates skip ExifTool and decoding entirely.
+                let hashing = Instant::now();
                 let checked: Result<Option<(String, String)>> = (|| {
                     let (identity, hash) = media::hash_with_identity(path)?;
-                    let mut guard = shared.archive.lock().map_err(|e| e.to_string())?;
-                    let archive = guard.as_mut().ok_or("Archive is not open.")?;
+                    let guard = shared.archive.lock().map_err(|e| e.to_string())?;
+                    let archive = guard.as_ref().ok_or("Archive is not open.")?;
                     if let Some(exact) = archive.exact_cached(&hash)? {
                         if media::identity(path)? != identity {
                             return Err(
@@ -184,11 +243,12 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                             exact.media.bytes,
                             exact.id,
                         )?;
-                        archive.record_occurrence(&occ)?;
+                        exact_occurrences.push(occ);
                         return Ok(None);
                     }
                     Ok(Some((identity, hash)))
                 })();
+                progress.timings.hash_ms += hashing.elapsed().as_millis() as u64;
                 match checked {
                     Err(error) => prepped.push(Prepped::Finished(root, path, Err(error))),
                     Ok(None) => prepped.push(Prepped::Finished(root, path, Ok(true))),
@@ -215,22 +275,45 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
             if shared.cancel.load(Ordering::Relaxed) {
                 break;
             }
+            if !exact_occurrences.is_empty() {
+                let writing = Instant::now();
+                let recorded: Result<()> = (|| {
+                    let mut guard = shared.archive.lock().map_err(|e| e.to_string())?;
+                    guard
+                        .as_mut()
+                        .ok_or("Archive is not open.")?
+                        .record_occurrences(&exact_occurrences)
+                })();
+                progress.timings.placement_ms += writing.elapsed().as_millis() as u64;
+                if let Err(error) = recorded {
+                    for item in &mut prepped {
+                        if let Prepped::Finished(_, _, result @ Ok(true)) = item {
+                            *result = Err(format!(
+                                "Could not record duplicate source history: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+            let extracting = Instant::now();
             let metadata = if metadata_paths.is_empty() {
                 Ok(HashMap::new())
             } else {
                 media::metadata_batch(app, &metadata_paths)
             };
+            progress.timings.metadata_ms += extracting.elapsed().as_millis() as u64;
             for item in prepped {
                 if shared.cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                let index = base + queue.len();
                 let entry = match item {
                     Prepped::Finished(root, path, result) => Entry {
                         root,
                         path,
                         identity: String::new(),
                         stage: Stage::Finished(result),
+                        buffered_bytes: 0,
+                        decode_ms: 0,
                     },
                     Prepped::NeedsInspect(root, path, identity, hash) => {
                         if media::identity(path).ok().as_ref() != Some(&identity) {
@@ -242,6 +325,8 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                                     "Source changed during batch metadata extraction; retry it."
                                         .into(),
                                 )),
+                                buffered_bytes: 0,
+                                decode_ms: 0,
                             }
                         } else {
                             let row = if media::kind(path) == Some("sidecar") {
@@ -254,24 +339,79 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                                     Err(error) => Err(error.clone()),
                                 }
                             };
-                            task_tx
-                                .send(Task {
-                                    index,
-                                    path: path.to_path_buf(),
-                                    hash,
-                                    metadata: row,
-                                })
-                                .map_err(|_| "Decoder workers stopped unexpectedly.")?;
+                            let prepared = media::prepare_inspection(path, hash, row);
+                            let mut buffered_bytes = 0;
+                            let mut decode_ms = 0;
+                            let stage = match prepared {
+                                Err(error) => Stage::Finished(Err(error)),
+                                Ok(media)
+                                    if media.kind == "photo" && media.bytes <= BUFFER_LIMIT =>
+                                {
+                                    while queue
+                                        .iter()
+                                        .map(|entry| entry.buffered_bytes)
+                                        .sum::<usize>()
+                                        + media.bytes as usize
+                                        > BUFFER_BUDGET
+                                    {
+                                        let done = done_rx
+                                            .recv()
+                                            .map_err(|_| "Decoder workers stopped unexpectedly.")?;
+                                        receive(&mut queue, base, done);
+                                        commit_ready(
+                                            app,
+                                            job,
+                                            &mut queue,
+                                            &mut base,
+                                            &mut progress,
+                                            &mut checkpoint,
+                                            &mut candidate_cache,
+                                        )?;
+                                    }
+                                    let reading = Instant::now();
+                                    let bytes = buffer_source(path, media.bytes, &identity);
+                                    progress.timings.buffer_ms +=
+                                        reading.elapsed().as_millis() as u64;
+                                    match bytes {
+                                        Err(error) => Stage::Finished(Err(error)),
+                                        Ok(bytes) => {
+                                            buffered_bytes = bytes.len();
+                                            let index = base + queue.len();
+                                            task_tx
+                                                .send(Task {
+                                                    index,
+                                                    path: path.to_path_buf(),
+                                                    media,
+                                                    bytes,
+                                                })
+                                                .map_err(
+                                                    |_| "Decoder workers stopped unexpectedly.",
+                                                )?;
+                                            Stage::Inspecting
+                                        }
+                                    }
+                                }
+                                Ok(media) => {
+                                    // External decoders and large images stay on the I/O coordinator.
+                                    let decoding = Instant::now();
+                                    let result = media::inspect(app, path, media, None);
+                                    decode_ms = decoding.elapsed().as_millis() as u64;
+                                    Stage::Inspected(Box::new(Ok(result)))
+                                }
+                            };
                             Entry {
                                 root,
                                 path,
                                 identity,
-                                stage: Stage::Inspecting,
+                                stage,
+                                buffered_bytes,
+                                decode_ms,
                             }
                         }
                     }
                 };
                 queue.push_back(entry);
+                progress.timings.total_ms = started.elapsed().as_millis() as u64;
                 loop {
                     while let Ok(done) = done_rx.try_recv() {
                         receive(&mut queue, base, done);
@@ -313,6 +453,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         }
         Ok(())
     })?;
+    progress.timings.total_ms = started.elapsed().as_millis() as u64;
     progress.current.clear();
     progress.status = if state.cancel.load(Ordering::Relaxed) {
         "cancelled"
@@ -325,11 +466,17 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
     {
         let mut guard = state.archive.lock().map_err(|e| e.to_string())?;
         let archive = guard.as_mut().ok_or("Archive is not open.")?;
+        let backing_up = Instant::now();
         if let Err(error) = archive.backup() {
             progress
                 .errors
                 .push(format!("Catalog recovery backup failed: {error}"));
+            if progress.status == "complete" {
+                progress.status = "complete with errors".into();
+            }
         }
+        progress.timings.backup_ms = backing_up.elapsed().as_millis() as u64;
+        progress.timings.total_ms = started.elapsed().as_millis() as u64;
         archive.save_job(&job.id, &serde_json::json!({"id":job.id, "roots":job.roots, "settings":job.settings, "progress":progress}))?;
     }
     update(app, &progress)
@@ -340,8 +487,8 @@ type Inspected = Result<(Media, Option<media::Preview>)>;
 struct Task {
     index: usize,
     path: PathBuf,
-    hash: String,
-    metadata: Result<serde_json::Value>,
+    media: Media,
+    bytes: Vec<u8>,
 }
 
 enum Stage {
@@ -355,6 +502,8 @@ struct Entry<'a> {
     path: &'a Path,
     identity: String,
     stage: Stage,
+    buffered_bytes: usize,
+    decode_ms: u64,
 }
 
 /// Commits finished entries in scan order, so XMP sidecars still follow their owners and
@@ -366,7 +515,7 @@ fn commit_ready(
     base: &mut usize,
     progress: &mut Progress,
     checkpoint: &mut Instant,
-    candidate_cache: &mut HashMap<String, media::Preview>,
+    candidate_cache: &mut PreviewCache,
 ) -> Result<()> {
     let state = app.state::<AppState>();
     while queue
@@ -374,6 +523,7 @@ fn commit_ready(
         .is_some_and(|entry| !matches!(entry.stage, Stage::Inspecting))
     {
         let entry = queue.pop_front().ok_or("Import queue is empty.")?;
+        progress.timings.decode_ms += entry.decode_ms;
         *base += 1;
         let result = match entry.stage {
             Stage::Finished(result) => result,
@@ -389,6 +539,7 @@ fn commit_ready(
                     &entry.identity,
                     inspected,
                     candidate_cache,
+                    &mut progress.timings,
                 )
             }),
             Stage::Inspecting => unreachable!(),
@@ -454,7 +605,8 @@ fn import_one(
     source: &Path,
     identity: &str,
     (mut media, preview): (Media, Option<media::Preview>),
-    candidate_cache: &mut HashMap<String, media::Preview>,
+    candidate_cache: &mut PreviewCache,
+    timings: &mut ImportTimings,
 ) -> Result<bool> {
     archive.check()?;
     let album = root
@@ -503,14 +655,33 @@ fn import_one(
         media.date = owner.media.date.clone();
         media.date_source = owner.media.date_source.clone();
     }
-    let candidates = if media.kind == "sidecar" {
+    let matching = Instant::now();
+    let mut candidates = if media.kind == "sidecar" {
         Vec::new()
     } else {
         archive.candidates(&media)?
     };
+    if media.kind == "video" {
+        for candidate in archive.video_candidates(&media)? {
+            if candidates.len() >= 10 {
+                break;
+            }
+            if !candidates
+                .iter()
+                .any(|existing| existing.id == candidate.id)
+            {
+                candidates.push(candidate);
+            }
+        }
+    }
     let mut matched: Option<(Item, bool)> = None;
     let mut review = Vec::new();
     for candidate in candidates {
+        if media.kind == "video" && !(settings.deep_video_matching && settings.automatic_matches) {
+            review.push((candidate.id,
+                "Possible video match based on a preview or capture date and duration. Both originals are kept; compare before choosing.".into()));
+            continue;
+        }
         let path = paths::inside(&archive.root, Path::new(&candidate.path))?;
         if !archive.verified_file(&path, &candidate.media.hash)? {
             media.warnings.push(format!(
@@ -537,25 +708,18 @@ fn import_one(
             media.width > candidate.media.width && media.height > candidate.media.height;
         let dominated =
             media.width < candidate.media.width && media.height < candidate.media.height;
-        let auto =
-            matched.is_none() && settings.automatic_matches && !protected && (dominates || dominated);
-        let mut candidate_preview =
-            |candidate: &Item, path: &Path| -> Result<media::Preview> {
-                if let Some(cached) = candidate_cache.get(&candidate.id) {
-                    return Ok(cached.clone());
-                }
-                let decoded = media::preview(
-                    app,
-                    path,
-                    &candidate.media.kind,
-                    &candidate.media.metadata,
-                )?;
-                if candidate_cache.len() >= 128 {
-                    candidate_cache.clear();
-                }
-                candidate_cache.insert(candidate.id.clone(), decoded.clone());
-                Ok(decoded)
-            };
+        let auto = matched.is_none()
+            && settings.automatic_matches
+            && !protected
+            && (dominates || dominated);
+        let mut candidate_preview = |candidate: &Item, path: &Path| -> Result<Rc<media::Preview>> {
+            if let Some(cached) = candidate_cache.get(&candidate.id) {
+                return Ok(cached);
+            }
+            let decoded =
+                media::preview(app, path, &candidate.media.kind, &candidate.media.metadata)?;
+            Ok(candidate_cache.insert(candidate.id.clone(), decoded))
+        };
         let (equivalent, plausible): (bool, bool) = if media.kind == "video" {
             let eq = if auto {
                 match media::video_equivalent(app, source, &path) {
@@ -612,6 +776,7 @@ fn import_one(
             "Related scene or protected RAW/JPEG/edit/Live Photo variant. Keep both unless you are certain."
         } else { "Similar visual fingerprint. Quality/equivalence is uncertain; compare before choosing." }.to_string()));
     }
+    timings.match_ms += matching.elapsed().as_millis() as u64;
     let is_lower = matched.as_ref().is_some_and(|(_, dominates)| !dominates);
     let wanted = if is_lower {
         PathBuf::from(".photo-dedupe/undo")
@@ -647,11 +812,9 @@ fn import_one(
     if matched.is_some() {
         item.media.warnings.push("Automatically grouped after full-frame equivalence checks; the higher-resolution copy is active. Original bytes remain in archive undo.".into());
     }
+    let placing = Instant::now();
     archive.place(source, item, Some(occurrence(id.clone())), None)?;
     if !is_lower && let Some(p) = preview {
-        if candidate_cache.len() >= 128 {
-            candidate_cache.clear();
-        }
         candidate_cache.insert(id.clone(), p);
     }
     if let Some((old, dominates)) = matched
@@ -667,10 +830,14 @@ fn import_one(
             archive.record_import_path(&wanted);
         }
     }
-    if !is_lower {
-        for (candidate, reason) in review {
-            archive.add_review(&id, &candidate, &reason)?;
-        }
+    if !is_lower && !review.is_empty() {
+        archive.transaction(|archive| {
+            for (candidate, reason) in review {
+                archive.add_review(&id, &candidate, &reason)?;
+            }
+            Ok(())
+        })?;
     }
+    timings.placement_ms += placing.elapsed().as_millis() as u64;
     Ok(false)
 }
