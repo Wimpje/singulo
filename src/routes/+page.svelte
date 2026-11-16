@@ -134,6 +134,14 @@
     return /^\d\d:\d\d$/.test(time) ? `${date}, ${time}` : date;
   }
 
+  // Jobs are newest first. Unfinished statuses belong to the running import, or to one interrupted by a quit.
+  function canRetry(job: Job, index: number) {
+    const status = job.progress.status ?? "queued";
+    if (status === "complete") return false;
+    if (busy && !["complete with errors", "cancelled", "failed"].includes(status)) return false;
+    return !jobs.slice(0, index).some((newer) => newer.progress.status === "complete" && job.roots.every((root) => newer.roots.includes(root)));
+  }
+
   function focusOnMount(node: HTMLElement) {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     node.focus({ preventScroll: true });
@@ -853,7 +861,7 @@
     </aside>
 
     <main class="content">
-      <header class="topbar"><span>{tab === "import" ? t("Your collection") : tab === "library" ? t("Browse your pictures") : tab === "review" ? t("Review similar pictures") : t("Archive settings")}</span><div class="status"><span class="safe-dot"></span>{busy ? t("Working on your archive") : t("Offline by design")}</div></header>
+      <header class="topbar"><span>{tab === "import" ? t("Your collection") : tab === "library" ? t("Browse your pictures") : tab === "review" ? t("Review similar pictures") : t("Archive settings")}</span><div class="status"><span class="safe-dot"></span>{busy ? t("Working on your archive") : t("One place for your pictures")}</div></header>
       {#if !native}<div class="banner warning"><strong>{t("Desktop preview")}</strong> {t("Folder imports and photo previews work in the Tauri desktop app. Run")} <code>npm run desktop</code> {t("to use them.")}</div>{/if}
       {#if error && !selected}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
       {#if notice}<div class="banner success" role="status">{notice}</div>{/if}
@@ -888,7 +896,7 @@
         {/if}
         <div class="stats"><div class="stat"><small>{t("PICTURES AND VIDEOS")}</small><strong>{snapshot.activeCount.toLocaleString()}</strong><span>{t("in your archive")}</span></div><div class="stat"><small>{t("ARCHIVE SIZE")}</small><strong>{bytes(snapshot.activeBytes)}</strong><span>{t("verified original files")}</span></div><div class="stat"><small>{t("SAFELY RETAINED")}</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>{t("undo copies")} / {bytes(snapshot.undoBytes)}</span></div></div>
         <section class="next-steps"><div><h3>{t("Clean up old pictures?")}</h3><p>{t("Once copies are verified, review source files for cleanup.")}<br />{t("Nothing leaves your source folders without your say-so.")}</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={startCleanup}>{t("Review source cleanup")}</button></section>
-        {#if jobs.length}<section class="history"><div class="section-line"><h3>{t("Recent imports")}</h3><small>{t("Original folder names stay searchable")}</small></div>{#each jobs.slice(0, 5) as job}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t(job.progress.status ?? "queued")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small></div><button class="text-button" disabled={busy} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button></div>{/each}</section>{/if}
+        {#if jobs.length}<section class="history"><div class="section-line"><h3>{t("Recent imports")}</h3><small>{t("Original folder names stay searchable")}</small></div>{#each jobs.slice(0, 5) as job, index (job.id)}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t(job.progress.status ?? "queued")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small></div>{#if canRetry(job, index)}<button class="text-button" disabled={busy} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button>{/if}</div>{/each}</section>{/if}
       {:else if tab === "library"}
         <div class="library-page">{@render libraryView(false)}</div>
       {:else if tab === "review"}
