@@ -53,6 +53,8 @@ After cleanup the archive may be your only copy. Keep another backup, especially
 
 Pause/cancel imports on the **Import & archive** page (the sidebar progress links there). Retry saved folders after a failure; exact copies are recognized again. Disk disconnection is reported, never replaced by a new archive elsewhere.
 
+While an import is active, a status panel explains why comparisons, source cleanup and archive changes are temporarily unavailable: they could conflict with files still being added or matched. Disabled controls include an explanation on hover. You can still browse photos, switch tabs and queue more folders. Pausing an import keeps these restrictions in place; resume it to finish, or cancel it. Scanning shows activity without a misleading percentage.
+
 The archive contains ordinary media files and `.photo-dedupe/` with the SQLite catalog, staging/undo/cache folders, job history, catalog backup and provenance export. Move the whole archive between computers, including this folder. Never edit the catalog while the app is running.
 
 Interrupted copy/relocation jobs are reconciled on opening. Conflicting/incomplete output files are reported with staging retained rather than overwritten. Stop the app and preserve the archive before manually resolving a conflict or restoring `recovery/catalog-latest.sqlite`. JSON metadata exports retain source-folder history.

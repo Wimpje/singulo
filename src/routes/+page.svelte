@@ -69,9 +69,20 @@
   let detailSeq = 0;
   let mutating = false;
   let moreRequest: Promise<void> | null = null;
-  const busy = $derived(working || ["scanning", "importing", "paused"].includes(snapshot.progress.status));
+  const importing = $derived(["scanning", "importing", "paused"].includes(snapshot.progress.status));
+  const busy = $derived(working || importing);
   const hasArchive = $derived(!!snapshot.root);
   const percent = $derived(snapshot.progress.total ? Math.round(snapshot.progress.done / snapshot.progress.total * 100) : 0);
+  const determinate = $derived(snapshot.progress.status !== "scanning" && snapshot.progress.total > 0);
+  const activityTitle = $derived(importing
+    ? t(snapshot.progress.status === "scanning" ? "Scanning source folders..." : snapshot.progress.status === "paused" ? "Import paused" : "Importing photos and videos...")
+    : t(loaded ? "Updating your archive..." : "Opening your archive..."));
+  const busyReason = $derived(!busy ? undefined : importing
+    ? t("Comparisons, source cleanup and archive changes wait until the import finishes to avoid conflicting with files being added or matched.")
+    : t(loaded
+      ? "An archive operation is in progress. Please wait for it to finish before making other changes."
+      : "Please wait while your archive opens. Archive changes will be available when loading finishes."));
+  const reviewDisabledReason = $derived(busyReason ?? (opening ? t("Opening comparison...") : undefined));
   const viewerIndex = $derived(selected ? items.findIndex((item) => item.id === selected?.item.id) : -1);
   const absoluteIndex = $derived(viewerIndex < 0 ? -1 : itemsStart + viewerIndex);
   const pictureComparison = $derived(selected && comparing ? comparePictures(selected.item.media, comparing.item.media) : null);
@@ -367,7 +378,7 @@
   function onKey(event: KeyboardEvent) {
     const target = event.target instanceof HTMLElement ? event.target : null;
     const typing = !!target && (target.isContentEditable || !!target.closest("input, select, textarea"));
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z" && undoAction && !typing && !working) {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z" && undoAction && !typing && !busy) {
       event.preventDefault();
       void undoKeep();
       return;
@@ -798,6 +809,33 @@
   {/if}
 {/snippet}
 
+{#snippet archiveActivity(showImportLink = false)}
+  {#if busy}
+    <section class="banner archive-activity">
+      <div class="activity-copy" role="status">
+        <strong><span class="activity-indicator" class:paused={snapshot.progress.status === "paused"} aria-hidden="true"></span>{activityTitle}</strong>
+        <p>{busyReason}</p>
+        {#if importing}
+          <p>{t("You can still browse photos, switch tabs and queue more folders.")}</p>
+          {#if snapshot.progress.status === "paused"}<p><strong>{t("Resume or cancel the import to make these actions available again.")}</strong></p>{/if}
+        {/if}
+      </div>
+      {#if importing}
+        <div class="activity-actions">
+          {#if determinate}<strong>{percent}% · {snapshot.progress.done.toLocaleString()} / {snapshot.progress.total.toLocaleString()} {t("files")}</strong>{/if}
+          {#if showImportLink && tab !== "import"}<button class="secondary" onclick={() => tab = "import"}>{t("View import progress")}</button>{/if}
+        </div>
+      {/if}
+    </section>
+  {/if}
+{/snippet}
+
+{#snippet importProgress()}
+  <div class="progress-track" class:indeterminate={importing && !determinate} class:paused={snapshot.progress.status === "paused"} role="progressbar" aria-label={t("Import progress")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={determinate ? percent : undefined}>
+    <div style={`width:${determinate ? percent : 35}%`}></div>
+  </div>
+{/snippet}
+
 {#if mode === "drop"}
   <main class="mini" class:dropping>
     <div class="mini-heading"><span class="brand-symbol">PA</span><strong>Photo Archive</strong></div>
@@ -806,7 +844,7 @@
       <strong>{dropping ? t("Drop to copy safely") : t("Drop photo folders here")}</strong>
       <small>{snapshot.root ? snapshot.root.split(/[\\/]/).pop() : t("Choose an archive first")}</small>
     </button>
-    <div class="mini-bottom"><small>{busy ? `${t(snapshot.progress.status)} ${percent}%` : t("Originals kept safe")}</small><button class="text-button" onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>{t("Open app")}</button></div>
+    <div class="mini-bottom"><small>{busy ? `${activityTitle}${importing && determinate ? ` ${percent}%` : ""}` : t("Originals kept safe")}</small><button class="text-button" onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>{t("Open app")}</button></div>
     <label class="mini-pin"><input type="checkbox" bind:checked={onTop} onchange={() => run(async () => { await getCurrentWindow().setAlwaysOnTop(onTop); })} /> {t("Always on top")}</label>
     {#if error}<p class="mini-error">{error}</p>{/if}
   </main>
@@ -828,10 +866,10 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>{t("Add folders")}
       </button>
       <p class="drop-hint">{t("Or drop folders anywhere in this window.")}</p>
-      {#if busy && snapshot.progress.status !== "idle"}
-        <button class="sidebar-progress" onclick={() => tab = "import"}>
-          <span><strong>{t(snapshot.progress.status)}</strong><small>{percent}%</small></span>
-          <span class="progress-track"><span style={`width:${percent}%`}></span></span>
+      {#if importing}
+        <button class="sidebar-progress" title={t("View import progress")} onclick={() => tab = "import"}>
+          <span><strong>{t(snapshot.progress.status)}</strong>{#if determinate}<small>{percent}%</small>{/if}</span>
+          {@render importProgress()}
         </button>
       {/if}
       <nav aria-label={t("Main navigation")}>
@@ -845,7 +883,7 @@
         </button>
         <button class:active={tab === "import"} aria-current={tab === "import" ? "page" : undefined} onclick={() => tab = "import"}>
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3v11m-4-4 4 4 4-4" /><path d="M4 14v6h16v-6" /></svg>
-          {t("Import & archive")} {#if busy && snapshot.progress.status !== "idle"}<span class="nav-count">{percent}%</span>{:else if snapshot.progress.errors.length}<span class="nav-count attention">!</span>{/if}
+          {t("Import & archive")} {#if importing}<span class="nav-count">{determinate ? `${percent}%` : t(snapshot.progress.status)}</span>{:else if snapshot.progress.errors.length}<span class="nav-count attention">!</span>{/if}
         </button>
         <button class:active={tab === "settings"} aria-current={tab === "settings" ? "page" : undefined} onclick={() => tab = "settings"}>
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" /></svg>
@@ -861,7 +899,8 @@
     </aside>
 
     <main class="content">
-      <header class="topbar"><span>{tab === "import" ? t("Your collection") : tab === "library" ? t("Browse your pictures") : tab === "review" ? t("Review similar pictures") : t("Archive settings")}</span><div class="status"><span class="safe-dot"></span>{busy ? t("Working on your archive") : t("One place for your pictures")}</div></header>
+      <header class="topbar"><span>{tab === "import" ? t("Your collection") : tab === "library" ? t("Browse your pictures") : tab === "review" ? t("Review similar pictures") : t("Archive settings")}</span><div class="status"><span class="safe-dot"></span>{busy ? activityTitle : t("One place for your pictures")}</div></header>
+      {@render archiveActivity(true)}
       {#if !native}<div class="banner warning"><strong>{t("Desktop preview")}</strong> {t("Folder imports and photo previews work in the Tauri desktop app. Run")} <code>npm run desktop</code> {t("to use them.")}</div>{/if}
       {#if error && !selected}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
       {#if notice}<div class="banner success" role="status">{notice}</div>{/if}
@@ -872,7 +911,7 @@
         <section class="destination">
           <span class="disk-icon"><svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="3" /><path d="M3 14h18M7 17h1m3 0h1" /></svg></span>
           <div><small>{t("ARCHIVE DESTINATION")}</small><strong>{snapshot.root ?? t("Choose a folder on your external disk")}</strong><span>{snapshot.root ? t("Photos stay as ordinary files, with original folder history.") : t("A dedicated archive folder keeps things tidy.")}</span></div>
-          <button class="secondary" disabled={!native || busy} onclick={chooseArchive}>{snapshot.root ? t("Change") : t("Choose folder")}</button>
+          <button class="secondary" title={busyReason} disabled={!native || busy} onclick={chooseArchive}>{snapshot.root ? t("Change") : t("Choose folder")}</button>
         </section>
         <button class="drop-zone" class:dropping disabled={!native} onclick={() => importFolders()}>
           <span class="drop-icon"><svg width="35" height="35" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M3 8V5h7l2 3h9v12H3V8Z" /><path d="M12 10v7m-3-3 3 3 3-3" /></svg></span>
@@ -880,7 +919,7 @@
           <small>{t("PHOTOS, RAW FILES & VIDEOS")} <span> / </span> {t("COPIED, NEVER MOVED DURING IMPORT")}</small>
         </button>
         {#if busy || snapshot.progress.total > 0}
-          <section class="progress-card"><div class="section-line"><strong>{t(snapshot.progress.status)}</strong><span>{snapshot.progress.done} / {snapshot.progress.total} {t("files")}</span></div><div class="progress-track"><div style={`width:${percent}%`}></div></div><p class="current-file">{snapshot.progress.current || `${snapshot.progress.copied} ${t("originals copied")} / ${snapshot.progress.duplicates} ${t("exact duplicates skipped")}`}</p>
+          <section class="progress-card"><div class="section-line"><strong>{busy ? activityTitle : t(snapshot.progress.status)}</strong>{#if determinate}<span>{snapshot.progress.done} / {snapshot.progress.total} {t("files")}</span>{/if}</div>{@render importProgress()}<p class="current-file">{snapshot.progress.current || `${snapshot.progress.copied} ${t("originals copied")} / ${snapshot.progress.duplicates} ${t("exact duplicates skipped")}`}</p>
             {#if snapshot.progress.timings}
               {@const timings = snapshot.progress.timings}
               <details class="advanced"><summary>{t("Import timings")}</summary>
@@ -891,18 +930,29 @@
                 <p>{t("Stage times overlap while decoding runs in parallel; hashing includes exact-match verification.")}</p>
               </details>
             {/if}
-            {#if busy}<div class="button-row"><button class="secondary" onclick={() => run(async () => { await api("control_import", { action: snapshot.progress.status === "paused" ? "resume" : "pause" }); })}>{snapshot.progress.status === "paused" ? t("Resume") : t("Pause")}</button><button class="text-button" onclick={() => run(async () => { await api("control_import", { action: "cancel" }); })}>{t("Cancel import")}</button></div>{/if}
+            {#if importing}<div class="button-row"><button class="secondary" onclick={() => run(async () => { await api("control_import", { action: snapshot.progress.status === "paused" ? "resume" : "pause" }); })}>{snapshot.progress.status === "paused" ? t("Resume") : t("Pause")}</button><button class="text-button" onclick={() => run(async () => { await api("control_import", { action: "cancel" }); })}>{t("Cancel import")}</button></div>{/if}
           </section>
         {/if}
         <div class="stats"><div class="stat"><small>{t("PICTURES AND VIDEOS")}</small><strong>{snapshot.activeCount.toLocaleString()}</strong><span>{t("in your archive")}</span></div><div class="stat"><small>{t("ARCHIVE SIZE")}</small><strong>{bytes(snapshot.activeBytes)}</strong><span>{t("verified original files")}</span></div><div class="stat"><small>{t("SPARE COPIES")}</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>{t("of removed duplicates")} / {bytes(snapshot.undoBytes)}</span></div></div>
-        <section class="next-steps"><div><h3>{t("Clean up old pictures?")}</h3><p>{t("Once copies are verified, review source files for cleanup.")}<br />{t("Nothing leaves your source folders without your say-so.")}</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={startCleanup}>{t("Review source cleanup")}</button></section>
-        {#if jobs.length}<section class="history"><div class="section-line"><h3>{t("Recent imports")}</h3><small>{t("Original folder names stay searchable")}</small></div>{#each jobs.slice(0, 5) as job, index (job.id)}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t(job.progress.status ?? "queued")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small></div>{#if canRetry(job, index)}<button class="text-button" disabled={busy} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button>{/if}</div>{/each}</section>{/if}
+        <section class="next-steps"><div><h3>{t("Clean up old pictures?")}</h3><p>{t("Once copies are verified, review source files for cleanup.")}<br />{t("Nothing leaves your source folders without your say-so.")}</p></div><button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={startCleanup}>{t("Review source cleanup")}</button></section>
+        {#if jobs.length}<section class="history"><div class="section-line"><h3>{t("Recent imports")}</h3><small>{t("Original folder names stay searchable")}</small></div>{#each jobs.slice(0, 5) as job, index (job.id)}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t(job.progress.status ?? "queued")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small></div>{#if canRetry(job, index)}<button class="text-button" title={busyReason} disabled={busy} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button>{/if}</div>{/each}</section>{/if}
       {:else if tab === "library"}
         <div class="library-page">{@render libraryView(false)}</div>
       {:else if tab === "review"}
-        <div class="page-heading"><div><p class="eyebrow">{t("SIMILAR DOESN'T ALWAYS MEAN THE SAME")}</p><h1>{t("A second look.")}</h1><p class="subtitle">{t("Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.")}</p></div><div class="review-actions"><span class="pill">{reviews.length} {t("to review")}</span>{#if reviews.length}<button class="primary" disabled={working || busy || opening} onclick={() => openReview(0)}>{t("Start reviewing")}</button>{/if}</div></div>
-        {#if busy && reviews.length}<p class="muted">{t("You can review matches once the current import has finished.")}</p>{/if}
-        {#if reviews.length}<div class="review-list">{#each reviews as review, index (`${review.item}:${review.candidate}`)}<div class="review-row" role="button" aria-label={`${t("Compare similar pictures")}: ${review.reason}`} aria-disabled={working || busy} tabindex={working || busy ? -1 : 0} onclick={() => { if (!working && !busy) openReview(index); }} onkeydown={(event) => { if ((event.key === "Enter" || event.key === " ") && !working && !busy) { event.preventDefault(); openReview(index); } }}><div class="review-thumbnails"><Preview item={review.itemPreview} /><Preview item={review.candidatePreview} /></div><div class="review-description"><strong>{t("Two similar pictures")}</strong><p>{review.reason}</p></div><span class="secondary">{t("Compare files")}</span></div>{/each}</div>{:else}<div class="empty"><span class="empty-check" aria-hidden="true">OK</span><h2>{t("Nothing needs a second look.")}</h2><p>{t("Uncertain matches will appear here. Exact duplicates are handled automatically.")}</p></div>{/if}
+        <div class="page-heading"><div><p class="eyebrow">{t("SIMILAR DOESN'T ALWAYS MEAN THE SAME")}</p><h1>{t("A second look.")}</h1><p class="subtitle">{t("Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.")}</p></div><div class="review-actions"><span class="pill">{reviews.length} {t("to review")}</span>{#if reviews.length}<span class="disabled-hint" title={reviewDisabledReason}><button class="primary" disabled={busy || opening} onclick={() => openReview(0)}>{t("Start reviewing")}</button></span>{/if}</div></div>
+        {#if reviews.length}
+          <div class="review-list">
+            {#each reviews as review, index (`${review.item}:${review.candidate}`)}
+              <div class="disabled-hint" title={reviewDisabledReason}>
+                <button class="review-row" aria-label={`${t("Compare similar pictures")}: ${review.reason}`} disabled={busy || opening} onclick={() => openReview(index)}>
+                  <span class="review-thumbnails"><Preview item={review.itemPreview} /><Preview item={review.candidatePreview} /></span>
+                  <span class="review-description"><strong>{t("Two similar pictures")}</strong><span>{review.reason}</span></span>
+                  <span class="secondary">{t("Compare files")}</span>
+                </button>
+              </div>
+            {/each}
+          </div>
+        {:else}<div class="empty"><span class="empty-check" aria-hidden="true">OK</span><h2>{t("Nothing needs a second look.")}</h2><p>{t("Uncertain matches will appear here. Exact duplicates are handled automatically.")}</p></div>{/if}
       {:else}
         <div class="page-heading"><div><p class="eyebrow">{t("SIMPLE SETTINGS, YOUR WAY")}</p><h1>{t("A place for everything.")}</h1><p class="subtitle">{t("Archive settings travel with your disk. Changes apply to future imports.")}</p></div></div>
         <section class="settings-card"><h3>{t("Language")}</h3><label class="language-setting">{t("Choose the interface language")}<select aria-label={t("Language")} value={locale.language} onchange={changeLanguage}><option value="en">English</option><option value="nl">Nederlands</option></select></label></section>
@@ -911,11 +961,11 @@
           <div class="path-preview"><small>{t("YOUR FILES WOULD LOOK LIKE THIS")}</small>{#each examples as example}<code>{example}</code>{/each}{#if !native}<code>2023/07/18/IMG_1234.jpg</code><code>unknown/undated.jpg</code>{/if}{#if configError}<p class="field-error">{configError}</p>{/if}<p>{t("Name collisions receive a unique suffix. Estimated dates stay marked; missing times aren't invented.")}</p></div>
           <label class="check-setting"><input type="checkbox" bind:checked={config.automaticMatches} /><span><strong>{t("Automatically group very confident matches")}</strong><small>{t("The clearly better version stays in your library. The duplicate is removed, but a spare copy is kept so you can restore it. Doubtful cases are left for you to compare.")}</small></span></label>
           <label class="check-setting"><input type="checkbox" bind:checked={config.deepVideoMatching} disabled={!config.automaticMatches} /><span><strong>{t("Deep video comparison (slower)")}</strong><small>{t("Off by default: exact video duplicates are recognized by hash; possible matches from a preview or capture date and duration go to manual review. Enable to compare every frame and audio before automatically grouping a clearly higher-resolution equivalent. Requires automatic grouping above and can slow imports substantially.")}</small></span></label>
-          <div class="button-row"><button class="primary" disabled={!native || !snapshot.root || busy || !!configError || !settingsDirty} onclick={() => run(async () => { await mutate(async () => { await api("save_settings", { settings: config }); await refresh(true); }); notice = t("Settings saved for future imports. Existing files haven't moved."); })}>{t("Save archive settings")}</button>{#if settingsDirty}<span class="pill unsaved">{t("Unsaved changes")}</span><button class="text-button" onclick={() => config = { ...snapshot.settings }}>{t("Discard changes")}</button>{/if}<button class="text-button" onclick={() => config = { ...defaults }}>{t("Reset defaults")}</button></div>
+          <div class="button-row"><button class="primary" title={busyReason} disabled={!native || !snapshot.root || busy || !!configError || !settingsDirty} onclick={() => run(async () => { await mutate(async () => { await api("save_settings", { settings: config }); await refresh(true); }); notice = t("Settings saved for future imports. Existing files haven't moved."); })}>{t("Save archive settings")}</button>{#if settingsDirty}<span class="pill unsaved">{t("Unsaved changes")}</span><button class="text-button" onclick={() => config = { ...snapshot.settings }}>{t("Discard changes")}</button>{/if}<button class="text-button" onclick={() => config = { ...defaults }}>{t("Reset defaults")}</button></div>
         </section>
         <section class="settings-card"><h3>{t("Choosing an external disk")}</h3><p class="muted">{t("Mac only: prefer APFS. Windows only: prefer NTFS. For use on both, exFAT is convenient, but lacks journaling and may require extra copying during import. Always eject safely and keep another backup.")}</p><p class="muted">{t("You do not need to reformat an existing disk. Formatting erases its files; this app never formats disks.")}</p></section>
-        <section class="next-steps"><div><h3>{t("Apply the saved layout to older imports?")}</h3><p>{t("Preview existing file moves first. Sources and folder history stay untouched.")}</p></div><button class="secondary" disabled={!native || !snapshot.root || busy} onclick={previewMoves}>{t("Preview reorganization")}</button></section>
-        <button class="text-button" disabled={!native || !snapshot.root || busy} onclick={() => run(async () => { moves = await api<MoveRow[]>("rollback_preview"); undoingMoves = true; })}>{t("Preview undo of last reorganization")}</button>
+        <section class="next-steps"><div><h3>{t("Apply the saved layout to older imports?")}</h3><p>{t("Preview existing file moves first. Sources and folder history stay untouched.")}</p></div><button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={previewMoves}>{t("Preview reorganization")}</button></section>
+        <button class="text-button" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={() => run(async () => { moves = await api<MoveRow[]>("rollback_preview"); undoingMoves = true; })}>{t("Preview undo of last reorganization")}</button>
         <section class="settings-card"><h3>{t("Media tools")}</h3><p class="muted">{t("RAW and video formats depend on the bundled decoders. Unsupported originals can still be archived without a preview.")}</p><div class="tool-list">{#each tools as tool}<div><span class:unavailable={!tool.available} class="safe-dot"></span><strong>{tool.name}</strong><small title={tool.detail}>{tool.available ? t("Available") : tool.detail}</small></div>{/each}</div></section>
       {/if}
       <footer>Photo Archive. <span>{t("Sources stay safe until you explicitly clean them up.")}</span></footer>
@@ -938,6 +988,7 @@
       </div>
     </header>
     {#if error}<div class="banner error lightbox-error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
+    {#if mode !== "viewer"}{@render archiveActivity()}{/if}
     <div class="lightbox-body">
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div class="lightbox-stage" onclick={(event) => { const target = event.target as HTMLElement; if (target === event.currentTarget || target.classList.contains("preview")) closeDetails(); }}>
@@ -971,11 +1022,11 @@
           {#if mode !== "viewer"}
             <div class="lightbox-actions">
               {#if item.state === "undo"}
-                <button class="primary full" disabled={working} onclick={() => restore(item)}>{t("Restore to library")}</button>
-                <button class="danger-button full" disabled={working} onclick={() => purge(item)}>{t("Delete spare copy permanently")}</button>
+                <button class="primary full" title={busyReason} disabled={busy} onclick={() => restore(item)}>{t("Restore to library")}</button>
+                <button class="danger-button full" title={busyReason} disabled={busy} onclick={() => purge(item)}>{t("Delete spare copy permanently")}</button>
               {:else}
                 <label>{t("Correct the date")}<input type="date" bind:value={dateEntry} /></label>
-                <button class="secondary full" disabled={working || !dateEntry || dateEntry === item.media.date?.slice(0, 10)} onclick={saveDate}>{t("Save date & reorganize this file")}</button>
+                <button class="secondary full" title={busyReason} disabled={busy || !dateEntry || dateEntry === item.media.date?.slice(0, 10)} onclick={saveDate}>{t("Save date & reorganize this file")}</button>
               {/if}
             </div>
           {/if}
@@ -994,12 +1045,13 @@
       <div class="modal-top">
         <div><small>{t("COMPARE THE ORIGINALS")} · {t("Match")} {reviewIndex + 1} {t("of")} {reviews.length}</small><h2>{t("Which copy would you keep?")}</h2></div>
         <div class="button-row compact">
-          <button class="secondary" disabled={opening || working || reviews.length < 2} onclick={() => stepReview(-1)}>← {t("Previous")}</button>
-          <button class="secondary" disabled={opening || working || reviews.length < 2} onclick={() => stepReview(1)}>{t("Skip for now")} <kbd>S</kbd></button>
+          <button class="secondary" title={reviewDisabledReason} disabled={opening || busy || reviews.length < 2} onclick={() => stepReview(-1)}>← {t("Previous")}</button>
+          <button class="secondary" title={reviewDisabledReason} disabled={opening || busy || reviews.length < 2} onclick={() => stepReview(1)}>{t("Skip for now")} <kbd>S</kbd></button>
           <button class="secondary" onclick={closeDetails}>{t("Close")}</button>
         </div>
       </div>
       {#if error}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
+      {@render archiveActivity()}
       {#if selected.companions.length && comparing.companions.length}
         <p class="banner warning">{t("Both pictures belong with related files and can't be removed on their own. Choose Keep both / dismiss match to finish this pair.")}</p>
       {/if}
@@ -1022,14 +1074,14 @@
               {#if videos[index]}<p class="muted" role="status">{t(videos[index].phase === "converting" ? "Preparing a playable copy..." : "Opening video...")}</p>
               {:else}<button class="secondary full" disabled={working} onclick={() => playVideo(detail.item, index)}>▶ {t("Play video")}</button>{/if}
             {/if}
-            <button class="primary keep-button" disabled={working || opening || busy || !!other.companions.length} onclick={() => resolve(detail.item.id)}>
+            <button class="primary keep-button" title={reviewDisabledReason ?? (other.companions.length ? t("Not possible: the other picture belongs with related files (RAW/JPEG, sidecar or Live Photo) and can't be removed on its own.") : undefined)} disabled={opening || busy || !!other.companions.length} onclick={() => resolve(detail.item.id)}>
               <span>{t("Keep this one")} <kbd>{index + 1}</kbd></span><small title={detail.item.originalName}>{detail.item.originalName}</small>
             </button>
             {#if other.companions.length && !detail.companions.length}<p class="muted">{t("Not possible: the other picture belongs with related files (RAW/JPEG, sidecar or Live Photo) and can't be removed on its own.")}</p>{/if}
           </div>
         {/each}
       </div>
-      <button class="secondary comparison-dismiss" disabled={working || opening || busy} onclick={() => resolve(null)}>{t("Keep both / dismiss match")} <kbd>B</kbd></button>
+      <button class="secondary comparison-dismiss" title={reviewDisabledReason} disabled={opening || busy} onclick={() => resolve(null)}>{t("Keep both / dismiss match")} <kbd>B</kbd></button>
       {#if videos[0]?.source && videos[1]?.source}<div class="button-row"><button class="secondary" onclick={() => run(async () => { if (firstVideo && secondVideo) { firstVideo.currentTime = 0; secondVideo.currentTime = 0; await Promise.all([firstVideo.play(), secondVideo.play()]); } })}>{t("Play both from start")}</button><button class="secondary" onclick={() => { firstVideo?.pause(); secondVideo?.pause(); }}>{t("Pause both")}</button></div>{/if}
       <table class="difference-table">
         <tbody>
@@ -1082,7 +1134,7 @@
 {#if undoAction}
   <div class="toast" role="status">
     <span>{t("Kept")} <strong>{undoAction.keptName}</strong>. {t("The duplicate was removed; a spare copy is kept.")}</span>
-    <button class="text-button" disabled={working} onclick={undoKeep}>{t("Undo")}</button>
+    <button class="text-button" title={busyReason} disabled={busy} onclick={undoKeep}>{t("Undo")}</button>
     <button class="text-button" aria-label={t("Dismiss")} onclick={() => { clearTimeout(undoTimer); undoAction = null; }}>×</button>
   </div>
 {/if}
@@ -1164,6 +1216,20 @@
   div.banner.error { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .banner.warning { color: #8b6b2a; background: #f5ebcf; }
   .banner.success { color: #406239; background: #e8efdc; }
+  .archive-activity { display: flex; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid #d6bd7e; background: #f5ebcf; color: #655023; }
+  .activity-copy { min-width: 0; }
+  .activity-copy > strong { display: flex; align-items: center; gap: 9px; font-size: 14px; }
+  .activity-copy p { margin: 6px 0 0; }
+  .activity-indicator { width: 14px; height: 14px; flex-shrink: 0; border: 2px solid #d6bd7e; border-top-color: #80642b; border-radius: 50%; animation: activity-spin 1s linear infinite; }
+  .activity-indicator.paused { animation: none; border: 0; border-left: 4px solid #80642b; border-right: 4px solid #80642b; border-radius: 0; width: 10px; height: 12px; }
+  .activity-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 9px; flex-shrink: 0; font-size: 11px; }
+  .lightbox > .archive-activity { margin: 0 16px 12px; }
+  @keyframes activity-spin { to { transform: rotate(360deg); } }
+  @keyframes progress-slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+  @media (max-width: 800px) {
+    .archive-activity { flex-direction: column; align-items: stretch; gap: 12px; }
+    .activity-actions { flex-direction: row; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  }
   details.banner p { font-size: 11px; }
   .progress-card { border: 1px solid #dce3d4; background: #fffdf8; padding: 19px; border-radius: 10px; margin-top: 18px; }
   .section-line { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 11px; }
@@ -1171,6 +1237,11 @@
   .section-line span, .section-line small { color: #929c85; }
   .progress-track { height: 5px; background: #e9eddf; margin: 13px 0 10px; border-radius: 5px; overflow: hidden; }
   .progress-track div { height: 100%; background: #6e8d54; transition: width .2s; }
+  .progress-track.indeterminate:not(.paused) div { animation: progress-slide 1.5s ease-in-out infinite; }
+  .progress-track.paused div { background: #a68a4b; }
+  @media (prefers-reduced-motion: reduce) {
+    .activity-indicator, .progress-track.indeterminate:not(.paused) div { animation: none; }
+  }
   .current-file { font-size: 10px; color: #8a9680; overflow-wrap: anywhere; margin-bottom: 0; }
   .button-row { display: flex; align-items: center; gap: 10px; margin-top: 17px; flex-wrap: wrap; }
   .history { margin-top: 26px; }
@@ -1184,13 +1255,14 @@
   .pill { border-radius: 30px; background: #e6eddc; padding: 9px 14px; color: #6b8654; font-size: 11px; white-space: nowrap; }
   .review-actions { display: flex; align-items: center; gap: 12px; }
   .review-list { display: flex; flex-direction: column; gap: 14px; }
-  .review-row { display: flex; align-items: center; gap: 19px; padding: 23px; background: #fffdf8; border: 1px solid #dfe4d6; border-radius: 12px; cursor: pointer; }
-  .review-row:hover:not([aria-disabled="true"]) { border-color: #aab99a; background: #fbfcf6; }
+  .disabled-hint:has(> button:disabled) { cursor: not-allowed; }
+  .disabled-hint > button:disabled { pointer-events: none; }
+  .review-row { display: flex; align-items: center; gap: 19px; padding: 23px; width: 100%; text-align: left; color: inherit; background: #fffdf8; border: 1px solid #dfe4d6; border-radius: 12px; cursor: pointer; }
+  .review-row:hover:not(:disabled) { border-color: #aab99a; background: #fbfcf6; }
   .review-row:focus-visible { outline: 3px solid #879c70; outline-offset: 3px; }
-  .review-row[aria-disabled="true"] { cursor: wait; }
   .review-description { flex: 1; min-width: 0; }
   .review-row strong { font-size: 13px; }
-  .review-row p { font-size: 11px; line-height: 1.6; color: #8b977f; margin: 7px 0 0; }
+  .review-description > span { display: block; font-size: 11px; line-height: 1.6; color: #8b977f; margin: 7px 0 0; }
   .review-thumbnails { display: flex; gap: 6px; flex-shrink: 0; }
   .review-thumbnails :global(.preview) { width: 72px; height: 72px; }
   .review-thumbnails :global(.placeholder) { padding: 4px; gap: 2px; }
@@ -1261,7 +1333,6 @@
   .sidebar-progress > span:first-child { display: flex; justify-content: space-between; font-size: 11px; }
   .sidebar-progress strong { text-transform: capitalize; }
   .sidebar-progress .progress-track { display: block; margin: 0; }
-  .sidebar-progress .progress-track span { display: block; height: 100%; background: #6e8d54; transition: width .2s; }
   nav button { border: 0; background: transparent; color: #5f6c5a; text-align: left; padding: 11px 11px; display: flex; align-items: center; gap: 11px; font-size: 13px; border-radius: 8px; }
   nav button:hover { background: #f1f4ec; }
   nav button.active { color: #274b38; background: #eaf0e4; font-weight: 600; }
