@@ -10,13 +10,14 @@
   import {
     api, bytes, defaults, emptySnapshot, message,
     type Snapshot, type Settings, type Progress, type Item, type Details,
-    type Review, type CleanupRow, type MoveRow, type Job, type ToolStatus,
+    type Review, type CleanupRow, type ClearImportPreview, type MoveRow, type Job, type ToolStatus,
   } from "$lib/api";
 
   type Tab = "library" | "review" | "import" | "settings";
   type LibraryMonth = { month: string; count: number };
   type VideoPlayback = { id: string; request: number; source: string; phase: "opening" | "original" | "converting" | "proxy" };
   type UndoAction = { review: Review; discarded: string; keptName: string };
+  type CleanupFolder = { root: string; rows: CleanupRow[]; eligible: string[] };
   const pageSize = 60;
   let native = $state(false);
   let mode = $state("main");
@@ -56,9 +57,18 @@
   let firstVideo = $state<HTMLVideoElement>();
   let secondVideo = $state<HTMLVideoElement>();
   let cleanup = $state<CleanupRow[] | null>(null);
+  let cleanupLoading = $state(false);
+  let cleanupError = $state("");
+  let cleanupFileFolders = $state<string[]>([]);
+  let cleanupFileLimits = $state<Record<string, number>>({});
   let cleanupSelection = $state<string[]>([]);
   let emptyFolders = $state(false);
   let cleanupResults = $state<string[]>([]);
+  let clearingJob = $state<Job | null>(null);
+  let clearPreview = $state<ClearImportPreview | null>(null);
+  let clearLoading = $state(false);
+  let clearError = $state("");
+  let trashImportCopies = $state(false);
   let moves = $state<MoveRow[] | null>(null);
   let undoingMoves = $state(false);
   let onTop = $state(true);
@@ -70,15 +80,18 @@
   let mutating = false;
   let moreRequest: Promise<void> | null = null;
   const importing = $derived(["scanning", "importing", "paused"].includes(snapshot.progress.status));
-  const busy = $derived(working || importing);
+  const busy = $derived(working || importing || cleanupLoading || clearLoading);
   const hasArchive = $derived(!!snapshot.root);
   const percent = $derived(snapshot.progress.total ? Math.round(snapshot.progress.done / snapshot.progress.total * 100) : 0);
   const determinate = $derived(snapshot.progress.status !== "scanning" && snapshot.progress.total > 0);
   const activityTitle = $derived(importing
     ? t(snapshot.progress.status === "scanning" ? "Scanning source folders..." : snapshot.progress.status === "paused" ? "Import paused" : "Importing photos and videos...")
+    : cleanupLoading ? t("Checking source files...")
+    : clearLoading ? t("Checking imported copies...")
     : t(loaded ? "Updating your archive..." : "Opening your archive..."));
   const busyReason = $derived(!busy ? undefined : importing
     ? t("Comparisons, source cleanup and archive changes wait until the import finishes to avoid conflicting with files being added or matched.")
+    : cleanupLoading || clearLoading ? t("Files are being checked. You can keep browsing; archive changes will be available when checking finishes.")
     : t(loaded
       ? "An archive operation is in progress. Please wait for it to finish before making other changes."
       : "Please wait while your archive opens. Archive changes will be available when loading finishes."));
@@ -103,6 +116,22 @@
   const canNext = $derived(absoluteIndex >= 0 && (absoluteIndex < monthCount - 1 || monthPosition < months.length - 1));
   const settingsDirty = $derived((Object.keys(defaults) as (keyof Settings)[]).some((key) => config[key] !== snapshot.settings[key]));
   const filtered = $derived(search.trim() !== "" || filter !== "all");
+  const incompleteJobs = $derived(jobs.filter((job, index) => canRetry(job, index)));
+  const cleanupSelected = $derived(new Set(cleanupSelection));
+  const cleanupBytes = $derived((cleanup ?? []).reduce((total, row) => total + (cleanupSelected.has(row.id) ? row.bytes : 0), 0));
+  const cleanupFolders = $derived.by(() => {
+    const groups = new Map<string, CleanupFolder>();
+    for (const row of cleanup ?? []) {
+      let group = groups.get(row.root);
+      if (!group) {
+        group = { root: row.root, rows: [], eligible: [] };
+        groups.set(row.root, group);
+      }
+      group.rows.push(row);
+      if (row.eligible) group.eligible.push(row.id);
+    }
+    return [...groups.values()];
+  });
   const presets = [
     ["{yyyy}/{mm}/{dd}", "Year / month / day"],
     ["{yyyy}/{mm}", "Year / month"],
@@ -149,8 +178,21 @@
   function canRetry(job: Job, index: number) {
     const status = job.progress.status ?? "queued";
     if (status === "complete") return false;
-    if (busy && !["complete with errors", "cancelled", "failed"].includes(status)) return false;
+    if (importing && !["complete with errors", "cancelled", "failed"].includes(status)) return false;
     return !jobs.slice(0, index).some((newer) => newer.progress.status === "complete" && job.roots.every((root) => newer.roots.includes(root)));
+  }
+
+  function jobStatus(job: Job) {
+    const status = job.progress.status ?? "queued";
+    return !importing && ["scanning", "importing", "paused", "queued"].includes(status) ? "interrupted" : status;
+  }
+
+  function jobExplanation(job: Job) {
+    const status = jobStatus(job);
+    if (status === "cancelled") return t("Import canceled. Files that were not reached are still only in your source folders.");
+    if (status === "interrupted") return t("This import stopped before completion, possibly when the app closed or the disk disconnected.");
+    if (status === "failed") return t("Import stopped because of an error. Some files may not have been copied.");
+    return t("Some files or folders could not be imported. Review the issues below and retry.");
   }
 
   function focusOnMount(node: HTMLElement) {
@@ -386,7 +428,8 @@
     if (event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === "Escape") {
       if (working) return;
-      if (moves !== null) moves = null;
+      if (clearingJob) clearingJob = null;
+      else if (moves !== null) moves = null;
       else if (cleanup !== null) cleanup = null;
       else if (zoom) zoom = null;
       else if (selected) closeDetails();
@@ -394,7 +437,7 @@
       event.preventDefault();
       return;
     }
-    if (typing || target?.closest("video") || cleanup !== null || moves !== null || working) return;
+    if (typing || target?.closest("video") || cleanup !== null || clearingJob !== null || moves !== null || working) return;
     if (comparing && currentReview) {
       reviewKey(event);
       return;
@@ -561,10 +604,73 @@
   }
 
   async function startCleanup() {
+    cleanup = [];
+    cleanupLoading = true;
+    cleanupError = "";
+    error = "";
+    cleanupSelection = [];
+    cleanupResults = [];
+    cleanupFileFolders = [];
+    cleanupFileLimits = {};
+    await tick();
+    try {
+      const rows = await api<CleanupRow[]>("cleanup_preview");
+      if (cleanup === null) return;
+      cleanup = rows;
+      cleanupSelection = rows.filter((row) => row.eligible).map((row) => row.id);
+    } catch (reason: unknown) {
+      if (cleanup !== null) cleanupError = message(reason);
+      else error = message(reason);
+      console.error(reason);
+    } finally { cleanupLoading = false; }
+  }
+
+  function toggleCleanupFolder(folder: CleanupFolder, checked: boolean) {
+    const selected = new Set(cleanupSelection);
+    for (const id of folder.eligible) {
+      if (checked) selected.add(id);
+      else selected.delete(id);
+    }
+    cleanupSelection = [...selected];
+  }
+
+  async function startClearImport(job: Job) {
+    clearingJob = job;
+    clearPreview = null;
+    clearLoading = true;
+    clearError = "";
+    trashImportCopies = false;
+    await tick();
+    try {
+      const preview = await api<ClearImportPreview>("clear_import_preview", { id: job.id });
+      if (clearingJob?.id === job.id) clearPreview = preview;
+    } catch (reason: unknown) {
+      if (clearingJob?.id === job.id) clearError = message(reason);
+      else error = message(reason);
+      console.error(reason);
+    } finally { clearLoading = false; }
+  }
+
+  async function clearImport() {
+    const job = clearingJob;
+    if (!job || !clearPreview) return;
     await run(async () => {
-      cleanup = await api<CleanupRow[]>("cleanup_preview");
-      cleanupSelection = cleanup.filter((row) => row.eligible).map((row) => row.id);
-      cleanupResults = [];
+      clearError = "";
+      try {
+        await mutate(async () => {
+          await api("clear_import", { id: job.id, trashCopies: trashImportCopies, confirmed: true });
+        });
+        clearingJob = null;
+        notice = t("Import cleared from history. Source folders were not changed.");
+      } catch (reason: unknown) {
+        clearError = message(reason);
+        console.error(reason);
+      } finally {
+        await refresh(true);
+        if (clearingJob?.id === job.id) {
+          clearPreview = await api<ClearImportPreview>("clear_import_preview", { id: job.id });
+        }
+      }
     });
   }
 
@@ -883,7 +989,7 @@
         </button>
         <button class:active={tab === "import"} aria-current={tab === "import" ? "page" : undefined} onclick={() => tab = "import"}>
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3v11m-4-4 4 4 4-4" /><path d="M4 14v6h16v-6" /></svg>
-          {t("Import & archive")} {#if importing}<span class="nav-count">{determinate ? `${percent}%` : t(snapshot.progress.status)}</span>{:else if snapshot.progress.errors.length}<span class="nav-count attention">!</span>{/if}
+          {t("Import & archive")} {#if importing}<span class="nav-count">{determinate ? `${percent}%` : t(snapshot.progress.status)}</span>{:else if incompleteJobs.length || snapshot.progress.errors.length}<span class="nav-count attention">{incompleteJobs.length || "!"}</span>{/if}
         </button>
         <button class:active={tab === "settings"} aria-current={tab === "settings" ? "page" : undefined} onclick={() => tab = "settings"}>
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" /></svg>
@@ -904,6 +1010,12 @@
       {#if !native}<div class="banner warning"><strong>{t("Desktop preview")}</strong> {t("Folder imports and photo previews work in the Tauri desktop app. Run")} <code>npm run desktop</code> {t("to use them.")}</div>{/if}
       {#if error && !selected}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
       {#if notice}<div class="banner success" role="status">{notice}</div>{/if}
+      {#if incompleteJobs.length && tab !== "import"}
+        <div class="banner warning incomplete-notice" role="status">
+          <div><strong>{incompleteJobs.length} {t("import(s) need attention")}</strong><p>{t("Some source folders may not be fully backed up. Review the incomplete imports before cleaning up sources.")}</p></div>
+          <button class="secondary" onclick={() => tab = "import"}>{t("Review incomplete imports")}</button>
+        </div>
+      {/if}
       {#if snapshot.progress.errors.length}<details class="banner error"><summary>{snapshot.progress.errors.length} {t("import/recovery issue(s) need attention")}</summary>{#each snapshot.progress.errors as issue}<p>{issue}</p>{/each}</details>{/if}
 
       {#if tab === "import"}
@@ -935,7 +1047,38 @@
         {/if}
         <div class="stats"><div class="stat"><small>{t("PICTURES AND VIDEOS")}</small><strong>{snapshot.activeCount.toLocaleString()}</strong><span>{t("in your archive")}</span></div><div class="stat"><small>{t("ARCHIVE SIZE")}</small><strong>{bytes(snapshot.activeBytes)}</strong><span>{t("verified original files")}</span></div><div class="stat"><small>{t("SPARE COPIES")}</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>{t("of removed duplicates")} / {bytes(snapshot.undoBytes)}</span></div></div>
         <section class="next-steps"><div><h3>{t("Clean up old pictures?")}</h3><p>{t("Once copies are verified, review source files for cleanup.")}<br />{t("Nothing leaves your source folders without your say-so.")}</p></div><button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={startCleanup}>{t("Review source cleanup")}</button></section>
-        {#if jobs.length}<section class="history"><div class="section-line"><h3>{t("Recent imports")}</h3><small>{t("Original folder names stay searchable")}</small></div>{#each jobs.slice(0, 5) as job, index (job.id)}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t(job.progress.status ?? "queued")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small></div>{#if canRetry(job, index)}<button class="text-button" title={busyReason} disabled={busy} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button>{/if}</div>{/each}</section>{/if}
+        {#if incompleteJobs.length}
+          <section class="history incomplete-imports">
+            <h3>{t("Imports needing attention")}</h3>
+            <p class="muted">{t("These imports stay visible until you retry successfully or clear them. Retrying skips verified exact copies.")}</p>
+            {#each incompleteJobs as job (job.id)}
+              <article class="incomplete-import">
+                <div class="section-line"><strong>{t(jobStatus(job))}</strong><div class="review-actions"><button class="secondary" title={busyReason} disabled={busy} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button><button class="text-button" title={busyReason} disabled={busy} onclick={() => startClearImport(job)}>{t("Clear import...")}</button></div></div>
+                <p>{jobExplanation(job)}</p>
+                {#if job.progress.folders?.length}
+                  {#each job.progress.folders as folder (folder.root)}
+                    {@const incomplete = !folder.scanComplete || folder.processed < folder.discovered || folder.failed > 0 || folder.scanErrors > 0}
+                    <div class="import-folder">
+                      <strong class:field-error={incomplete}>{t(incomplete ? "Incomplete" : "Imported")}</strong>
+                      <code>{folder.root}</code>
+                      <small>{folder.copied} {t("copied")} / {folder.duplicates} {t("exact duplicates")} / {folder.processed} {t("processed out of")} {folder.discovered} {t("recognized media files found")}</small>
+                      {#if !folder.scanComplete}<p class="field-error">{t("Folder scan did not finish. The total number of source files is not yet known.")}</p>{/if}
+                      {#if folder.processed < folder.discovered}<p class="field-error">{folder.discovered - folder.processed} {t("file(s) were not reached.")}</p>{/if}
+                      {#if folder.failed || folder.scanErrors}<p class="field-error">{folder.failed} {t("file error(s)")} / {folder.scanErrors} {t("folder scan error(s). See the issues below.")}</p>{/if}
+                    </div>
+                  {/each}
+                {:else}
+                  {#each job.roots as root}<code class="import-root">{root}</code>{/each}
+                  <p class="muted">{t("No verified folder totals are available. Retry to check every source folder.")}</p>
+                {/if}
+                {#if job.progress.errors?.length}
+                  <details class="import-issues"><summary>{job.progress.errors.length} {t("issue(s): why files may be missing")}</summary>{#each job.progress.errors as issue}<p>{issue}</p>{/each}</details>
+                {/if}
+              </article>
+            {/each}
+          </section>
+        {/if}
+        {#if jobs.some((job) => job.progress.status === "complete")}<section class="history"><div class="section-line"><h3>{t("Recent completed imports")}</h3><small>{t("Original folder names stay searchable")}</small></div>{#each jobs.filter((job) => job.progress.status === "complete").slice(0, 5) as job (job.id)}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t("complete")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small></div></div>{/each}</section>{/if}
       {:else if tab === "library"}
         <div class="library-page">{@render libraryView(false)}</div>
       {:else if tab === "review"}
@@ -1122,8 +1265,69 @@
 
 {#if cleanup !== null}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="modal-backdrop" onclick={(event) => { if (!working && event.target === event.currentTarget) cleanup = null; }}><div class="modal" role="dialog" aria-modal="true" aria-label={t("Source cleanup preview")} tabindex="-1" {@attach focusOnMount}><div class="modal-top"><div><small>{t("EXPLICITLY VERIFIED, NEVER AUTOMATIC")}</small><h2>{t("Clean up source folders.")}</h2></div><button class="secondary" disabled={working} onclick={() => cleanup = null}>{t("Close")}</button></div><div class="banner warning">{t("Only byte-identical archived originals qualify. Cleanup may leave one copy. Trash usually needs emptying before space is freed.")}</div>{#if error}<div class="banner error" role="alert">{error}</div>{/if}
-    <div class="cleanup-list">{#each cleanup as row}<label class="cleanup-row"><input type="checkbox" bind:group={cleanupSelection} value={row.id} disabled={!row.eligible || working} /><span><strong>{row.source}</strong><small class:field-error={!row.eligible}>{row.reason}</small></span><small>{bytes(row.bytes)}</small></label>{/each}{#if !cleanup.length}<p class="muted">{t("No pending imported sources to clean up.")}</p>{/if}</div><label class="check-setting"><input type="checkbox" bind:checked={emptyFolders} /><span><strong>{t("Also remove genuinely empty imported subfolders")}</strong><small>{t("No recursive deletion. Dropped roots, hidden files and nonempty folders remain.")}</small></span></label>{#each cleanupResults as result}<p class="cleanup-result">{result}</p>{/each}<div class="modal-bottom button-row"><strong>{cleanupSelection.length} {t("selected")} / {bytes(cleanup.filter((row) => cleanupSelection.includes(row.id)).reduce((sum, row) => sum + row.bytes, 0))} {t("to trash")}</strong><button class="primary" disabled={working || !cleanupSelection.length} onclick={cleanSources}>{t("Confirm cleanup...")}</button></div></div></div>
+  <div class="modal-backdrop" onclick={(event) => { if (!working && event.target === event.currentTarget) cleanup = null; }}>
+    <div class="modal" role="dialog" aria-modal="true" aria-label={t("Source cleanup preview")} tabindex="-1" {@attach focusOnMount}>
+      <div class="modal-top"><div><small>{t("EXPLICITLY VERIFIED, NEVER AUTOMATIC")}</small><h2>{t("Clean up source folders.")}</h2></div><button class="secondary" disabled={working} onclick={() => cleanup = null}>{t("Close")}</button></div>
+      <div class="banner warning">{t("Only byte-identical archived originals qualify. Cleanup may leave one copy. Trash usually needs emptying before space is freed.")}</div>
+      {#if incompleteJobs.length}<p class="banner warning">{t("Some imports are incomplete. Cleanup only includes verified copies, not every file in the selected folders. Unimported files stay in place.")}</p>{/if}
+      {#if error || cleanupError}<div class="banner error" role="alert">{cleanupError || error}</div>{/if}
+      {#if cleanupLoading}
+        <div class="checking-files" role="status"><span class="activity-indicator" aria-hidden="true"></span><div><strong>{t("Checking source files...")}</strong><p>{t("Verifying originals against the archive. Large folders and external disks can take a while. You can close this window while checking continues.")}</p></div></div>
+      {:else if cleanupError}
+        <button class="secondary" disabled={busy} onclick={startCleanup}>{t("Try again")}</button>
+      {:else}
+        <p class="muted">{t("Select folders to clean up verified source files. Expand a folder below to choose individual files.")}</p>
+        <div class="cleanup-list">
+          {#each cleanupFolders as folder (folder.root)}
+            {@const selectedCount = folder.eligible.reduce((count, id) => count + Number(cleanupSelected.has(id)), 0)}
+            <section class="cleanup-folder">
+              <label class="cleanup-row">
+                <input type="checkbox" checked={folder.eligible.length > 0 && selectedCount === folder.eligible.length} indeterminate={selectedCount > 0 && selectedCount < folder.eligible.length} disabled={busy || !folder.eligible.length} onchange={(event) => toggleCleanupFolder(folder, event.currentTarget.checked)} />
+                <span><strong>{folder.root}</strong><small>{selectedCount} / {folder.eligible.length} {t("eligible files selected")} · {folder.rows.length - folder.eligible.length} {t("file(s) will stay in place")}</small></span>
+              </label>
+              <details class="cleanup-file-options" ontoggle={(event) => { cleanupFileFolders = event.currentTarget.open ? [...cleanupFileFolders, folder.root] : cleanupFileFolders.filter((root) => root !== folder.root); }}>
+                <summary>{t("Choose individual files / see why files are kept")}</summary>
+                {#if cleanupFileFolders.includes(folder.root)}
+                  {#each folder.rows.slice(0, cleanupFileLimits[folder.root] ?? 100) as row (row.id)}
+                    <label class="cleanup-row"><input type="checkbox" bind:group={cleanupSelection} value={row.id} disabled={!row.eligible || busy} /><span><strong>{row.source}</strong><small class:field-error={!row.eligible}>{t(row.reason)}</small></span><small>{bytes(row.bytes)}</small></label>
+                  {/each}
+                  {#if folder.rows.length > (cleanupFileLimits[folder.root] ?? 100)}<button class="text-button" onclick={() => cleanupFileLimits[folder.root] = (cleanupFileLimits[folder.root] ?? 100) + 100}>{t("Show more files")}</button>{/if}
+                {/if}
+              </details>
+            </section>
+          {/each}
+          {#if !cleanup.length}<p class="muted">{t("No pending imported sources to clean up.")}</p>{/if}
+        </div>
+        <label class="check-setting"><input type="checkbox" bind:checked={emptyFolders} disabled={busy} /><span><strong>{t("Also remove genuinely empty imported subfolders")}</strong><small>{t("No recursive deletion. Dropped roots, hidden files and nonempty folders remain.")}</small></span></label>
+      {/if}
+      {#if working}<p class="checking-files" role="status"><span class="activity-indicator" aria-hidden="true"></span>{t("Cleaning selected sources...")}</p>{/if}
+      {#each cleanupResults as result}<p class="cleanup-result">{result}</p>{/each}
+      <div class="modal-bottom button-row"><strong>{cleanupSelection.length} {t("selected")} / {bytes(cleanupBytes)} {t("to trash")}</strong><button class="primary" disabled={busy || !!cleanupError || !cleanupSelection.length} onclick={cleanSources}>{t("Confirm cleanup...")}</button></div>
+    </div>
+  </div>
+{/if}
+
+{#if clearingJob}
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={(event) => { if (!working && event.target === event.currentTarget) clearingJob = null; }}>
+    <div class="modal" role="dialog" aria-modal="true" aria-label={t("Clear incomplete import")} tabindex="-1" {@attach focusOnMount}>
+      <div class="modal-top"><div><h2>{t("Clear incomplete import")}</h2><p>{t("Source folders are never changed by this action.")}</p></div><button class="secondary" disabled={working} onclick={() => clearingJob = null}>{t("Close")}</button></div>
+      {#each clearingJob.roots as root}<code class="import-root">{root}</code>{/each}
+      {#if clearError}<div class="banner error" role="alert">{clearError}</div>{/if}
+      {#if clearLoading}<p class="checking-files" role="status"><span class="activity-indicator" aria-hidden="true"></span>{t("Checking imported copies...")}</p>
+      {:else if clearPreview}
+        <label class="check-setting"><input type="radio" name="clear-import-mode" bind:group={trashImportCopies} value={false} disabled={working} /><span><strong>{t("Keep already copied files in the archive")}</strong><small>{t("Only dismiss this import from history. Nothing is removed from the archive or source folders.")}</small></span></label>
+        <label class="check-setting"><input type="radio" name="clear-import-mode" bind:group={trashImportCopies} value={true} disabled={working || !clearPreview.tracksCopies || !clearPreview.removable} /><span><strong>{t("Move newly copied archive files to system Trash")}</strong><small>{clearPreview.removable} {t("archive copy/copies can be removed. Sources are re-verified and left untouched.")}</small></span></label>
+        {#if !clearPreview.tracksCopies}<p class="banner warning">{t("This older import does not record which archive copies it created. For safety, its archive files must stay in place.")}</p>{/if}
+        {#if clearPreview.retained}<p>{clearPreview.retained} {t("protected archive copy/copies will stay in place.")}</p>{/if}
+        {#each clearPreview.reasons as reason}<p class="muted">{t(reason)}</p>{/each}
+        <p class="muted">{t("Existing archive files and exact copies shared with other imports are always kept. Related files are protected together.")}</p>
+        {#if trashImportCopies}<div class="banner warning">{t("This removes these copies from the archive. They can only be recovered through system Trash, not archive Undo. Do not empty Trash until you are sure.")}</div>{/if}
+        {#if working}<p class="checking-files" role="status"><span class="activity-indicator" aria-hidden="true"></span>{t("Clearing import. Sources stay untouched...")}</p>{/if}
+        <div class="modal-bottom button-row"><button class={trashImportCopies ? "danger-button" : "primary"} disabled={busy} onclick={clearImport}>{t(trashImportCopies ? "Move archive copies to Trash & clear import" : "Keep archive copies & clear import")}</button></div>
+      {/if}
+    </div>
+  </div>
 {/if}
 
 {#if moves !== null}
@@ -1248,6 +1452,21 @@
   .history-row { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e1e5d9; padding: 13px 0; }
   .history-row strong { display: block; font-size: 12px; margin-bottom: 5px; }
   .history-row small { color: #8c987f; }
+  .incomplete-notice { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .incomplete-notice p { margin: 4px 0 0; }
+  .incomplete-import { border: 1px solid #d6bd7e; border-radius: 10px; padding: 18px; margin: 14px 0; background: #fffaf0; }
+  .incomplete-import > p { line-height: 1.6; margin: 12px 0; }
+  .import-folder { padding: 12px 0; border-top: 1px solid #e6decb; }
+  .import-folder strong, .import-folder code, .import-folder small, .import-root { display: block; margin-bottom: 6px; }
+  .import-folder p { margin: 6px 0 0; font-size: 12px; }
+  .import-issues { overflow-wrap: anywhere; }
+  .import-issues p { font-size: 12px; line-height: 1.6; }
+  .checking-files { display: flex; align-items: flex-start; gap: 12px; padding: 22px 0; line-height: 1.6; }
+  .checking-files .activity-indicator { margin-top: 4px; }
+  .checking-files p { margin: 6px 0 0; color: #788273; }
+  .cleanup-folder { border-bottom: 1px solid #dfe4d6; }
+  .cleanup-file-options { margin: 0 0 12px 28px; }
+  .cleanup-file-options summary { line-height: 1.6; }
   .empty { padding: 80px 20px; text-align: center; color: #748468; background: #f0f2e9; border-radius: 13px; border: 1px dashed #d8dfcd; }
   .empty h2 { font-family: Georgia, serif; font-weight: 400; color: #4a6641; margin-bottom: 12px; }
   .empty p { font-size: 12px; }

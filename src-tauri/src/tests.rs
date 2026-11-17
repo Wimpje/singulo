@@ -176,10 +176,245 @@ fn cleanup_requires_unchanged_source_and_exact_archived_bytes() {
         bytes: 4,
     };
     assert!(archive.cleanup_check(&occurrence).is_ok());
+    archive.record_occurrence(&occurrence).unwrap();
+    let reader = archive.cleanup_reader().unwrap();
+    assert!(reader.cleanup_rows().unwrap()[0].eligible);
     fs::write(target.join("IMG.jpg"), b"fake").unwrap();
     assert!(archive.cleanup_check(&occurrence).is_err());
+    assert!(!reader.cleanup_rows().unwrap()[0].eligible);
     fs::write(&source, b"changed").unwrap();
     assert!(archive.cleanup_check(&occurrence).is_err());
+}
+
+fn import_copy_fixture(
+    archive: &mut Archive,
+    directory: &Path,
+    name: &str,
+    job: Option<&str>,
+) -> Occurrence {
+    let root = directory.join("sources");
+    fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let source = root.join(name);
+    fs::write(&source, b"test").unwrap();
+    let hash = media::hash(&source).unwrap();
+    let mut media = sample(hash.clone());
+    if name.ends_with(".xmp") {
+        media.kind = "sidecar".into();
+    }
+    let occurrence = Occurrence {
+        id: name.into(),
+        item: name.into(),
+        source: source.to_string_lossy().into(),
+        root: root.to_string_lossy().into(),
+        relative: name.into(),
+        album: "Sources".into(),
+        hash,
+        identity: media::identity(&source).unwrap(),
+        status: "pending".into(),
+        bytes: 4,
+    };
+    let item = Item {
+        id: name.into(),
+        path: format!("photos/{name}"),
+        original_name: name.into(),
+        state: "active".into(),
+        keeper: None,
+        media,
+        settings: Settings::default(),
+        albums: vec!["Sources".into()],
+    };
+    if let Some(job) = job {
+        archive
+            .place_import(&source, item, occurrence.clone(), job)
+            .unwrap();
+    } else {
+        archive
+            .place(&source, item, Some(occurrence.clone()), None)
+            .unwrap();
+    }
+    occurrence
+}
+
+#[test]
+fn clear_import_only_trashes_exclusive_new_copies_and_never_sources() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir(directory.path().join("archive")).unwrap();
+    let mut archive = Archive::open(&directory.path().join("archive")).unwrap();
+    archive.save_job("cancelled", &serde_json::json!({"id":"cancelled","tracksCopies":true,"progress":{"status":"queued"}})).unwrap();
+    archive
+        .save_job(
+            "cancelled",
+            &serde_json::json!({"progress":{"status":"cancelled"}}),
+        )
+        .unwrap();
+    archive.save_job("other", &serde_json::json!({"id":"other","tracksCopies":true,"progress":{"status":"cancelled"}})).unwrap();
+    let removable =
+        import_copy_fixture(&mut archive, directory.path(), "new.jpg", Some("cancelled"));
+    let shared = import_copy_fixture(
+        &mut archive,
+        directory.path(),
+        "shared.jpg",
+        Some("cancelled"),
+    );
+    let existing = import_copy_fixture(&mut archive, directory.path(), "existing.jpg", None);
+    archive
+        .record_import_occurrences("cancelled", std::slice::from_ref(&existing))
+        .unwrap();
+    archive
+        .record_import_occurrences("other", std::slice::from_ref(&shared))
+        .unwrap();
+    archive
+        .clear_import_with("other", false, |_| panic!("Keep must not call Trash"))
+        .unwrap();
+    let related = import_copy_fixture(
+        &mut archive,
+        directory.path(),
+        "pair.jpg",
+        Some("cancelled"),
+    );
+    let sidecar = import_copy_fixture(
+        &mut archive,
+        directory.path(),
+        "pair.xmp",
+        Some("cancelled"),
+    );
+    let unavailable = import_copy_fixture(
+        &mut archive,
+        directory.path(),
+        "changed.jpg",
+        Some("cancelled"),
+    );
+    fs::write(&unavailable.source, b"changed").unwrap();
+    let preview = archive.clear_import_preview("cancelled").unwrap();
+    assert!(preview.tracks_copies);
+    assert_eq!((preview.removable, preview.retained), (1, 4));
+    let trash = directory.path().join("fake-trash.jpg");
+    let mut calls = 0;
+    archive
+        .clear_import_with("cancelled", true, |path| {
+            calls += 1;
+            fs::rename(path, &trash).map_err(|e| e.to_string())
+        })
+        .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(fs::read(&trash).unwrap(), b"test");
+    assert_eq!(archive.item(&removable.item).unwrap().state, "purged");
+    assert!(archive.jobs().unwrap().is_empty());
+    for source in [&removable, &shared, &existing, &related, &sidecar] {
+        assert_eq!(fs::read(&source.source).unwrap(), b"test");
+    }
+    for source in [&shared, &existing, &related, &sidecar, &unavailable] {
+        let item = archive.item(&source.item).unwrap();
+        assert_eq!(item.state, "active");
+        assert!(archive.root.join(item.path).is_file());
+    }
+}
+
+#[test]
+fn clear_import_keeps_history_and_recoverable_copy_when_trash_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir(directory.path().join("archive")).unwrap();
+    let mut archive = Archive::open(&directory.path().join("archive")).unwrap();
+    archive.save_job("cancelled", &serde_json::json!({"id":"cancelled","tracksCopies":true,"progress":{"status":"cancelled"}})).unwrap();
+    let source = import_copy_fixture(
+        &mut archive,
+        directory.path(),
+        "photo.jpg",
+        Some("cancelled"),
+    );
+    let error = archive
+        .clear_import_with("cancelled", true, |_| Err("Trash unavailable".into()))
+        .unwrap_err();
+    assert!(error.contains("Trash unavailable"));
+    assert_eq!(archive.jobs().unwrap().len(), 1);
+    let item = archive.item(&source.item).unwrap();
+    assert_eq!(item.state, "undo");
+    assert_eq!(fs::read(archive.root.join(&item.path)).unwrap(), b"test");
+    assert_eq!(fs::read(&source.source).unwrap(), b"test");
+    archive
+        .relocate(
+            &source.item,
+            Path::new(".photo-dedupe/undo/interrupted.jpg").into(),
+            "trash-pending",
+            None,
+        )
+        .unwrap();
+    assert!(!archive.recover().unwrap().is_empty());
+    let recovered = archive.item(&source.item).unwrap();
+    assert_eq!(recovered.state, "undo");
+    assert_eq!(
+        fs::read(archive.root.join(recovered.path)).unwrap(),
+        b"test"
+    );
+    fs::write(&source.source, b"fake").unwrap();
+    let mut changed_source = source.clone();
+    changed_source.identity = media::identity(Path::new(&source.source)).unwrap();
+    archive
+        .record_import_occurrences("cancelled", &[changed_source])
+        .unwrap();
+    let error = archive
+        .clear_import_with("cancelled", true, |_| {
+            panic!("Changed bytes must not reach Trash")
+        })
+        .unwrap_err();
+    assert!(error.contains("Source content no longer matches"));
+    assert_eq!(fs::read(&source.source).unwrap(), b"fake");
+    let retained = archive.item(&source.item).unwrap();
+    assert_eq!(fs::read(archive.root.join(retained.path)).unwrap(), b"test");
+}
+
+#[test]
+fn clear_import_protects_legacy_files_and_retains_older_incomplete_history() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir(directory.path().join("archive")).unwrap();
+    let mut archive = Archive::open(&directory.path().join("archive")).unwrap();
+    let source = import_copy_fixture(&mut archive, directory.path(), "legacy.jpg", None);
+    archive
+        .save_job(
+            "legacy",
+            &serde_json::json!({"id":"legacy","progress":{"status":"cancelled"}}),
+        )
+        .unwrap();
+    archive.save_job("retried", &serde_json::json!({"id":"retried","roots":["/retry"],"progress":{"status":"cancelled"}})).unwrap();
+    archive.save_job("successful-retry", &serde_json::json!({"id":"successful-retry","roots":["/retry"],"progress":{"status":"complete"}})).unwrap();
+    for index in 0..25 {
+        archive
+            .save_job(
+                &format!("complete-{index}"),
+                &serde_json::json!({"progress":{"status":"complete"}}),
+            )
+            .unwrap();
+    }
+    assert!(
+        archive
+            .jobs()
+            .unwrap()
+            .iter()
+            .any(|job| job["id"] == "legacy")
+    );
+    assert!(!archive.jobs().unwrap().iter().any(|job| job["id"] == "retried"));
+    assert!(
+        !archive
+            .clear_import_preview("legacy")
+            .unwrap()
+            .tracks_copies
+    );
+    assert!(
+        archive
+            .clear_import_with("legacy", true, |_| panic!(
+                "Legacy files must never be trashed"
+            ))
+            .is_err()
+    );
+    archive
+        .clear_import_with("legacy", false, |_| panic!("Keep must not call Trash"))
+        .unwrap();
+    assert_eq!(fs::read(&source.source).unwrap(), b"test");
+    assert_eq!(
+        fs::read(archive.root.join("photos/legacy.jpg")).unwrap(),
+        b"test"
+    );
 }
 
 #[test]

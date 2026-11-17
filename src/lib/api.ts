@@ -36,6 +36,7 @@ export interface Item {
 export type PreviewItem = Pick<Item, "id" | "originalName"> & { media: Pick<Media, "kind"> };
 
 export interface Progress {
+  jobId?: string | null;
   status: string;
   current: string;
   done: number;
@@ -43,7 +44,19 @@ export interface Progress {
   copied: number;
   duplicates: number;
   errors: string[];
+  folders?: FolderProgress[];
   timings?: ImportTimings;
+}
+
+export interface FolderProgress {
+  root: string;
+  discovered: number;
+  processed: number;
+  copied: number;
+  duplicates: number;
+  failed: number;
+  scanErrors: number;
+  scanComplete: boolean;
 }
 
 export interface ImportTimings {
@@ -86,9 +99,17 @@ export interface Details {
 export interface CleanupRow {
   id: string;
   source: string;
+  root: string;
   bytes: number;
   eligible: boolean;
   reason: string;
+}
+
+export interface ClearImportPreview {
+  tracksCopies: boolean;
+  removable: number;
+  retained: number;
+  reasons: string[];
 }
 
 export interface MoveRow {

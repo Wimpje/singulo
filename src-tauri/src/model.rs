@@ -59,6 +59,8 @@ pub struct Item {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Progress {
+    #[serde(default)]
+    pub job_id: Option<String>,
     pub status: String,
     pub current: String,
     pub done: usize,
@@ -67,7 +69,22 @@ pub struct Progress {
     pub duplicates: usize,
     pub errors: Vec<String>,
     #[serde(default)]
+    pub folders: Vec<FolderProgress>,
+    #[serde(default)]
     pub timings: ImportTimings,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderProgress {
+    pub root: String,
+    pub discovered: usize,
+    pub processed: usize,
+    pub copied: usize,
+    pub duplicates: usize,
+    pub failed: usize,
+    pub scan_errors: usize,
+    pub scan_complete: bool,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -87,6 +104,7 @@ pub struct ImportTimings {
 impl Default for Progress {
     fn default() -> Self {
         Self {
+            job_id: None,
             status: "idle".into(),
             current: String::new(),
             done: 0,
@@ -94,6 +112,7 @@ impl Default for Progress {
             copied: 0,
             duplicates: 0,
             errors: Vec::new(),
+            folders: Vec::new(),
             timings: ImportTimings::default(),
         }
     }
@@ -131,9 +150,19 @@ pub struct Occurrence {
 pub struct CleanupRow {
     pub id: String,
     pub source: String,
+    pub root: String,
     pub bytes: u64,
     pub eligible: bool,
     pub reason: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearImportPreview {
+    pub tracks_copies: bool,
+    pub removable: usize,
+    pub retained: usize,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

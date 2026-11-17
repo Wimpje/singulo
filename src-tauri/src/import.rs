@@ -111,13 +111,24 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
             .clone()
     };
     let mut progress = Progress {
+        job_id: Some(job.id.clone()),
         status: "scanning".into(),
         ..Progress::default()
     };
     update(app, &progress)?;
     let roots = validate_roots(&job.roots, &archive_root)?;
+    progress.folders = roots
+        .iter()
+        .map(|root| FolderProgress {
+            root: root.to_string_lossy().into(),
+            ..FolderProgress::default()
+        })
+        .collect();
     let mut files = Vec::new();
-    for root in &roots {
+    for (index, root) in roots.iter().enumerate() {
+        if state.cancel.load(Ordering::Relaxed) {
+            break;
+        }
         for entry in WalkDir::new(root)
             .follow_links(false)
             .into_iter()
@@ -135,11 +146,17 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
             match entry {
                 Ok(entry) if entry.file_type().is_file() && media::kind(entry.path()).is_some() => {
                     files.push((root.clone(), entry.into_path()));
+                    progress.folders[index].discovered += 1;
                 }
                 Ok(_) => {}
-                Err(error) => progress.errors.push(format!("Folder scan: {error}")),
+                Err(error) => {
+                    progress.folders[index].scan_errors += 1;
+                    progress.errors.push(format!("Folder scan: {error}"));
+                }
             }
+            update(app, &progress)?;
         }
+        progress.folders[index].scan_complete = !state.cancel.load(Ordering::Relaxed);
     }
     // Import image companions before XMP so sidecars can inherit their owner's date/path.
     files.sort_by_key(|(_, path)| media::kind(path) == Some("sidecar"));
@@ -282,7 +299,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                     guard
                         .as_mut()
                         .ok_or("Archive is not open.")?
-                        .record_occurrences(&exact_occurrences)
+                        .record_import_occurrences(&job.id, &exact_occurrences)
                 })();
                 progress.timings.placement_ms += writing.elapsed().as_millis() as u64;
                 if let Err(error) = recorded {
@@ -533,6 +550,7 @@ fn commit_ready(
                 import_one(
                     app,
                     archive,
+                    &job.id,
                     &job.settings,
                     entry.root,
                     entry.path,
@@ -544,6 +562,18 @@ fn commit_ready(
             }),
             Stage::Inspecting => unreachable!(),
         };
+        if let Some(folder) = progress
+            .folders
+            .iter_mut()
+            .find(|folder| Path::new(&folder.root) == entry.root)
+        {
+            folder.processed += 1;
+            match &result {
+                Ok(true) => folder.duplicates += 1,
+                Ok(false) => folder.copied += 1,
+                Err(_) => folder.failed += 1,
+            }
+        }
         match result {
             Ok(true) => progress.duplicates += 1,
             Ok(false) => progress.copied += 1,
@@ -600,6 +630,7 @@ fn occurrence(
 fn import_one(
     app: &tauri::AppHandle,
     archive: &mut Archive,
+    job_id: &str,
     settings: &Settings,
     root: &Path,
     source: &Path,
@@ -637,7 +668,7 @@ fn import_one(
         if media::identity(source)? != identity {
             return Err("Source changed before exact deduplication.".into());
         }
-        archive.record_occurrence(&occurrence(exact.id))?;
+        archive.record_import_occurrences(job_id, &[occurrence(exact.id)])?;
         return Ok(true);
     }
     let id = Uuid::new_v4().to_string();
@@ -813,7 +844,7 @@ fn import_one(
         item.media.warnings.push("Automatically grouped after full-frame equivalence checks; the higher-resolution copy is active. Original bytes remain in archive undo.".into());
     }
     let placing = Instant::now();
-    archive.place(source, item, Some(occurrence(id.clone())), None)?;
+    archive.place_import(source, item, occurrence(id.clone()), job_id)?;
     if !is_lower && let Some(p) = preview {
         candidate_cache.insert(id.clone(), p);
     }

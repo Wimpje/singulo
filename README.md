@@ -39,6 +39,7 @@ Settings belong to each archive and affect new import jobs. **Preview reorganiza
 
 **Review source cleanup** is a separate, explicitly confirmed operation:
 
+- The preview opens immediately while source/archive verification runs. Choose whole source folders by default, or expand a folder to select individual files and see why files are being kept. File details load in small pages.
 - Re-reads source and archive hashes. Only unchanged sources with a byte-identical archived original qualify.
 - A similar-looking keeper alone is not enough; the exact original must still exist in the archive or archive undo.
 - Moves sources to native Trash/Recycle Bin. Unsupported/failed recycling never falls back to permanent deletion.
@@ -54,6 +55,12 @@ After cleanup the archive may be your only copy. Keep another backup, especially
 Pause/cancel imports on the **Import & archive** page (the sidebar progress links there). Retry saved folders after a failure; exact copies are recognized again. Disk disconnection is reported, never replaced by a new archive elsewhere.
 
 While an import is active, a status panel explains why comparisons, source cleanup and archive changes are temporarily unavailable: they could conflict with files still being added or matched. Disabled controls include an explanation on hover. You can still browse photos, switch tabs and queue more folders. Pausing an import keeps these restrictions in place; resume it to finish, or cancel it. Scanning shows activity without a misleading percentage.
+
+**Imports needing attention** keeps canceled, failed, interrupted and partially successful imports visible, including imports older than the recent-history list. New imports record per-folder scan completion, discovered/processed files, copied files, exact duplicates and failures. Expand the issues to see the affected paths and reasons. A successful retry of the same folders resolves the warning; verified exact copies are skipped. Older imports without folder totals are explicitly marked as needing a retry to establish completeness.
+
+**Clear import** dismisses an incomplete import from history. Keep its already copied archive files (the default), or explicitly choose to move eligible newly created archive copies to native system Trash. Source folders are never changed. Existing/shared copies, related RAW/JPEG/sidecar/Live Photo files, keepers of replaced pictures, and copies without an unchanged available source remain protected. Sources and archive bytes are re-verified before trashing; Trash failure stops clearing and keeps the import visible, with retained staged copies in archive spare copies. Interrupted clearing never resumes trashing automatically. Recover successfully trashed archive copies through system Trash, not archive Undo.
+
+Copy ownership tracking starts with this version. For an older import, the app cannot safely prove which archive files it originally created, so only the keep-files clearing option is available. Clearing history does not erase the safety tracking used to protect copies shared with another import.
 
 The archive contains ordinary media files and `.photo-dedupe/` with the SQLite catalog, staging/undo/cache folders, job history, catalog backup and provenance export. Move the whole archive between computers, including this folder. Never edit the catalog while the app is running.
 

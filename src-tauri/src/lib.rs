@@ -413,7 +413,7 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
     {
         let archive = state.archive.lock().map_err(|e| e.to_string())?;
         archive.as_ref().ok_or("Archive is not open.")?.save_job(&job.id,
-            &serde_json::json!({"id":job.id,"roots":job.roots,"settings":job.settings,"progress":{"status":"queued"}}))?;
+            &serde_json::json!({"id":job.id,"roots":job.roots,"settings":job.settings,"tracksCopies":true,"progress":{"status":"queued"}}))?;
     }
     queue.push_back(job);
     if !started {
@@ -474,11 +474,25 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
                 break;
             };
             if let Err(error) = import::run(&handle, &job) {
-                let progress = Progress {
-                    status: "failed".into(),
-                    errors: vec![error],
-                    ..Progress::default()
-                };
+                let mut progress = state
+                    .progress
+                    .lock()
+                    .map(|progress| {
+                        if progress.job_id.as_deref() == Some(job.id.as_str()) {
+                            progress.clone()
+                        } else {
+                            Progress::default()
+                        }
+                    })
+                    .unwrap_or_else(|lock_error| Progress {
+                        errors: vec![format!(
+                            "Could not read the last import progress: {lock_error}"
+                        )],
+                        ..Progress::default()
+                    });
+                progress.status = "failed".into();
+                progress.job_id = Some(job.id.clone());
+                progress.errors.push(error);
                 let saved = (|| {
                     let archive = state.archive.lock().map_err(|e| e.to_string())?;
                     archive.as_ref().ok_or("Archive unavailable.")?.save_job(&job.id,
@@ -525,6 +539,36 @@ async fn job_history(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>> {
         archive.as_ref().ok_or("Choose an archive first.")?.jobs()
     })
     .await
+}
+
+#[tauri::command]
+async fn clear_import_preview(app: tauri::AppHandle, id: String) -> Result<ClearImportPreview> {
+    inspect_exclusive(app, move |archive| archive.clear_import_preview(&id)).await
+}
+
+#[tauri::command]
+async fn clear_import(
+    app: tauri::AppHandle,
+    id: String,
+    trash_copies: bool,
+    confirmed: bool,
+) -> Result<()> {
+    if !confirmed {
+        return Err("Clearing an import requires explicit confirmation.".into());
+    }
+    let job = id.clone();
+    change(app.clone(), move |archive| {
+        archive.clear_import(&job, trash_copies)
+    })
+    .await?;
+    let state = app.state::<AppState>();
+    let mut progress = state.progress.lock().map_err(|e| e.to_string())?;
+    if progress.job_id.as_deref() == Some(&id) {
+        *progress = Progress::default();
+        app.emit("progress", &*progress)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -651,7 +695,15 @@ async fn purge_item(
 
 #[tauri::command]
 async fn cleanup_preview(app: tauri::AppHandle) -> Result<Vec<CleanupRow>> {
-    inspect_exclusive(app, |a| a.cleanup_rows()).await
+    read(app, |app| {
+        let state = app.state::<AppState>();
+        let _busy = guard(&state)?;
+        let reader = {
+            let archive = state.archive.lock().map_err(|e| e.to_string())?;
+            archive.as_ref().ok_or("Choose an archive first.")?.cleanup_reader()?
+        };
+        reader.cleanup_rows()
+    }).await
 }
 
 #[tauri::command]
@@ -793,6 +845,8 @@ pub fn run() {
             start_import,
             control_import,
             job_history,
+            clear_import_preview,
+            clear_import,
             review_list,
             resolve_review,
             undo_review,

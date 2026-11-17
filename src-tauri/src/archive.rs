@@ -15,6 +15,8 @@ struct Operation {
     occurrence: Option<Occurrence>,
     stage: String,
     old_path: Option<String>,
+    #[serde(default)]
+    import_job: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -324,7 +326,7 @@ pub struct Archive {
     pub settings: Settings,
     pub id: String,
     connection: Connection,
-    _lock: File,
+    _lock: Option<File>,
     import_names: std::collections::HashMap<PathBuf, std::collections::HashSet<String>>,
     verified: std::sync::Mutex<std::collections::HashMap<PathBuf, (String, String)>>,
 }
@@ -458,6 +460,9 @@ impl Archive {
              CREATE TABLE IF NOT EXISTS companions (owner TEXT NOT NULL, child TEXT NOT NULL, UNIQUE(owner,child));
              CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS import_items (job TEXT NOT NULL, item TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(job,item));
+             CREATE INDEX IF NOT EXISTS import_item_refs ON import_items(item,job);
+             CREATE INDEX IF NOT EXISTS item_keeper ON items(json_extract(data,'$.keeper'));
              CREATE INDEX IF NOT EXISTS occurrence_item ON occurrences(json_extract(data,'$.item'));
              CREATE INDEX IF NOT EXISTS occurrence_status ON occurrences(json_extract(data,'$.status'));
              CREATE INDEX IF NOT EXISTS companion_child ON companions(child);
@@ -498,7 +503,7 @@ impl Archive {
             settings,
             id,
             connection,
-            _lock: lock,
+            _lock: Some(lock),
             import_names: std::collections::HashMap::new(),
             verified: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
@@ -939,6 +944,31 @@ impl Archive {
         })
     }
 
+    pub fn record_import_occurrences(
+        &mut self,
+        job: &str,
+        occurrences: &[Occurrence],
+    ) -> Result<()> {
+        self.transaction(|archive| {
+            archive.record_occurrences(occurrences)?;
+            for occurrence in occurrences {
+                archive.record_import_item(job, &occurrence.item, false)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn record_import_item(&self, job: &str, item: &str, created: bool) -> Result<()> {
+        self.connection
+            .execute(
+                "INSERT INTO import_items(job,item,created) VALUES(?1,?2,?3)
+             ON CONFLICT(job,item) DO UPDATE SET created=max(created,excluded.created)",
+                params![job, item, created],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     fn record_occurrence_inner(&mut self, occurrence: &Occurrence) -> Result<()> {
         self.connection
             .execute(
@@ -1179,6 +1209,27 @@ impl Archive {
         occurrence: Option<Occurrence>,
         old_path: Option<String>,
     ) -> Result<()> {
+        self.place_with_job(source, item, occurrence, old_path, None)
+    }
+
+    pub fn place_import(
+        &mut self,
+        source: &Path,
+        item: Item,
+        occurrence: Occurrence,
+        job: &str,
+    ) -> Result<()> {
+        self.place_with_job(source, item, Some(occurrence), None, Some(job.into()))
+    }
+
+    fn place_with_job(
+        &mut self,
+        source: &Path,
+        item: Item,
+        occurrence: Option<Occurrence>,
+        old_path: Option<String>,
+        import_job: Option<String>,
+    ) -> Result<()> {
         self.check()?;
         let stage_relative = format!(".photo-dedupe/staging/{}", Uuid::new_v4());
         let stage = paths::inside(&self.root, Path::new(&stage_relative))?;
@@ -1188,6 +1239,7 @@ impl Archive {
             occurrence,
             stage: stage_relative,
             old_path,
+            import_job,
         };
         let id = Uuid::new_v4().to_string();
         self.connection
@@ -1242,6 +1294,9 @@ impl Archive {
             archive.store(&operation.item)?;
             if let Some(occurrence) = &operation.occurrence {
                 archive.record_occurrence(occurrence)?;
+            }
+            if let Some(job) = &operation.import_job {
+                archive.record_import_item(job, &operation.item.id, true)?;
             }
             Ok(())
         })?;
@@ -1344,6 +1399,26 @@ impl Archive {
                 item.original_name
             ));
         }
+        let pending_trash: Vec<Item> = {
+            let mut query = self
+                .connection
+                .prepare("SELECT data FROM items WHERE state='trash-pending'")
+                .map_err(|e| e.to_string())?;
+            query
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .map(|row| parse(&row.map_err(|e| e.to_string())?))
+                .collect::<Result<_>>()?
+        };
+        for mut item in pending_trash {
+            let path = paths::inside(&self.root, Path::new(&item.path))?;
+            item.state = if path.exists() { "undo" } else { "purged" }.into();
+            self.store(&item)?;
+            errors.push(format!(
+                "Interrupted import clearing for {}. Check OS Trash; any retained archive copy is in spare copies. Nothing will be trashed automatically.",
+                item.original_name
+            ));
+        }
         Ok(errors)
     }
 
@@ -1401,6 +1476,22 @@ impl Archive {
         self.backup()
     }
 
+    pub fn cleanup_reader(&self) -> Result<Self> {
+        self.check()?;
+        let catalog = paths::inside(&self.root, Path::new(".photo-dedupe/catalog.sqlite"))?;
+        let connection = Connection::open_with_flags(catalog, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("Cannot open the catalog for source verification: {e}"))?;
+        Ok(Self {
+            root: self.root.clone(),
+            settings: self.settings.clone(),
+            id: self.id.clone(),
+            connection,
+            _lock: None,
+            import_names: std::collections::HashMap::new(),
+            verified: std::sync::Mutex::new(std::collections::HashMap::new()),
+        })
+    }
+
     pub fn cleanup_rows(&self) -> Result<Vec<CleanupRow>> {
         self.check()?;
         let mut archive_checked = std::collections::HashMap::<String, bool>::new();
@@ -1411,6 +1502,7 @@ impl Archive {
                 Ok(CleanupRow {
                     id: o.id,
                     source: o.source,
+                    root: o.root,
                     bytes: o.bytes,
                     eligible: check.is_ok(),
                     reason: check
@@ -2062,7 +2154,8 @@ impl Archive {
     pub fn save_job(&self, id: &str, data: &serde_json::Value) -> Result<()> {
         self.connection
             .execute(
-                "INSERT OR REPLACE INTO jobs VALUES(?1,?2)",
+                "INSERT INTO jobs VALUES(?1,?2)
+                 ON CONFLICT(id) DO UPDATE SET data=json_patch(jobs.data,excluded.data)",
                 params![id, json(data)?],
             )
             .map_err(|e| e.to_string())?;
@@ -2072,13 +2165,193 @@ impl Archive {
     pub fn jobs(&self) -> Result<Vec<serde_json::Value>> {
         let mut query = self
             .connection
-            .prepare("SELECT data FROM jobs ORDER BY rowid DESC LIMIT 20")
+            .prepare("SELECT j.data FROM jobs j WHERE coalesce(json_extract(j.data,'$.cleared'),0)=0
+                AND (coalesce(json_extract(j.data,'$.progress.status'),'queued')!='complete'
+                    OR j.id IN (SELECT id FROM jobs WHERE json_extract(data,'$.progress.status')='complete' ORDER BY rowid DESC LIMIT 20))
+                AND (json_extract(j.data,'$.progress.status')='complete' OR NOT EXISTS (
+                    SELECT 1 FROM jobs newer WHERE newer.rowid>j.rowid
+                    AND json_extract(newer.data,'$.progress.status')='complete'
+                    AND json_array_length(j.data,'$.roots')>0
+                    AND NOT EXISTS (
+                        SELECT 1 FROM json_each(j.data,'$.roots') root
+                        WHERE root.value NOT IN (SELECT value FROM json_each(newer.data,'$.roots'))
+                    )
+                ))
+                ORDER BY j.rowid DESC")
             .map_err(|e| e.to_string())?;
         query
             .query_map([], |r| r.get::<_, String>(0))
             .map_err(|e| e.to_string())?
             .map(|r| parse(&r.map_err(|e| e.to_string())?))
             .collect()
+    }
+
+    fn clearable_job(&self, id: &str) -> Result<serde_json::Value> {
+        self.check()?;
+        let data: String = self
+            .connection
+            .query_row("SELECT data FROM jobs WHERE id=?1", [id], |row| row.get(0))
+            .map_err(|e| format!("Import not found: {e}"))?;
+        let job: serde_json::Value = parse(&data)?;
+        if job["cleared"] == true || job["progress"]["status"] == "complete" {
+            return Err("Only incomplete imports can be cleared.".into());
+        }
+        Ok(job)
+    }
+
+    fn created_import_items(&self, job: &str) -> Result<Vec<String>> {
+        let mut query = self
+            .connection
+            .prepare_cached(
+                "SELECT r.item FROM import_items r JOIN items i ON i.id=r.item
+             WHERE r.job=?1 AND r.created=1 AND i.state IN ('active','undo') ORDER BY r.rowid",
+            )
+            .map_err(|e| e.to_string())?;
+        query
+            .query_map([job], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    fn import_copy_protection(&self, job: &str, item: &Item) -> Result<Option<&'static str>> {
+        let shared: bool = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM import_items WHERE item=?1 AND job!=?2)",
+                params![item.id, job],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if shared {
+            return Ok(Some("Copies also used by another import are kept."));
+        }
+        if !self.companions(&item.id)?.is_empty() {
+            return Ok(Some(
+                "Copies with RAW/JPEG, sidecar or Live Photo companions are kept.",
+            ));
+        }
+        let keeper: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM items WHERE json_extract(data,'$.keeper')=?1 AND state IN ('active','undo'))",
+            [&item.id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if keeper {
+            return Ok(Some(
+                "Copies that replaced another archived picture are kept.",
+            ));
+        }
+        if !self
+            .item_occurrences(&item.id)?
+            .iter()
+            .any(|source| self.cleanup_source_safe(source).is_ok())
+        {
+            return Ok(Some(
+                "Copies without an unchanged, available source are kept.",
+            ));
+        }
+        Ok(None)
+    }
+
+    pub fn clear_import_preview(&self, id: &str) -> Result<ClearImportPreview> {
+        let job = self.clearable_job(id)?;
+        let mut preview = ClearImportPreview {
+            tracks_copies: job["tracksCopies"] == true,
+            removable: 0,
+            retained: 0,
+            reasons: Vec::new(),
+        };
+        for item_id in self.created_import_items(id)? {
+            let item = self.item(&item_id)?;
+            if let Some(reason) = self.import_copy_protection(id, &item)? {
+                preview.retained += 1;
+                if !preview.reasons.iter().any(|existing| existing == reason) {
+                    preview.reasons.push(reason.into());
+                }
+            } else {
+                preview.removable += 1;
+            }
+        }
+        Ok(preview)
+    }
+
+    pub fn clear_import(&mut self, job: &str, trash_copies: bool) -> Result<()> {
+        self.clear_import_with(job, trash_copies, crate::recycle::recycle)
+    }
+
+    pub(crate) fn clear_import_with(
+        &mut self,
+        job: &str,
+        trash_copies: bool,
+        mut recycle: impl FnMut(&Path) -> Result<()>,
+    ) -> Result<()> {
+        let saved = self.clearable_job(job)?;
+        if trash_copies && saved["tracksCopies"] != true {
+            return Err("This older import does not track newly created copies. Clear it without removing archive files.".into());
+        }
+        let mut trashed = 0;
+        if trash_copies {
+            for id in self.created_import_items(job)? {
+                let result: Result<()> = (|| {
+                    let item = self.item(&id)?;
+                    if self.import_copy_protection(job, &item)?.is_some() {
+                        return Ok(());
+                    }
+                    let source = self
+                        .item_occurrences(&id)?
+                        .into_iter()
+                        .find(|source| self.cleanup_source_safe(source).is_ok())
+                        .ok_or("No unchanged source remains. The archive copy was kept.")?;
+                    self.cleanup_check_cached(&source, None)?;
+                    let isolated = PathBuf::from(".photo-dedupe/undo")
+                        .join(format!("clear-{}", Uuid::new_v4()))
+                        .join(paths::safe_name(&item.original_name));
+                    self.relocate(&id, isolated, "trash-pending", item.keeper.clone())?;
+                    let mut staged = self.item(&id)?;
+                    let path = paths::inside(&self.root, Path::new(&staged.path))?;
+                    let outcome: Result<()> = (|| {
+                        self.cleanup_source_safe(&source)?;
+                        let identity = media::identity(&path)?;
+                        if media::hash(&path)? != staged.media.hash
+                            || media::identity(&path)? != identity
+                        {
+                            return Err(
+                                "The isolated archive copy changed; it was not trashed.".into()
+                            );
+                        }
+                        recycle(&path)?;
+                        if path.exists() {
+                            return Err(
+                                "The archive copy is still present; Trash did not move it.".into(),
+                            );
+                        }
+                        Ok(())
+                    })();
+                    staged.state = if path.exists() { "undo" } else { "purged" }.into();
+                    self.store(&staged)?;
+                    outcome.map_err(|error| {
+                        format!("{error} Any retained copy is in spare copies.")
+                    })?;
+                    trashed += 1;
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    let backup_error = match self.backup() {
+                        Ok(()) => String::new(),
+                        Err(error) => format!(" Recovery backup could not be updated: {error}"),
+                    };
+                    return Err(format!(
+                        "Clearing stopped after {trashed} archive copies were moved to OS Trash: {error} Source folders were not changed. The import remains in history.{backup_error}"
+                    ));
+                }
+            }
+        }
+        self.connection
+            .execute(
+                "UPDATE jobs SET data=json_set(data,'$.cleared',json('true')) WHERE id=?1",
+                [job],
+            )
+            .map_err(|e| e.to_string())?;
+        self.backup()
     }
 
     pub fn backup(&self) -> Result<()> {
