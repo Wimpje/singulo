@@ -200,6 +200,13 @@
     if (event.key === "singulo.highContrast") highContrast = event.newValue === "true";
   }
 
+  function archiveLabel(root: string) {
+    const parts = root.split(/[\\/]/).filter(Boolean);
+    const name = parts.at(-1) ?? root;
+    const volume = parts[0] === "Volumes" && parts.length > 2 ? parts[1] : /^[A-Za-z]:$/.test(parts[0] ?? "") && parts.length > 1 ? parts[0] : "";
+    return volume ? `${volume} › ${name}` : name;
+  }
+
   function storedTextScale() {
     const stored = Number(window.localStorage.getItem("singulo.textScale"));
     return textScales.includes(stored) ? stored : 1;
@@ -417,7 +424,7 @@
 
   async function chooseArchive() {
     await run(async () => {
-      const path = await open({ directory: true, multiple: false, title: t("Choose the archive destination (a dedicated folder is best)") });
+      const path = await open({ directory: true, multiple: false, title: t("Choose the archive folder, ideally on an external disk") });
       if (!path) return;
       await mutate(async () => {
         snapshot = await api<Snapshot>("open_archive", { path });
@@ -1004,7 +1011,7 @@
   {:else if libraryLoading}
     <div class="empty"><p>{t("Loading your pictures...")}</p></div>
   {:else if !snapshot.root}
-    <div class="empty"><h2>{viewer ? t("Open your archive in the main app.") : t("Start with an archive folder.")}</h2><p>{t("A dedicated archive folder keeps things tidy.")}</p>{#if !viewer}<button class="primary" disabled={!native} onclick={chooseArchive}>{t("Choose folder")}</button>{/if}</div>
+    <div class="empty"><h2>{viewer ? t("Open your archive in the main app.") : t("Start with an archive folder.")}</h2><p>{t("Singulo copies your photos and videos into this folder and keeps them organized there. Use a dedicated folder, ideally on an external disk with plenty of space.")}</p>{#if !viewer}<button class="primary" disabled={!native} onclick={chooseArchive}>{t("Choose folder")}</button>{/if}</div>
   {:else if filtered}
     <div class="empty"><h2>{search ? `${t("No matches for")} “${search}”` : t("No pictures match this filter.")}</h2><p>{t("Try another filename, date or original folder.")}</p><button class="secondary" onclick={clearSearch}>{t("Clear search")}</button></div>
   {:else}
@@ -1038,6 +1045,10 @@
   <div class="progress-track" class:indeterminate={importing && !determinate} class:paused={snapshot.progress.status === "paused"} role="progressbar" aria-label={t("Import progress")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={determinate ? percent : undefined}>
     <div style={`width:${determinate ? percent : 35}%`}></div>
   </div>
+{/snippet}
+
+{#snippet diskIcon(size: number)}
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="3" /><path d="M3 14h18M7 17h1m3 0h1" /></svg>
 {/snippet}
 
 {#snippet logo(size: number)}
@@ -1125,7 +1136,7 @@
     </aside>
 
     <main class="content">
-      <header class="topbar"><span>{tab === "import" ? t("Your collection") : tab === "library" ? t("Browse your pictures") : tab === "review" ? t("Review similar pictures") : t("Archive settings")}</span><div class="status"><span class="safe-dot"></span>{busy ? activityTitle : t("One place for your pictures")}</div></header>
+      <header class="topbar"><span>{tab === "import" ? t("Your collection") : tab === "library" ? t("Browse your pictures") : tab === "review" ? t("Review similar pictures") : t("Archive settings")}</span><div class="topbar-right"><div class="status"><span class="safe-dot"></span>{busy ? activityTitle : t("One place for your pictures")}</div>{#if snapshot.root}<button class="archive-chip" title={`${t("Archive folder")}: ${snapshot.root}`} onclick={() => tab = "import"}>{@render diskIcon(16)}<span>{archiveLabel(snapshot.root)}</span></button>{:else}<button class="archive-chip missing" title={busyReason} disabled={!native || busy} onclick={chooseArchive}>{@render diskIcon(16)}<span>{t("Choose archive folder")}</span></button>{/if}</div></header>
       {@render archiveActivity(true)}
       {#if !native}<div class="banner warning"><strong>{t("Desktop preview")}</strong> {t("Folder imports and photo previews work in the Tauri desktop app. Run")} <code>npm run desktop</code> {t("to use them.")}</div>{/if}
       {#if error && !selected}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
@@ -1143,8 +1154,8 @@
       {#if tab === "import"}
         <div class="page-heading plain"><h1>{t("Import & archive")}</h1></div>
         <section class="destination">
-          <span class="disk-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="3" /><path d="M3 14h18M7 17h1m3 0h1" /></svg></span>
-          <div><small>{t("ARCHIVE DESTINATION")}</small><strong>{snapshot.root ?? t("No archive open")}</strong></div>
+          <span class="disk-icon">{@render diskIcon(20)}</span>
+          <div><small>{t("ARCHIVE DESTINATION")}</small><strong>{snapshot.root ?? t("No archive open")}</strong>{#if !snapshot.root}<p>{t("Singulo copies your photos and videos into this folder and keeps them organized there. Use a dedicated folder, ideally on an external disk with plenty of space.")}</p>{/if}</div>
           <button class={snapshot.root ? "secondary" : "primary"} title={busyReason} disabled={!native || busy} onclick={chooseArchive}>{snapshot.root ? t("Change") : t("Choose folder")}</button>
         </section>
         {#if incompleteJobs.length}
@@ -1556,6 +1567,13 @@
   .content { flex: 1; min-width: 0; padding: 0 38px 20px; max-width: 1560px; }
   .topbar { height: 76px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e0e3d9; font-size: calc(13px * var(--text-scale, 1)); color: var(--hc-muted, #87917f); }
   .status { display: flex; align-items: center; gap: 7px; font-size: calc(12px * var(--text-scale, 1)); }
+  .topbar-right { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  .archive-chip { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: calc(320px * var(--text-scale, 1)); border: 1px solid #dfe3d8; border-radius: 999px; background: #fffdf8; padding: 5px 12px; color: #2f4a37; font-size: calc(12px * var(--text-scale, 1)); font-weight: 600; }
+  .archive-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .archive-chip svg { flex-shrink: 0; color: #83936d; }
+  .archive-chip:hover:not(:disabled) { background: #eef2e6; }
+  .archive-chip.missing { border-color: #d6bd7e; background: #fffaf0; color: #7a5a17; }
+  .archive-chip.missing svg { color: currentColor; }
   .page-heading { display: flex; justify-content: space-between; align-items: center; padding: 34px 0 24px; gap: 18px; }
   .eyebrow { color: var(--hc-muted, #8e9b82); margin-bottom: 15px; }
   .subtitle { color: var(--hc-muted, #7a8573); line-height: 1.7; font-size: calc(14px * var(--text-scale, 1)); margin-bottom: 0; }
@@ -1574,6 +1592,7 @@
   .destination div { flex: 1; min-width: 0; }
   .destination small { color: var(--hc-muted, #939c87); font-size: calc(10px * var(--text-scale, 1)); font-weight: 700; letter-spacing: .12em; }
   .destination strong { display: block; font-size: calc(14px * var(--text-scale, 1)); margin-top: 4px; overflow-wrap: anywhere; }
+  .destination p { margin: 6px 0 0; max-width: 60ch; color: var(--hc-muted, #75816c); font-size: calc(13px * var(--text-scale, 1)); line-height: 1.5; }
   .dropping { background: #e5ecd8 !important; border-color: #6d9056 !important; }
   .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 19px 0; }
   .stat { padding: 19px 21px; background: #fffdf8; border: 1px solid #e0e4d9; border-radius: 10px; }
@@ -1641,7 +1660,7 @@
   .cleanup-file-options summary { line-height: 1.6; }
   .empty { padding: 80px 20px; text-align: center; color: var(--hc-muted, #748468); background: #f0f2e9; border-radius: 13px; border: 1px dashed #d8dfcd; }
   .empty h2 { font-family: Georgia, serif; font-weight: 400; color: #4a6641; margin-bottom: 12px; }
-  .empty p { font-size: calc(14px * var(--text-scale, 1)); }
+  .empty p { max-width: 62ch; margin-left: auto; margin-right: auto; line-height: 1.55; font-size: calc(14px * var(--text-scale, 1)); }
   .empty-check { display: inline-grid; place-items: center; background: #e0ebd4; border-radius: 50%; width: 50px; height: 50px; margin-bottom: 19px; font-size: calc(13px * var(--text-scale, 1)); }
   .pill { border-radius: 30px; background: #e6eddc; padding: 9px 14px; color: var(--hc-muted, #6b8654); font-size: calc(13px * var(--text-scale, 1)); white-space: nowrap; }
   .review-actions { display: flex; align-items: center; gap: 12px; }
@@ -1837,5 +1856,5 @@
   .toast .text-button { color: #d9e8c6; font-size: calc(14px * var(--text-scale, 1)); }
   .toast .text-button:hover { background: #ffffff14; }
   @media (max-width: 1000px) { .sidebar { width: calc(204px * var(--text-scale, 1)); padding: 25px 13px; } .content { padding: 0 25px 20px; } :global(h1) { font-size: calc(33px * var(--text-scale, 1)); } footer span { display: none; } }
-  @media (max-width: 760px) { .sidebar { width: calc(170px * var(--text-scale, 1)); padding: 20px 9px; } .brand small, .drop-hint { display: none; } .timeline { width: 96px; } .lightbox-info { position: absolute; left: 0; right: 0; bottom: 0; width: auto; max-height: 42%; box-shadow: 0 -10px 30px #0005; z-index: 2; } .lightbox-body { position: relative; } .size-slider { display: none; } .brand { margin: 0 3px 30px; } .brand strong { font-size: calc(14px * var(--text-scale, 1)); } .content { padding: 0 18px 20px; } .stats { gap: 8px; } .stat { padding: 14px 12px; } .stat strong { font-size: calc(23px * var(--text-scale, 1)); } .next-steps { align-items: flex-start; flex-direction: column; } .comparison .detail-columns { grid-template-columns: 1fr; } .setting-columns { grid-template-columns: 1fr; } }
+  @media (max-width: 760px) { .topbar .status { display: none; } .sidebar { width: calc(170px * var(--text-scale, 1)); padding: 20px 9px; } .brand small, .drop-hint { display: none; } .timeline { width: 96px; } .lightbox-info { position: absolute; left: 0; right: 0; bottom: 0; width: auto; max-height: 42%; box-shadow: 0 -10px 30px #0005; z-index: 2; } .lightbox-body { position: relative; } .size-slider { display: none; } .brand { margin: 0 3px 30px; } .brand strong { font-size: calc(14px * var(--text-scale, 1)); } .content { padding: 0 18px 20px; } .stats { gap: 8px; } .stat { padding: 14px 12px; } .stat strong { font-size: calc(23px * var(--text-scale, 1)); } .next-steps { align-items: flex-start; flex-direction: column; } .comparison .detail-columns { grid-template-columns: 1fr; } .setting-columns { grid-template-columns: 1fr; } }
 </style>
