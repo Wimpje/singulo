@@ -4,6 +4,8 @@ A small, offline desktop app for organizing pictures and videos. Built with Taur
 
 The interface is available in English and Dutch. Choose a language on the Settings page; your choice is saved on this computer.
 
+Note that this is an AI coded application, created for my personal use. I hope someone will like it :-)
+
 ## Use it
 
 1. Choose a dedicated archive folder, usually on an external disk.
@@ -131,8 +133,6 @@ Expand **Import timings** on the **Import & archive** page to see scanning, hash
 3. **Pixel check:** before a larger copy replaces a smaller one, both are compared on a 512×512 grid, tile by tile. Protected variants (RAW/JPEG pairs, edits, Live Photos, different capture times) and anything uncertain go to Similarity review instead.
 
 BLAKE3 also verifies streaming copies, cleanup eligibility, recovery operations, and managed XMP sidecars. Hashing stays on the I/O coordinator with sequential reads; it does not start parallel source-file reads. FFmpeg's optional deep audio comparison and bundled-tool checksums still use SHA-256 independently of archive file hashes.
-
-**Development format change:** catalogs created with the earlier SHA-256 build are not compatible with these BLAKE3 hashes. Choose a fresh archive destination and reimport your sources; there is no automatic hash migration. Keep existing archive files and sources intact.
 
 Each new file is decoded **once** for import, at reduced size, and that preview is reused for both the fingerprint and the pixel check. JPEGs are decoded with DCT scaling (1/2–1/8 size, short side never below 512 px), and RAW (including PEF) uses LibRaw half-size mode. RAW decoder output is decoded directly from memory, avoiding a redundant temporary TIFF write/read without changing pixels or similarity rules. Photos up to 16 MiB are read into bounded memory buffers on the coordinator, then decoded on up to 8 CPU-only worker threads (CPU cores - 1). Queued/in-flight compressed inputs have a 64 MiB budget. Larger photos and external RAW/HEIC/video decoders stay on the coordinator, alongside hashing, metadata extraction, candidate reads and archive writes; image workers do not reopen source files. This avoids concurrent source reads, although batching and candidate lookups still involve seeks. Results are committed in the original order, so sidecars still follow their photos.
 
