@@ -1000,7 +1000,12 @@ fn cleanup_requires_unchanged_source_and_exact_archived_bytes() {
     fs::write(&source, &bytes).unwrap();
     let source = source.canonicalize().unwrap();
     let hash = blake3::hash(&bytes).to_hex().to_string();
-    assert_eq!(media::hash_with_identity(&source).unwrap().1, hash);
+    assert_eq!(
+        media::hash_with_identity(&source, &Default::default())
+            .unwrap()
+            .1,
+        hash
+    );
     let mut archive = Archive::open(&target).unwrap();
     let mut media = sample(hash.clone());
     media.bytes = bytes.len() as u64;
@@ -1097,7 +1102,7 @@ fn import_copy_fixture(
     };
     if let Some(job) = job {
         archive
-            .place_import(&source, item, occurrence.clone(), job)
+            .place_import(&source, item, occurrence.clone(), job, &Default::default())
             .unwrap();
     } else {
         archive

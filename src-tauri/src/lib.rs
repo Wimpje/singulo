@@ -1,4 +1,5 @@
 mod archive;
+mod cancel;
 mod import;
 mod media;
 mod model;
@@ -439,6 +440,9 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
         return Err("Choose at least one source folder.".into());
     }
     let state = app.state::<AppState>();
+    if state.importing.load(Ordering::SeqCst) && state.cancel.requested() {
+        return Err("Current import is cancelling; wait a moment before starting another.".into());
+    }
     let (settings, validated_roots) = {
         let archive = state.archive.lock().map_err(|e| e.to_string())?;
         let archive = archive
@@ -467,7 +471,7 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
     if !started && !state.importing.load(Ordering::SeqCst) {
         return Err("Another archive operation is running; add folders after it finishes.".into());
     }
-    if !started && state.cancel.load(Ordering::SeqCst) {
+    if !started && state.cancel.requested() {
         return Err("Current import is cancelling; wait a moment before starting another.".into());
     }
     {
@@ -477,9 +481,9 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
     }
     queue.push_back(job);
     if started {
-        state.importing.store(true, Ordering::SeqCst);
-        state.cancel.store(false, Ordering::SeqCst);
+        state.cancel.reset();
         state.pause.store(false, Ordering::Relaxed);
+        state.importing.store(true, Ordering::SeqCst);
     }
     drop(queue);
     if let Err(error) = app.emit("imports-changed", ()) {
@@ -494,7 +498,7 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
         loop {
             let job = match state.queue.lock() {
                 Ok(mut queue) => {
-                    if state.cancel.load(Ordering::SeqCst) {
+                    if state.cancel.requested() {
                         let drained: Vec<QueuedJob> = queue.drain(..).collect();
                         if let Ok(archive) = state.archive.lock()
                             && let Some(archive) = archive.as_ref()
@@ -514,14 +518,12 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
                     }
                     let job = queue.pop_front();
                     if job.is_none() {
-                        state.cancel.store(false, Ordering::SeqCst);
                         state.importing.store(false, Ordering::SeqCst);
                         state.busy.store(false, Ordering::SeqCst);
                     }
                     job
                 }
                 Err(error) => {
-                    state.cancel.store(false, Ordering::SeqCst);
                     state.importing.store(false, Ordering::SeqCst);
                     state.busy.store(false, Ordering::SeqCst);
                     let progress = Progress {
@@ -585,15 +587,20 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
 #[tauri::command]
 fn control_import(app: tauri::AppHandle, action: String) -> Result<()> {
     let state = app.state::<AppState>();
+    let mut progress = state.progress.lock().map_err(|e| e.to_string())?;
     if !state.importing.load(Ordering::SeqCst) {
         return Err("No import is currently running.".into());
     }
     match action.as_str() {
+        "pause" | "resume" if state.cancel.requested() => {}
         "pause" => state.pause.store(true, Ordering::Relaxed),
         "resume" => state.pause.store(false, Ordering::Relaxed),
         "cancel" => {
-            state.cancel.store(true, Ordering::SeqCst);
+            state.cancel.request();
             state.pause.store(false, Ordering::Relaxed);
+            if import::mark_cancelling(&mut progress) {
+                app.emit("progress", &*progress).map_err(|e| e.to_string())?;
+            }
         }
         _ => return Err("Unknown import control.".into()),
     }

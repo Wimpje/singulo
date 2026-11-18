@@ -88,7 +88,8 @@
   let jobsRequest = 0;
   let progressClock = $state(Date.now());
   let progressStartedAt = $state(Date.now());
-  const importing = $derived(["scanning", "importing", "paused"].includes(snapshot.progress.status));
+  const cancelling = $derived(snapshot.progress.status === "cancelling");
+  const importing = $derived(cancelling || ["scanning", "importing", "paused"].includes(snapshot.progress.status));
   const progressKey = $derived(importing ? snapshot.progress.jobId ?? "active" : null);
   const busy = $derived(working || importing || cleanupLoading || clearLoading);
   const hasArchive = $derived(!!snapshot.root);
@@ -97,6 +98,7 @@
   const elapsedMs = $derived(importing ? Math.max(snapshot.progress.timings?.totalMs ?? 0, progressClock - progressStartedAt) : snapshot.progress.timings?.totalMs ?? 0);
   const queuedJobs = $derived(jobs.filter((job) => job.queued && job.id !== snapshot.progress.jobId).reverse());
   const phaseTitle = $derived.by(() => {
+    if (cancelling) return t("Cancelling import...");
     if (snapshot.progress.status === "paused") return t("Import paused");
     if (snapshot.progress.status === "scanning") return t("Finding photos and videos...");
     switch (snapshot.progress.phase) {
@@ -110,6 +112,7 @@
     }
   });
   const phaseDetail = $derived.by(() => {
+    if (cancelling) return t("Waiting for the current operation to stop safely. Your source files are unchanged.");
     if (snapshot.progress.status === "paused") return t("Resume or cancel the import to make these actions available again.");
     if (snapshot.progress.status === "scanning") return `${(snapshot.progress.folders ?? []).reduce((total, folder) => total + folder.discovered, 0).toLocaleString()} ${t("recognized media files found")}`;
     if (snapshot.progress.phase === "hashing") return `${(snapshot.progress.checked ?? 0).toLocaleString()} / ${snapshot.progress.total.toLocaleString()} ${t("originals checked")}`;
@@ -118,7 +121,7 @@
     return "";
   });
   const activityTitle = $derived(importing
-    ? t(snapshot.progress.status === "scanning" ? "Scanning source folders..." : snapshot.progress.status === "paused" ? "Import paused" : "Importing photos and videos...")
+    ? t(cancelling ? "Cancelling import..." : snapshot.progress.status === "scanning" ? "Scanning source folders..." : snapshot.progress.status === "paused" ? "Import paused" : "Importing photos and videos...")
     : cleanupLoading ? t("Checking source files...")
     : clearLoading ? t("Checking imported copies...")
     : t(loaded ? "Updating your archive..." : "Opening your archive..."));
@@ -261,7 +264,7 @@
   function jobStatus(job: Job) {
     const status = job.progress.status ?? "queued";
     return !job.queued && (!importing || job.id !== snapshot.progress.jobId)
-      && ["scanning", "importing", "paused", "queued"].includes(status) ? "interrupted" : status;
+      && ["scanning", "importing", "paused", "cancelling", "queued"].includes(status) ? "interrupted" : status;
   }
 
   function jobExplanation(job: Job) {
@@ -437,6 +440,10 @@
   }
 
   async function importFolders(paths?: string[]) {
+    if (cancelling) {
+      notice = t("Waiting for the current operation to stop safely. Your source files are unchanged.");
+      return;
+    }
     if (!snapshot.root) {
       await chooseArchive();
       if (!snapshot.root) return;
@@ -1015,7 +1022,7 @@
   {:else if filtered}
     <div class="empty"><h2>{search ? `${t("No matches for")} “${search}”` : t("No pictures match this filter.")}</h2><p>{t("Try another filename, date or original folder.")}</p><button class="secondary" onclick={clearSearch}>{t("Clear search")}</button></div>
   {:else}
-    <div class="empty"><h2>{t("Your pictures will appear here.")}</h2><p>{viewer ? t("Imported pictures and videos will appear here.") : t("Add folders to fill your library. Originals stay untouched.")}</p>{#if !viewer}<button class="primary" disabled={!native} onclick={() => importFolders()}>{t("Add folders +")}</button>{/if}</div>
+    <div class="empty"><h2>{t("Your pictures will appear here.")}</h2><p>{viewer ? t("Imported pictures and videos will appear here.") : t("Add folders to fill your library. Originals stay untouched.")}</p>{#if !viewer}<button class="primary" disabled={!native || cancelling} onclick={() => importFolders()}>{t("Add folders +")}</button>{/if}</div>
   {/if}
 {/snippet}
 
@@ -1067,7 +1074,7 @@
 {#if mode === "drop"}
   <main class="mini" class:dropping>
     <div class="mini-heading"><span class="brand-symbol">{@render logo(25)}</span><strong>Singulo</strong></div>
-    <button class="mini-drop" disabled={!native} onclick={() => snapshot.root ? importFolders() : chooseArchive()}>
+    <button class="mini-drop" disabled={!native || cancelling} onclick={() => snapshot.root ? importFolders() : chooseArchive()}>
       <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5" /><path d="M4 15v5h16v-5" /></svg>
       <strong>{dropping ? t("Drop to copy safely") : t("Drop photo folders here")}</strong>
       <small>{snapshot.root ? snapshot.root.split(/[\\/]/).pop() : t("Choose an archive first")}</small>
@@ -1090,7 +1097,7 @@
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand"><span class="brand-symbol">{@render logo(34)}</span><div><strong>Singulo</strong><small>{t("Pictures and videos.")}</small></div></div>
-      <button class="primary full add-folders" disabled={!native} onclick={() => importFolders()}>
+      <button class="primary full add-folders" disabled={!native || cancelling} onclick={() => importFolders()}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>{t("Add folders")}
       </button>
       <p class="drop-hint">{t("Or drop folders anywhere in this window.")}</p>
@@ -1214,7 +1221,7 @@
                 <p>{t("Stage times overlap while decoding runs in parallel; hashing includes exact-match verification.")}</p>
               </details>
             {/if}
-            {#if importing}<div class="button-row"><button class="secondary" onclick={() => run(async () => { await api("control_import", { action: snapshot.progress.status === "paused" ? "resume" : "pause" }); })}>{snapshot.progress.status === "paused" ? t("Resume") : t("Pause")}</button><button class="text-button" onclick={() => run(async () => { await api("control_import", { action: "cancel" }); })}>{t("Cancel import")}</button></div>{/if}
+            {#if importing}<div class="button-row"><button class="secondary" disabled={cancelling} onclick={() => run(async () => { await api("control_import", { action: snapshot.progress.status === "paused" ? "resume" : "pause" }); })}>{snapshot.progress.status === "paused" ? t("Resume") : t("Pause")}</button><button class="text-button" disabled={cancelling} onclick={() => run(async () => { await api("control_import", { action: "cancel" }); })}>{t("Cancel import")}</button></div>{/if}
           </section>
         {/if}
         {#if importing || queuedJobs.length}

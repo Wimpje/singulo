@@ -1,4 +1,7 @@
-use crate::model::{Media, Result};
+use crate::{
+    cancel::{CANCELLED, Cancellation},
+    model::{Media, Result},
+};
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, Utc};
 use image::{DynamicImage, GenericImageView, ImageReader};
 use std::{
@@ -6,7 +9,7 @@ use std::{
     io::{BufRead, Cursor, Read, Seek},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::Manager;
 use wait_timeout::ChildExt;
@@ -40,10 +43,18 @@ pub fn tool(app: &tauri::AppHandle, name: &str) -> Result<PathBuf> {
 }
 
 pub fn execute(command: Command, timeout: u64) -> Result<Vec<u8>> {
-    execute_output(command, timeout, false)
+    execute_output(command, timeout, false, None)
 }
 
-fn execute_output(mut command: Command, timeout: u64, metadata_batch: bool) -> Result<Vec<u8>> {
+fn execute_output(
+    mut command: Command,
+    timeout: u64,
+    metadata_batch: bool,
+    cancel: Option<&Cancellation>,
+) -> Result<Vec<u8>> {
+    if let Some(cancel) = cancel {
+        cancel.check()?;
+    }
     let output = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
     let errors = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
     command
@@ -58,17 +69,29 @@ fn execute_output(mut command: Command, timeout: u64, metadata_batch: bool) -> R
     let mut child = command
         .spawn()
         .map_err(|e| format!("Unable to start media tool: {e}"))?;
-    let status = match child
-        .wait_timeout(Duration::from_secs(timeout))
-        .map_err(|e| e.to_string())?
-    {
-        Some(status) => status,
-        None => {
+    let deadline = Instant::now() + Duration::from_secs(timeout);
+    let status = loop {
+        let cancelled = cancel.is_some_and(Cancellation::requested);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if cancelled || remaining.is_zero() {
             child
                 .kill()
-                .map_err(|e| format!("Could not stop timed-out tool: {e}"))?;
+                .map_err(|e| format!("Could not stop media tool: {e}"))?;
             child.wait().map_err(|e| e.to_string())?;
-            return Err("Media processing timed out; the original has not been changed.".into());
+            return Err(if cancelled {
+                CANCELLED
+            } else {
+                "Media processing timed out; the original has not been changed."
+            }
+            .into());
+        }
+        let interval = if cancel.is_some() {
+            remaining.min(Duration::from_millis(100))
+        } else {
+            remaining
+        };
+        if let Some(status) = child.wait_timeout(interval).map_err(|e| e.to_string())? {
+            break status;
         }
     };
     // ExifTool returns 1 for mixed batches and can omit failed files from JSON.
@@ -101,13 +124,16 @@ fn execute_output(mut command: Command, timeout: u64, metadata_batch: bool) -> R
 
 pub fn hash(path: &Path) -> Result<String> {
     let mut file = File::open(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-    hash_reader(&mut file)
+    hash_reader(&mut file, None)
 }
 
-fn hash_reader(file: &mut File) -> Result<String> {
+fn hash_reader(file: &mut File, cancel: Option<&Cancellation>) -> Result<String> {
     let mut digest = blake3::Hasher::new();
     let mut buffer = [0; 128 * 1024];
     loop {
+        if let Some(cancel) = cancel {
+            cancel.check()?;
+        }
         let count = file.read(&mut buffer).map_err(|e| e.to_string())?;
         if count == 0 {
             break;
@@ -119,13 +145,15 @@ fn hash_reader(file: &mut File) -> Result<String> {
 
 /// Reads and hashes a source file while tolerating one metadata shift caused by
 /// cloud-backed placeholders (OneDrive / iCloud FileProvider) hydrating on first read.
-pub fn hash_with_identity(path: &Path) -> Result<(String, String)> {
+pub fn hash_with_identity(path: &Path, cancel: &Cancellation) -> Result<(String, String)> {
     for attempt in 0..2 {
+        cancel.check()?;
         let before = identity(path)?;
         let mut file =
             File::open(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
         let opened = identity_from_metadata(&file.metadata().map_err(|e| e.to_string())?)?;
-        let hash = hash_reader(&mut file)?;
+        let hash = hash_reader(&mut file, Some(cancel))?;
+        cancel.check()?;
         let after = identity(path)?;
         if after == before && after == opened {
             return Ok((after, hash));
@@ -135,7 +163,7 @@ pub fn hash_with_identity(path: &Path) -> Result<(String, String)> {
         if attempt == 0 && after == opened {
             let mut verify =
                 File::open(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-            let verify_hash = hash_reader(&mut verify)?;
+            let verify_hash = hash_reader(&mut verify, Some(cancel))?;
             let settled = identity(path)?;
             if settled == after && verify_hash == hash {
                 return Ok((settled, hash));
@@ -438,23 +466,19 @@ fn read_image<R: BufRead + Seek>(reader: ImageReader<R>) -> Result<DynamicImage>
         .map_err(|e| format!("Cannot decode image: {e}"))
 }
 
-pub fn decode(
+fn decode_raw(
     app: &tauri::AppHandle,
     path: &Path,
-    kind: &str,
-    metadata: &serde_json::Value,
+    half_size: bool,
+    cancel: Option<&Cancellation>,
 ) -> Result<DynamicImage> {
-    decode_sized(app, path, kind, metadata, 2200)
-}
-
-fn decode_raw(app: &tauri::AppHandle, path: &Path, half_size: bool) -> Result<DynamicImage> {
     let mut command = Command::new(tool(app, "dcraw_emu")?);
     command.arg("-w");
     if half_size {
         command.arg("-h");
     }
     command.args(["-T", "-Z", "-"]).arg(path);
-    let bytes = execute(command, 180)?;
+    let bytes = execute_output(command, 180, false, cancel)?;
     read_image(ImageReader::new(Cursor::new(bytes)))
 }
 
@@ -464,6 +488,17 @@ pub fn decode_sized(
     kind: &str,
     metadata: &serde_json::Value,
     min_side: u32,
+) -> Result<DynamicImage> {
+    decode_sized_with_cancel(app, path, kind, metadata, min_side, None)
+}
+
+fn decode_sized_with_cancel(
+    app: &tauri::AppHandle,
+    path: &Path,
+    kind: &str,
+    metadata: &serde_json::Value,
+    min_side: u32,
+    cancel: Option<&Cancellation>,
 ) -> Result<DynamicImage> {
     let image = match kind {
         "photo" => {
@@ -476,13 +511,13 @@ pub fn decode_sized(
                 reader(path)?
             }
         }
-        "raw" => return decode_raw(app, path, min_side <= 1000),
+        "raw" => return decode_raw(app, path, min_side <= 1000, cancel),
         "heic" => {
             let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
             let output = directory.path().join("decoded.jpg");
             let mut command = Command::new(tool(app, "heif-convert")?);
             command.arg(path).arg(&output);
-            execute(command, 120)?;
+            execute_output(command, 120, false, cancel)?;
             if output.is_file() {
                 return reader(&output);
             }
@@ -510,7 +545,10 @@ pub fn decode_sized(
                 .arg(path)
                 .args(["-frames:v", "1", "-vf", "scale=960:-2", "-y"])
                 .arg(&output);
-            let _ = execute(seeked, 120);
+            let _ = execute_output(seeked, 120, false, cancel);
+            if let Some(cancel) = cancel {
+                cancel.check()?;
+            }
             if !output.is_file() {
                 let mut fallback = Command::new(ffmpeg);
                 fallback
@@ -518,7 +556,7 @@ pub fn decode_sized(
                     .arg(path)
                     .args(["-frames:v", "1", "-vf", "scale=960:-2", "-y"])
                     .arg(&output);
-                execute(fallback, 120)?;
+                execute_output(fallback, 120, false, cancel)?;
             }
             return reader(&output);
         }
@@ -624,13 +662,18 @@ fn shrink(image: DynamicImage) -> DynamicImage {
     image.thumbnail_exact(nw, nh)
 }
 
-pub fn preview(
+pub fn preview_for_import(
     app: &tauri::AppHandle,
     path: &Path,
     kind: &str,
     metadata: &serde_json::Value,
+    cancel: &Cancellation,
 ) -> Result<Preview> {
-    preview_input(app, path, kind, metadata, None)
+    if kind == "photo" {
+        cancel.source_io(|| preview_input(app, path, kind, metadata, None, Some(cancel)))
+    } else {
+        preview_input(app, path, kind, metadata, None, Some(cancel))
+    }
 }
 
 fn preview_input(
@@ -639,7 +682,11 @@ fn preview_input(
     kind: &str,
     metadata: &serde_json::Value,
     bytes: Option<&[u8]>,
+    cancel: Option<&Cancellation>,
 ) -> Result<Preview> {
+    if let Some(cancel) = cancel {
+        cancel.check()?;
+    }
     let jpeg = path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg"));
@@ -652,6 +699,9 @@ fn preview_input(
     } else {
         None
     };
+    if let Some(cancel) = cancel {
+        cancel.check()?;
+    }
     let (mut image, mut width, mut height) = match (fast, kind) {
         (Some(fast), _) => fast,
         (None, "photo") => {
@@ -664,13 +714,13 @@ fn preview_input(
         }
         (None, "raw") => {
             // Half-size mode skips demosaicing; it is plenty for a 512px comparison.
-            let image = decode_raw(app, path, true)?;
+            let image = decode_raw(app, path, true, cancel)?;
             let (w, h) = image.dimensions();
             (image, w * 2, h * 2)
         }
         // HEIC and video decoders already apply their own rotation.
         (None, _) => {
-            let image = decode(app, path, kind, metadata)?;
+            let image = decode_sized_with_cancel(app, path, kind, metadata, 2200, cancel)?;
             let (w, h) = image.dimensions();
             (shrink(image), w, h)
         }
@@ -782,6 +832,7 @@ fn normalize_source_key(text: &str) -> String {
 pub fn metadata_batch(
     app: &tauri::AppHandle,
     paths: &[PathBuf],
+    cancel: &Cancellation,
 ) -> Result<std::collections::HashMap<PathBuf, serde_json::Value>> {
     if paths.is_empty() {
         return Ok(std::collections::HashMap::new());
@@ -820,8 +871,9 @@ pub fn metadata_batch(
         "--",
     ]);
     command.args(paths);
-    let rows: Vec<serde_json::Value> = serde_json::from_slice(&execute_output(command, 180, true)?)
-        .map_err(|e| format!("Invalid metadata batch response: {e}"))?;
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_slice(&execute_output(command, 180, true, Some(cancel))?)
+            .map_err(|e| format!("Invalid metadata batch response: {e}"))?;
     let mut result = std::collections::HashMap::with_capacity(rows.len());
     for row in rows {
         let source = value(&row, "SourceFile")
@@ -901,11 +953,18 @@ pub fn inspect(
     path: &Path,
     mut media: Media,
     bytes: Option<&[u8]>,
+    cancel: Option<&Cancellation>,
 ) -> (Media, Option<Preview>) {
     let preview = if media.kind == "sidecar" {
         None
     } else {
-        match preview_input(app, path, &media.kind, &media.metadata, bytes) {
+        let result = match (bytes, cancel) {
+            (None, Some(cancel)) => {
+                preview_for_import(app, path, &media.kind, &media.metadata, cancel)
+            }
+            _ => preview_input(app, path, &media.kind, &media.metadata, bytes, cancel),
+        };
+        match result {
             Ok(preview) => {
                 if media.kind != "video" {
                     (media.width, media.height) = (preview.width, preview.height);
@@ -1032,8 +1091,14 @@ pub fn visually_similar(left: &Preview, right: &Preview) -> bool {
         || (corr >= 0.88 && avg_mse <= 900.0 && close_tiles >= 32)
 }
 
-pub fn video_equivalent(app: &tauri::AppHandle, left: &Path, right: &Path) -> Result<bool> {
-    fn probe(app: &tauri::AppHandle, path: &Path) -> Result<serde_json::Value> {
+pub fn video_equivalent(
+    app: &tauri::AppHandle,
+    left: &Path,
+    right: &Path,
+    cancel: &Cancellation,
+) -> Result<bool> {
+    let cancel = Some(cancel);
+    let probe = |path: &Path| -> Result<serde_json::Value> {
         let mut command = Command::new(tool(app, "ffprobe")?);
         command
             .args([
@@ -1046,10 +1111,11 @@ pub fn video_equivalent(app: &tauri::AppHandle, left: &Path, right: &Path) -> Re
                 "json",
             ])
             .arg(path);
-        serde_json::from_slice(&execute(command, 60)?).map_err(|e| e.to_string())
-    }
-    let a = probe(app, left)?;
-    let b = probe(app, right)?;
+        serde_json::from_slice(&execute_output(command, 60, false, cancel)?)
+            .map_err(|e| e.to_string())
+    };
+    let a = probe(left)?;
+    let b = probe(right)?;
     let streams = |v: &serde_json::Value| v["streams"].as_array().cloned().unwrap_or_default();
     let sa = streams(&a);
     let sb = streams(&b);
@@ -1118,7 +1184,7 @@ pub fn video_equivalent(app: &tauri::AppHandle, left: &Path, right: &Path) -> Re
                             "sha256",
                             "-",
                         ]);
-                    execute(command, 3600)
+                    execute_output(command, 3600, false, cancel)
                 };
                 let index = a["index"].as_u64().ok_or("Missing audio stream index.")? as usize;
                 if audio_hash(left, index)? != audio_hash(right, index)? {
@@ -1142,7 +1208,7 @@ pub fn video_equivalent(app: &tauri::AppHandle, left: &Path, right: &Path) -> Re
         .args(["-filter_complex",
             &format!("[0:v]scale=640:360:flags=area,setpts=PTS-STARTPTS[a];[1:v]scale=640:360:flags=area,setpts=PTS-STARTPTS[b];[a][b]ssim=stats_file='{stats_filter}':shortest=1"),
             "-an", "-f", "null", "-"]);
-    execute(command, 3600)?;
+    execute_output(command, 3600, false, cancel)?;
     let content = fs::read_to_string(stats).map_err(|e| e.to_string())?;
     let mut count = 0;
     for line in content.lines() {

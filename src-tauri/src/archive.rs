@@ -1,4 +1,4 @@
-use crate::{media, model::*, paths};
+use crate::{cancel::Cancellation, media, model::*, paths};
 use fs2::FileExt;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -348,8 +348,21 @@ fn parse<T: serde::de::DeserializeOwned>(value: &str) -> Result<T> {
 }
 
 fn copy_new(source: &Path, destination: &Path, expected: &str) -> Result<()> {
+    copy_new_with_cancel(source, destination, expected, None)
+}
+
+fn copy_new_with_cancel(
+    source: &Path,
+    destination: &Path,
+    expected: &str,
+    cancel: Option<&Cancellation>,
+) -> Result<()> {
     use std::io::Read;
-    let mut input = File::open(source).map_err(|e| e.to_string())?;
+    let open = || File::open(source).map_err(|e| e.to_string());
+    let mut input = match cancel {
+        Some(cancel) => cancel.source_io(open)?,
+        None => open()?,
+    };
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -362,8 +375,11 @@ fn copy_new(source: &Path, destination: &Path, expected: &str) -> Result<()> {
         })?;
     let mut digest = blake3::Hasher::new();
     let mut buffer = [0u8; 128 * 1024];
-    let copied: Result<String> = (|| {
+    let mut stream = || {
         loop {
+            if let Some(cancel) = cancel {
+                cancel.check()?;
+            }
             let count = input
                 .read(&mut buffer)
                 .map_err(|e| format!("Copy failed: {e}"))?;
@@ -375,22 +391,31 @@ fn copy_new(source: &Path, destination: &Path, expected: &str) -> Result<()> {
                 .map_err(|e| format!("Copy failed: {e}"))?;
             digest.update(&buffer[..count]);
         }
+        Ok(())
+    };
+    let copied = match cancel {
+        Some(cancel) => cancel.source_io(stream),
+        None => stream(),
+    }
+    .and_then(|()| {
+        if let Some(cancel) = cancel {
+            cancel.check()?;
+        }
         output
             .sync_all()
             .map_err(|e| format!("Could not flush copied file: {e}"))?;
         Ok(digest.finalize().to_hex().to_string())
-    })();
-    match copied {
-        Ok(actual) if actual == expected => Ok(()),
-        Ok(_) => {
-            let _ = fs::remove_file(destination);
-            Err("Copied bytes failed verification; the source is untouched.".into())
-        }
-        Err(error) => {
-            let _ = fs::remove_file(destination);
-            Err(error)
-        }
-    }
+    });
+    drop(output);
+    let error = match copied {
+        Ok(actual) if actual == expected => return Ok(()),
+        Ok(_) => "Copied bytes failed verification; the source is untouched.".into(),
+        Err(error) => error,
+    };
+    fs::remove_file(destination).map_err(|cleanup| {
+        format!("{error} Could not remove incomplete copy {}: {cleanup}", destination.display())
+    })?;
+    Err(error)
 }
 
 impl Archive {
@@ -1273,8 +1298,9 @@ impl Archive {
         item: Item,
         occurrence: Occurrence,
         job: &str,
+        cancel: &Cancellation,
     ) -> Result<()> {
-        self.place_with_job(source, item, Some(occurrence), None, Some(job.into()))
+        self.place_with_job(source, item, Some(occurrence), None, Some((job, cancel)))
     }
 
     fn place_with_job(
@@ -1283,18 +1309,27 @@ impl Archive {
         item: Item,
         occurrence: Option<Occurrence>,
         old_path: Option<String>,
-        import_job: Option<String>,
+        import: Option<(&str, &Cancellation)>,
     ) -> Result<()> {
         self.check()?;
         let stage_relative = format!(".singulo/staging/{}", Uuid::new_v4());
         let stage = paths::inside(&self.root, Path::new(&stage_relative))?;
-        copy_new(source, &stage, &item.media.hash)?;
+        let cancel = import.map(|(_, cancel)| cancel);
+        copy_new_with_cancel(source, &stage, &item.media.hash, cancel)?;
+        if let Some(cancel) = cancel
+            && let Err(error) = cancel.check()
+        {
+            fs::remove_file(&stage)
+                .map_err(|e| format!("Could not remove cancelled staging copy: {e}"))?;
+            return Err(error);
+        }
+        // Once journalled, finish placement even if cancellation arrives.
         let operation = Operation {
             item,
             occurrence,
             stage: stage_relative,
             old_path,
-            import_job,
+            import_job: import.map(|(job, _)| job.into()),
         };
         let id = Uuid::new_v4().to_string();
         self.connection

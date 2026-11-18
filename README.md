@@ -56,7 +56,7 @@ After cleanup the archive may be your only copy. Keep another backup, especially
 
 ### Interruptions and recovery
 
-Pause/cancel imports on the **Import & archive** page (the sidebar progress links there). Retry saved folders after a failure; exact copies are recognized again. Disk disconnection is reported, never replaced by a new archive elsewhere.
+Pause/cancel imports on the **Import & archive** page (the sidebar progress links there). Cancel stops the active import and cancels queued imports. On Windows, Singulo asks Windows to interrupt pending reads, including reads of cloud-only OneDrive files. The app shows **Cancelling import…** while it waits for the current operation to stop safely. Verified copies already saved to the archive are kept, and source files are never changed. Retry saved folders after a failure; exact copies are recognized again. Disk disconnection is reported, never replaced by a new archive elsewhere.
 
 While an import is active, a status panel explains why comparisons, source cleanup and archive changes are temporarily unavailable: they could conflict with files still being added or matched. Disabled controls include an explanation on hover. You can still browse photos, switch tabs and queue more folders. Pausing an import keeps these restrictions in place; resume it to finish, or cancel it. Scanning shows activity without a misleading percentage.
 
@@ -204,8 +204,14 @@ cd "$(cygpath -u 'C:\code\singulo')"
 
 npm run fetch:media
 npm run prepare:media -- ./media-tools
-npm run tauri -- build
+npm run tauri -- build --no-bundle
 ```
+If you want to build windows installers:
+
+```
+npm run tauri -- build 
+```
+
 
 The first command can take several minutes and a few GB of working space. Downloads are cached in the ignored `.media-build/` directory. Successful temporary builds are cleaned up; failed builds are retained there with their path printed for diagnosis. The completed input bundle goes into ignored `media-tools/`, with matching source archives, upstream notices and the build recipe under `licenses/`. An existing output directory is never overwritten; to rebuild, choose a fresh path with `npm run fetch:media -- /path/to/new-media-tools`, then pass that same path to `prepare:media`.
 
@@ -251,4 +257,3 @@ npm run tauri -- build
 Preparation copies the checked tools into the ignored `src-tauri/resources/tools/` build-resource directory, verifies required executables and FFmpeg configuration, relocates non-system macOS libraries, copies license material, and generates a bundle manifest. Keep the original bundle inputs and their license/source material for future builds. Windows inputs must already include all DLLs/runtime files. Smoke-test each packaged app on a clean target without Homebrew or other media tools installed; preparation is not a substitute for that.
 
 Signing/notarization requires your own certificates/accounts. Unsigned local builds are not notarized. Bundled codecs increase package size; measure the actual installer.
-

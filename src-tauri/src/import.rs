@@ -1,4 +1,10 @@
-use crate::{archive::Archive, media, model::*, paths};
+use crate::{
+    archive::Archive,
+    cancel::{CANCELLED, Cancellation},
+    media,
+    model::*,
+    paths,
+};
 use std::{
     collections::{HashMap, VecDeque},
     fs::File,
@@ -42,33 +48,60 @@ impl PreviewCache {
     }
 }
 
-fn buffer_source(path: &Path, size: u64, identity: &str) -> Result<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(size as usize + 1);
-    File::open(path)
-        .map_err(|e| e.to_string())?
-        .take(size + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() as u64 != size || media::identity(path)? != identity {
-        return Err("Source changed while buffering; retry it.".into());
-    }
-    Ok(bytes)
+fn buffer_source(path: &Path, size: u64, identity: &str, cancel: &Cancellation) -> Result<Vec<u8>> {
+    cancel.source_io(|| {
+        let mut bytes = Vec::with_capacity(size as usize + 1);
+        let mut input = File::open(path).map_err(|e| e.to_string())?.take(size + 1);
+        let mut buffer = [0; 128 * 1024];
+        loop {
+            cancel.check()?;
+            let count = input.read(&mut buffer).map_err(|e| e.to_string())?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+        if bytes.len() as u64 != size || media::identity(path)? != identity {
+            return Err("Source changed while buffering; retry it.".into());
+        }
+        Ok(bytes)
+    })
 }
 
 pub fn update(app: &tauri::AppHandle, progress: &Progress) -> Result<()> {
     let state = app.state::<AppState>();
     let mut previous = state.progress.lock().map_err(|e| e.to_string())?;
     let mut updated = state.progress_updated.lock().map_err(|e| e.to_string())?;
+    let status = if state.cancel.requested() && active_status(&progress.status) {
+        "cancelling"
+    } else {
+        &progress.status
+    };
     if previous.job_id == progress.job_id
-        && previous.status == progress.status
+        && previous.status == status
         && previous.phase == progress.phase
         && updated.elapsed() < Duration::from_millis(250)
     {
         return Ok(());
     }
     *previous = progress.clone();
+    if status == "cancelling" {
+        mark_cancelling(&mut previous);
+    }
     *updated = Instant::now();
-    app.emit("progress", progress).map_err(|e| e.to_string())
+    app.emit("progress", &*previous).map_err(|e| e.to_string())
+}
+
+fn active_status(status: &str) -> bool {
+    matches!(status, "scanning" | "importing" | "paused")
+}
+
+pub fn mark_cancelling(progress: &mut Progress) -> bool {
+    if !active_status(&progress.status) {
+        return false;
+    }
+    progress.status = "cancelling".into();
+    true
 }
 
 pub fn sync_xmp(state: &AppState) -> Result<Vec<String>> {
@@ -148,7 +181,14 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         ..Progress::default()
     };
     update(app, &progress)?;
-    let roots = validate_roots(&job.roots, &archive_root)?;
+    let roots = match state
+        .cancel
+        .source_io(|| validate_roots(&job.roots, &archive_root))
+    {
+        Ok(roots) => roots,
+        Err(_) if state.cancel.requested() => Vec::new(),
+        Err(error) => return Err(error),
+    };
     progress.folders = roots
         .iter()
         .map(|root| FolderProgress {
@@ -158,39 +198,48 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         .collect();
     let mut files = Vec::new();
     for (index, root) in roots.iter().enumerate() {
-        if state.cancel.load(Ordering::Relaxed) {
+        if state.cancel.requested() {
             break;
         }
-        for entry in WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| {
-                e.file_name() != ".singulo"
-                    && !e
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(".singulo-cleanup-")
-            })
-        {
-            if state.cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            match entry {
-                Ok(entry) if entry.file_type().is_file() && media::kind(entry.path()).is_some() => {
-                    progress.current = entry.path().to_string_lossy().into();
-                    files.push((root.clone(), entry.into_path()));
-                    progress.folders[index].discovered += 1;
+        let scan = state.cancel.source_io(|| {
+            for entry in WalkDir::new(root)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| {
+                    e.file_name() != ".singulo"
+                        && !e
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".singulo-cleanup-")
+                })
+            {
+                if state.cancel.requested() {
+                    break;
                 }
-                Ok(entry) => progress.current = entry.path().to_string_lossy().into(),
-                Err(error) => {
-                    progress.folders[index].scan_errors += 1;
-                    progress.errors.push(format!("Folder scan: {error}"));
+                match entry {
+                    Ok(entry)
+                        if entry.file_type().is_file() && media::kind(entry.path()).is_some() =>
+                    {
+                        progress.current = entry.path().to_string_lossy().into();
+                        files.push((root.clone(), entry.into_path()));
+                        progress.folders[index].discovered += 1;
+                    }
+                    Ok(entry) => progress.current = entry.path().to_string_lossy().into(),
+                    Err(error) => {
+                        progress.folders[index].scan_errors += 1;
+                        progress.errors.push(format!("Folder scan: {error}"));
+                    }
                 }
+                progress.timings.total_ms = started.elapsed().as_millis() as u64;
+                update(app, &progress)?;
             }
-            progress.timings.total_ms = started.elapsed().as_millis() as u64;
-            update(app, &progress)?;
+            Ok(())
+        });
+        if state.cancel.requested() {
+            break;
         }
-        progress.folders[index].scan_complete = !state.cancel.load(Ordering::Relaxed);
+        scan?;
+        progress.folders[index].scan_complete = true;
     }
     // Import image companions before XMP so sidecars can inherit their owner's date/path.
     files.sort_by_key(|(_, path)| media::kind(path) == Some("sidecar"));
@@ -218,14 +267,15 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                     };
                     let Ok(task) = task else { break };
                     let decoding = Instant::now();
-                    let result = if shared.cancel.load(Ordering::Relaxed) {
-                        Err("Import cancelled.".into())
+                    let result = if shared.cancel.requested() {
+                        Err(CANCELLED.into())
                     } else {
                         Ok(media::inspect(
                             app,
                             &task.path,
                             task.media,
                             Some(&task.bytes),
+                            None,
                         ))
                     };
                     if done_tx
@@ -260,11 +310,14 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         };
         // Show the first results promptly, then amortize metadata startup across larger batches.
         let first_batch = files.len().min(4);
-        for batch in files[..first_batch]
+        'batches: for batch in files[..first_batch]
             .chunks(4)
             .chain(files[first_batch..].chunks(64))
         {
-            if shared.cancel.load(Ordering::Relaxed) {
+            if shared.cancel.requested() {
+                break 'batches;
+            }
+            if shared.cancel.requested() {
                 break;
             }
             enum Prepped<'b> {
@@ -275,16 +328,15 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
             let mut metadata_paths = Vec::new();
             let mut exact_occurrences = Vec::new();
             for (root, path) in batch {
-                if shared.cancel.load(Ordering::Relaxed) {
+                if shared.cancel.requested() {
                     break;
                 }
-                while shared.pause.load(Ordering::Relaxed) && !shared.cancel.load(Ordering::Relaxed)
-                {
+                while shared.pause.load(Ordering::Relaxed) && !shared.cancel.requested() {
                     progress.status = "paused".into();
                     update(app, &progress)?;
                     std::thread::sleep(Duration::from_millis(200));
                 }
-                if shared.cancel.load(Ordering::Relaxed) {
+                if shared.cancel.requested() {
                     break;
                 }
                 progress.status = "importing".into();
@@ -294,11 +346,14 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                 update(app, &progress)?;
                 let hashing = Instant::now();
                 let checked: Result<Option<(String, String)>> = (|| {
-                    let (identity, hash) = media::hash_with_identity(path)?;
+                    let (identity, hash) = shared
+                        .cancel
+                        .source_io(|| media::hash_with_identity(path, &shared.cancel))?;
+                    shared.cancel.check()?;
                     let guard = shared.archive.lock().map_err(|e| e.to_string())?;
                     let archive = guard.as_ref().ok_or("Archive is not open.")?;
                     if let Some(exact) = archive.exact_cached(&hash)? {
-                        if media::identity(path)? != identity {
+                        if shared.cancel.source_io(|| media::identity(path))? != identity {
                             return Err(
                                 "Source changed before duplicate confirmation; retry it.".into()
                             );
@@ -342,7 +397,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                     &mut candidate_cache,
                 )?;
             }
-            if shared.cancel.load(Ordering::Relaxed) {
+            if shared.cancel.requested() {
                 break;
             }
             if !exact_occurrences.is_empty() {
@@ -374,11 +429,11 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                 progress.current.clear();
                 progress.timings.total_ms = started.elapsed().as_millis() as u64;
                 update(app, &progress)?;
-                media::metadata_batch(app, &metadata_paths)
+                media::metadata_batch(app, &metadata_paths, &shared.cancel)
             };
             progress.timings.metadata_ms += extracting.elapsed().as_millis() as u64;
             for item in prepped {
-                if shared.cancel.load(Ordering::Relaxed) {
+                if shared.cancel.requested() {
                     break;
                 }
                 let entry = match item {
@@ -400,7 +455,13 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                         progress.current = path.to_string_lossy().into();
                         progress.timings.total_ms = started.elapsed().as_millis() as u64;
                         update(app, &progress)?;
-                        if media::identity(path).ok().as_ref() != Some(&identity) {
+                        if shared
+                            .cancel
+                            .source_io(|| media::identity(path))
+                            .ok()
+                            .as_ref()
+                            != Some(&identity)
+                        {
                             Entry {
                                 root,
                                 path,
@@ -423,7 +484,9 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                                     Err(error) => Err(error.clone()),
                                 }
                             };
-                            let prepared = media::prepare_inspection(path, hash, row);
+                            let prepared = shared
+                                .cancel
+                                .source_io(|| media::prepare_inspection(path, hash, row));
                             let mut buffered_bytes = 0;
                             let mut decode_ms = 0;
                             let stage = match prepared {
@@ -451,7 +514,8 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                                         )?;
                                     }
                                     let reading = Instant::now();
-                                    let bytes = buffer_source(path, media.bytes, &identity);
+                                    let bytes =
+                                        buffer_source(path, media.bytes, &identity, &shared.cancel);
                                     progress.timings.buffer_ms +=
                                         reading.elapsed().as_millis() as u64;
                                     match bytes {
@@ -476,7 +540,13 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                                 Ok(media) => {
                                     // External decoders and large images stay on the I/O coordinator.
                                     let decoding = Instant::now();
-                                    let result = media::inspect(app, path, media, None);
+                                    let result = media::inspect(
+                                        app,
+                                        path,
+                                        media,
+                                        None,
+                                        Some(&shared.cancel),
+                                    );
                                     decode_ms = decoding.elapsed().as_millis() as u64;
                                     Stage::Inspected(Box::new(Ok(result)))
                                 }
@@ -507,7 +577,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                         &mut checkpoint,
                         &mut candidate_cache,
                     )?;
-                    if queue.len() < workers * 4 || shared.cancel.load(Ordering::Relaxed) {
+                    if queue.len() < workers * 4 || shared.cancel.requested() {
                         break;
                     }
                     let done = receive_waiting(&queue, &mut progress)?;
@@ -516,7 +586,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
             }
         }
         drop(task_tx);
-        while !queue.is_empty() && !shared.cancel.load(Ordering::Relaxed) {
+        while !queue.is_empty() && !shared.cancel.requested() {
             let done = receive_waiting(&queue, &mut progress)?;
             receive(&mut queue, base, done);
             commit_ready(
@@ -538,14 +608,6 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
     sync_xmp_warnings(&state, &mut progress);
     progress.timings.total_ms = started.elapsed().as_millis() as u64;
     progress.current.clear();
-    progress.status = if state.cancel.load(Ordering::Relaxed) {
-        "cancelled"
-    } else if progress.errors.is_empty() {
-        "complete"
-    } else {
-        "complete with errors"
-    }
-    .into();
     {
         let mut guard = state.archive.lock().map_err(|e| e.to_string())?;
         let archive = guard.as_mut().ok_or("Archive is not open.")?;
@@ -554,10 +616,15 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
             progress
                 .errors
                 .push(format!("Catalog recovery backup failed: {error}"));
-            if progress.status == "complete" {
-                progress.status = "complete with errors".into();
-            }
         }
+        progress.status = if state.cancel.requested() {
+            "cancelled"
+        } else if progress.errors.is_empty() {
+            "complete"
+        } else {
+            "complete with errors"
+        }
+        .into();
         progress.timings.backup_ms = backing_up.elapsed().as_millis() as u64;
         progress.timings.total_ms = started.elapsed().as_millis() as u64;
         archive.save_job(&job.id, &serde_json::json!({"id":job.id, "roots":job.roots, "settings":job.settings, "progress":progress}))?;
@@ -601,9 +668,10 @@ fn commit_ready(
     candidate_cache: &mut PreviewCache,
 ) -> Result<()> {
     let state = app.state::<AppState>();
-    while queue
-        .front()
-        .is_some_and(|entry| !matches!(entry.stage, Stage::Inspecting))
+    while !state.cancel.requested()
+        && queue
+            .front()
+            .is_some_and(|entry| !matches!(entry.stage, Stage::Inspecting))
     {
         let entry = queue.pop_front().ok_or("Import queue is empty.")?;
         progress.phase = "saving".into();
@@ -627,10 +695,14 @@ fn commit_ready(
                     inspected,
                     candidate_cache,
                     &mut progress.timings,
+                    &state.cancel,
                 )
             }),
             Stage::Inspecting => unreachable!(),
         };
+        if matches!(&result, Err(error) if error == CANCELLED) {
+            break;
+        }
         if let Some(folder) = progress
             .folders
             .iter_mut()
@@ -707,7 +779,9 @@ fn import_one(
     (mut media, preview): (Media, Option<media::Preview>),
     candidate_cache: &mut PreviewCache,
     timings: &mut ImportTimings,
+    cancel: &Cancellation,
 ) -> Result<bool> {
+    cancel.check()?;
     archive.check()?;
     let album = root
         .file_name()
@@ -743,9 +817,10 @@ fn import_one(
         bytes: media.bytes,
     };
     if let Some(exact) = archive.exact_cached(&media.hash)? {
-        if media::identity(source)? != identity {
+        if cancel.source_io(|| media::identity(source))? != identity {
             return Err("Source changed before exact deduplication.".into());
         }
+        cancel.check()?;
         archive.record_import_occurrences(job_id, &[occurrence(exact.id)])?;
         return Ok(true);
     }
@@ -795,6 +870,7 @@ fn import_one(
     let mut matched: Option<(Item, bool)> = None;
     let mut review = Vec::new();
     for candidate in candidates {
+        cancel.check()?;
         if media.kind == "video" && !(settings.deep_video_matching && settings.automatic_matches) {
             review.push((candidate.id,
                 "Possible video match based on a preview or capture date and duration. Both originals are kept; compare before choosing.".into()));
@@ -834,13 +910,18 @@ fn import_one(
             if let Some(cached) = candidate_cache.get(&candidate.id) {
                 return Ok(cached);
             }
-            let decoded =
-                media::preview(app, path, &candidate.media.kind, &candidate.media.metadata)?;
+            let decoded = media::preview_for_import(
+                app,
+                path,
+                &candidate.media.kind,
+                &candidate.media.metadata,
+                cancel,
+            )?;
             Ok(candidate_cache.insert(candidate.id.clone(), decoded))
         };
         let (equivalent, plausible): (bool, bool) = if media.kind == "video" {
             let eq = if auto {
-                match media::video_equivalent(app, source, &path) {
+                match media::video_equivalent(app, source, &path, cancel) {
                     Ok(eq) => eq,
                     Err(error) => {
                         media.warnings.push(format!(
@@ -911,7 +992,7 @@ fn import_one(
     {
         return Err("Destination needs more free space for verified staging and undo.".into());
     }
-    if media::identity(source)? != identity {
+    if cancel.source_io(|| media::identity(source))? != identity {
         return Err("Source changed before copying.".into());
     }
     let mut item = Item {
@@ -931,7 +1012,7 @@ fn import_one(
         item.media.warnings.push("Automatically grouped after full-frame equivalence checks; the higher-resolution copy is active. Original bytes remain in archive undo.".into());
     }
     let placing = Instant::now();
-    archive.place_import(source, item, occurrence(id.clone()), job_id)?;
+    archive.place_import(source, item, occurrence(id.clone()), job_id, cancel)?;
     if !is_lower && let Some(p) = preview {
         candidate_cache.insert(id.clone(), p);
     }

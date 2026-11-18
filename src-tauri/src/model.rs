@@ -191,7 +191,7 @@ pub struct AppState {
     pub progress_updated: Mutex<std::time::Instant>,
     pub busy: AtomicBool,
     pub importing: AtomicBool,
-    pub cancel: AtomicBool,
+    pub cancel: crate::cancel::Cancellation,
     pub pause: AtomicBool,
     pub queue: Mutex<std::collections::VecDeque<QueuedJob>>,
 }
@@ -210,7 +210,7 @@ impl Default for AppState {
             progress_updated: Mutex::new(std::time::Instant::now()),
             busy: AtomicBool::new(false),
             importing: AtomicBool::new(false),
-            cancel: AtomicBool::new(false),
+            cancel: crate::cancel::Cancellation::default(),
             pause: AtomicBool::new(false),
             queue: Mutex::new(std::collections::VecDeque::new()),
         }
