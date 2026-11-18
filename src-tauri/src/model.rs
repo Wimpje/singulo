@@ -63,6 +63,12 @@ pub struct Progress {
     pub job_id: Option<String>,
     pub status: String,
     pub current: String,
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub checked: usize,
+    #[serde(default)]
+    pub batch_files: usize,
     pub done: usize,
     pub total: usize,
     pub copied: usize,
@@ -109,6 +115,9 @@ impl Default for Progress {
             job_id: None,
             status: "idle".into(),
             current: String::new(),
+            phase: String::new(),
+            checked: 0,
+            batch_files: 0,
             done: 0,
             total: 0,
             copied: 0,

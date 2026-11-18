@@ -5,7 +5,6 @@ use crate::{media, model::*, paths};
 use roxmltree::{Document, Node};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
@@ -107,7 +106,7 @@ fn primary_description(node: Node<'_, '_>) -> bool {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+    blake3::hash(bytes).to_hex().to_string()
 }
 
 fn document(text: &str) -> Result<Document<'_>> {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { isTauri, convertFileSrc } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -82,11 +82,38 @@
   let detailSeq = 0;
   let mutating = false;
   let moreRequest: Promise<void> | null = null;
+  let jobsRequest = 0;
+  let progressClock = $state(Date.now());
+  let progressStartedAt = $state(Date.now());
   const importing = $derived(["scanning", "importing", "paused"].includes(snapshot.progress.status));
+  const progressKey = $derived(importing ? snapshot.progress.jobId ?? "active" : null);
   const busy = $derived(working || importing || cleanupLoading || clearLoading);
   const hasArchive = $derived(!!snapshot.root);
   const percent = $derived(snapshot.progress.total ? Math.round(snapshot.progress.done / snapshot.progress.total * 100) : 0);
-  const determinate = $derived(snapshot.progress.status !== "scanning" && snapshot.progress.total > 0);
+  const determinate = $derived(snapshot.progress.status !== "scanning" && snapshot.progress.total > 0 && (!importing || snapshot.progress.done > 0));
+  const elapsedMs = $derived(importing ? Math.max(snapshot.progress.timings?.totalMs ?? 0, progressClock - progressStartedAt) : snapshot.progress.timings?.totalMs ?? 0);
+  const queuedJobs = $derived(jobs.filter((job) => job.queued && job.id !== snapshot.progress.jobId).reverse());
+  const phaseTitle = $derived.by(() => {
+    if (snapshot.progress.status === "paused") return t("Import paused");
+    if (snapshot.progress.status === "scanning") return t("Finding photos and videos...");
+    switch (snapshot.progress.phase) {
+      case "hashing": return t("Reading originals and checking exact copies...");
+      case "metadata": return t("Reading dates and camera details...");
+      case "raw": return t("Developing a RAW comparison preview...");
+      case "decoding": return t("Preparing photo and video previews...");
+      case "saving": return t("Comparing and safely saving files...");
+      case "finalizing": return t("Finishing sidecars and the recovery backup...");
+      default: return t("Preparing your import...");
+    }
+  });
+  const phaseDetail = $derived.by(() => {
+    if (snapshot.progress.status === "paused") return t("Resume or cancel the import to make these actions available again.");
+    if (snapshot.progress.status === "scanning") return `${(snapshot.progress.folders ?? []).reduce((total, folder) => total + folder.discovered, 0).toLocaleString()} ${t("recognized media files found")}`;
+    if (snapshot.progress.phase === "hashing") return `${(snapshot.progress.checked ?? 0).toLocaleString()} / ${snapshot.progress.total.toLocaleString()} ${t("originals checked")}`;
+    if (snapshot.progress.phase === "metadata") return `${snapshot.progress.batchFiles ?? 0} ${t("files in this metadata batch")}`;
+    if (snapshot.progress.phase === "raw") return t("RAW files such as PEF need decoding before they can be compared. Your original stays unchanged.");
+    return "";
+  });
   const activityTitle = $derived(importing
     ? t(snapshot.progress.status === "scanning" ? "Scanning source folders..." : snapshot.progress.status === "paused" ? "Import paused" : "Importing photos and videos...")
     : cleanupLoading ? t("Checking source files...")
@@ -147,6 +174,15 @@
   });
 
   $effect(() => {
+    if (!progressKey) return;
+    const now = Date.now();
+    progressClock = now;
+    progressStartedAt = now - untrack(() => snapshot.progress.timings?.totalMs ?? 0);
+    const timer = setInterval(() => { progressClock = Date.now(); }, 1000);
+    return () => clearInterval(timer);
+  });
+
+  $effect(() => {
     document.body.style.overflow = selected && !comparing ? "hidden" : "";
   });
 
@@ -181,13 +217,14 @@
   function canRetry(job: Job, index: number) {
     const status = job.progress.status ?? "queued";
     if (status === "complete") return false;
-    if (importing && !["complete with errors", "cancelled", "failed"].includes(status)) return false;
+    if (job.queued || (importing && job.id === snapshot.progress.jobId)) return false;
     return !jobs.slice(0, index).some((newer) => newer.progress.status === "complete" && job.roots.every((root) => newer.roots.includes(root)));
   }
 
   function jobStatus(job: Job) {
     const status = job.progress.status ?? "queued";
-    return !importing && ["scanning", "importing", "paused", "queued"].includes(status) ? "interrupted" : status;
+    return !job.queued && (!importing || job.id !== snapshot.progress.jobId)
+      && ["scanning", "importing", "paused", "queued"].includes(status) ? "interrupted" : status;
   }
 
   function jobExplanation(job: Job) {
@@ -217,7 +254,7 @@
     snapshot = await api<Snapshot>("snapshot");
     if (snapshot.root) {
       if (mode === "main") {
-        [reviews, jobs] = await Promise.all([api<Review[]>("review_list"), api<Job[]>("job_history")]);
+        [reviews] = await Promise.all([api<Review[]>("review_list"), refreshJobs()]);
       }
       await loadLibrary(preservePages);
     } else {
@@ -229,6 +266,13 @@
       libraryLoading = false;
       searchSeq += 1;
     }
+  }
+
+  async function refreshJobs() {
+    const request = ++jobsRequest;
+    const root = snapshot.root;
+    const result = await api<Job[]>("job_history");
+    if (request === jobsRequest && root === snapshot.root) jobs = result;
   }
 
   async function mutate(action: () => Promise<void>) {
@@ -364,8 +408,8 @@
       const folders = paths ?? await open({ directory: true, multiple: true, title: t("Choose photo folders to copy") });
       if (!folders) return;
       const started = await api<boolean>("start_import", { roots: typeof folders === "string" ? [folders] : folders });
-      if (started) snapshot.progress = { ...snapshot.progress, status: "scanning", done: 0, total: 0, errors: [] };
       notice = started ? t("Folders added. Originals stay untouched during import.") : t("Folders queued after the current import.");
+      await refreshJobs();
     });
   }
 
@@ -833,6 +877,11 @@
       register(await listen<Progress>("progress", (event) => {
         snapshot.progress = event.payload;
       }));
+      if (mode === "main") {
+        register(await listen("imports-changed", () => {
+          void refreshJobs().catch((reason: unknown) => { error = message(reason); });
+        }));
+      }
       register(await listen("library-changed", () => {
         if (mutating) return;
         void refresh(true).catch((reason: unknown) => { error = message(reason); });
@@ -940,6 +989,7 @@
         <strong><span class="activity-indicator" class:paused={snapshot.progress.status === "paused"} aria-hidden="true"></span>{activityTitle}</strong>
         <p>{busyReason}</p>
         {#if importing}
+          {#if tab !== "import"}<p><strong>{phaseTitle}</strong> {phaseDetail}</p>{/if}
           <p>{t("You can still browse photos, switch tabs and queue more folders.")}</p>
           {#if snapshot.progress.status === "paused"}<p><strong>{t("Resume or cancel the import to make these actions available again.")}</strong></p>{/if}
         {/if}
@@ -1051,18 +1101,49 @@
           <small>{t("PHOTOS, RAW FILES & VIDEOS")} <span> / </span> {t("COPIED, NEVER MOVED DURING IMPORT")}</small>
         </button>
         {#if busy || snapshot.progress.total > 0}
-          <section class="progress-card"><div class="section-line"><strong>{busy ? activityTitle : t(snapshot.progress.status)}</strong>{#if determinate}<span>{snapshot.progress.done} / {snapshot.progress.total} {t("files")}</span>{/if}</div>{@render importProgress()}<p class="current-file">{snapshot.progress.current || `${snapshot.progress.copied} ${t("originals copied")} / ${snapshot.progress.duplicates} ${t("exact duplicates skipped")}`}</p>
+          <section class="progress-card"><div class="section-line"><strong>{busy ? activityTitle : t(snapshot.progress.status)}</strong>{#if determinate}<span>{percent}% · {snapshot.progress.done} / {snapshot.progress.total} {t("files")}</span>{/if}</div>{@render importProgress()}
+            {#if importing}
+              <div class="import-stage">
+                <strong>{phaseTitle}</strong>
+                {#if phaseDetail}<p>{phaseDetail}</p>{/if}
+                {#if snapshot.progress.done === 0 && snapshot.progress.status === "importing" && snapshot.progress.phase !== "finalizing"}<p>{t("Preparing the first files. The percentage starts when files have been processed.")}</p>{/if}
+                {#if snapshot.progress.status === "importing" && ["hashing", "metadata"].includes(snapshot.progress.phase ?? "")}<p>{t("Cloud-only originals may need to download first. External drives can also take longer to read.")}</p>{/if}
+              </div>
+            {/if}
+            {#if snapshot.progress.current}<p class="current-file">{snapshot.progress.current}</p>{/if}
+            <p class="muted">{snapshot.progress.copied} {t("originals copied")} / {snapshot.progress.duplicates} {t("exact duplicates skipped")} · {t("Total elapsed")}: {(elapsedMs / 1000).toFixed(0)} s</p>
             {#if snapshot.progress.timings}
               {@const timings = snapshot.progress.timings}
               <details class="advanced"><summary>{t("Import timings")}</summary>
                 <p>{t("scanning")}: {(timings.scanMs / 1000).toFixed(1)} s</p>
                 <p>{t("Reading and hashing")}: {(timings.hashMs / 1000).toFixed(1)} s / {t("Metadata")}: {(timings.metadataMs / 1000).toFixed(1)} s / {t("Buffering")}: {(timings.bufferMs / 1000).toFixed(1)} s</p>
                 <p>{t("Decoding (combined worker time)")}: {(timings.decodeMs / 1000).toFixed(1)} s / {t("Matching")}: {(timings.matchMs / 1000).toFixed(1)} s</p>
-                <p>{t("Copying and catalog writes")}: {(timings.placementMs / 1000).toFixed(1)} s / {t("Recovery backup")}: {(timings.backupMs / 1000).toFixed(1)} s / {t("Total elapsed")}: {(timings.totalMs / 1000).toFixed(1)} s</p>
+                <p>{t("Copying and catalog writes")}: {(timings.placementMs / 1000).toFixed(1)} s / {t("Recovery backup")}: {(timings.backupMs / 1000).toFixed(1)} s / {t("Total elapsed")}: {(elapsedMs / 1000).toFixed(1)} s</p>
                 <p>{t("Stage times overlap while decoding runs in parallel; hashing includes exact-match verification.")}</p>
               </details>
             {/if}
             {#if importing}<div class="button-row"><button class="secondary" onclick={() => run(async () => { await api("control_import", { action: snapshot.progress.status === "paused" ? "resume" : "pause" }); })}>{snapshot.progress.status === "paused" ? t("Resume") : t("Pause")}</button><button class="text-button" onclick={() => run(async () => { await api("control_import", { action: "cancel" }); })}>{t("Cancel import")}</button></div>{/if}
+          </section>
+        {/if}
+        {#if importing || queuedJobs.length}
+          <section class="history import-queue">
+            <h3>{t("Source folders and queue")}</h3>
+            {#if importing}
+              {#each snapshot.progress.folders ?? [] as folder (folder.root)}
+                <div class="import-folder">
+                  <strong>{t("Current import")}</strong><code>{folder.root}</code>
+                  <small>{folder.processed.toLocaleString()} {t("processed out of")} {folder.discovered.toLocaleString()} {t("recognized media files found")} · {t(folder.scanComplete ? "Scan complete" : "Scan not finished")}</small>
+                </div>
+              {/each}
+            {/if}
+            {#if queuedJobs.length}
+              <p class="muted">{t("Queued folders start after the current import. They have not been scanned yet.")}</p>
+              {#each queuedJobs as job (job.id)}
+                {#each job.roots as root}
+                  <div class="import-folder"><strong>{t("Queued — waiting to scan")}</strong><code>{root}</code></div>
+                {/each}
+              {/each}
+            {/if}
           </section>
         {/if}
         <div class="stats"><div class="stat"><small>{t("PICTURES AND VIDEOS")}</small><strong>{snapshot.activeCount.toLocaleString()}</strong><span>{t("in your archive")}</span></div><div class="stat"><small>{t("ARCHIVE SIZE")}</small><strong>{bytes(snapshot.activeBytes)}</strong><span>{t("verified original files")}</span></div><div class="stat"><small>{t("SPARE COPIES")}</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>{t("of removed duplicates")} / {bytes(snapshot.undoBytes)}</span></div></div>
@@ -1483,6 +1564,9 @@
     .activity-indicator, .progress-track.indeterminate:not(.paused) div { animation: none; }
   }
   .current-file { font-size: 10px; color: #8a9680; overflow-wrap: anywhere; margin-bottom: 0; }
+  .import-stage { font-size: 12px; line-height: 1.6; }
+  .import-stage p { margin: 5px 0; color: #788273; }
+  .import-queue code { overflow-wrap: anywhere; }
   .button-row { display: flex; align-items: center; gap: 10px; margin-top: 17px; flex-wrap: wrap; }
   .history { margin-top: 26px; }
   .history-row { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e1e5d9; padding: 13px 0; }

@@ -476,13 +476,18 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
             &serde_json::json!({"id":job.id,"roots":job.roots,"settings":job.settings,"tracksCopies":true,"progress":{"status":"queued"}}))?;
     }
     queue.push_back(job);
+    if started {
+        state.importing.store(true, Ordering::SeqCst);
+        state.cancel.store(false, Ordering::SeqCst);
+        state.pause.store(false, Ordering::Relaxed);
+    }
+    drop(queue);
+    if let Err(error) = app.emit("imports-changed", ()) {
+        eprintln!("Could not publish import queue update: {error}");
+    }
     if !started {
         return Ok(false);
     }
-    state.importing.store(true, Ordering::SeqCst);
-    state.cancel.store(false, Ordering::SeqCst);
-    state.pause.store(false, Ordering::Relaxed);
-    drop(queue);
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = handle.state::<AppState>();
@@ -566,6 +571,9 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
                     eprintln!("Could not publish import failure: {error}");
                 }
             }
+            if let Err(error) = handle.emit("imports-changed", ()) {
+                eprintln!("Could not publish import history update: {error}");
+            }
         }
         if let Err(error) = handle.emit("library-changed", ()) {
             eprintln!("Could not publish library update: {error}");
@@ -596,8 +604,21 @@ fn control_import(app: tauri::AppHandle, action: String) -> Result<()> {
 async fn job_history(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>> {
     read(app, |app| {
         let state = app.state::<AppState>();
+        let queued = state
+            .queue
+            .lock()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|job| job.id.clone())
+            .collect::<Vec<_>>();
         let archive = state.archive.lock().map_err(|e| e.to_string())?;
-        archive.as_ref().ok_or("Choose an archive first.")?.jobs()
+        let mut jobs = archive.as_ref().ok_or("Choose an archive first.")?.jobs()?;
+        for job in &mut jobs {
+            job["queued"] = serde_json::json!(
+                job["id"].as_str().is_some_and(|id| queued.iter().any(|queued| queued == id))
+            );
+        }
+        Ok(jobs)
     })
     .await
 }

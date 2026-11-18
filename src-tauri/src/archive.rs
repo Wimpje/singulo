@@ -348,7 +348,6 @@ fn parse<T: serde::de::DeserializeOwned>(value: &str) -> Result<T> {
 }
 
 fn copy_new(source: &Path, destination: &Path, expected: &str) -> Result<()> {
-    use sha2::{Digest, Sha256};
     use std::io::Read;
     let mut input = File::open(source).map_err(|e| e.to_string())?;
     let mut output = OpenOptions::new()
@@ -361,7 +360,7 @@ fn copy_new(source: &Path, destination: &Path, expected: &str) -> Result<()> {
                 destination.display()
             )
         })?;
-    let mut digest = Sha256::new();
+    let mut digest = blake3::Hasher::new();
     let mut buffer = [0u8; 128 * 1024];
     let copied: Result<String> = (|| {
         loop {
@@ -379,7 +378,7 @@ fn copy_new(source: &Path, destination: &Path, expected: &str) -> Result<()> {
         output
             .sync_all()
             .map_err(|e| format!("Could not flush copied file: {e}"))?;
-        Ok(hex::encode(digest.finalize()))
+        Ok(digest.finalize().to_hex().to_string())
     })();
     match copied {
         Ok(actual) if actual == expected => Ok(()),

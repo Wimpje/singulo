@@ -26,7 +26,7 @@ Optimize every change around three priorities, in order:
 ## Performance Guardrails
 
 - **Respect external & cloud-backed drives:** keep source reads, hashing, and archive writes sequential on the coordinator thread (`import.rs`) so spinning USB drives do not thrash; keep parallel worker threads strictly for CPU-bound decoding (`media.rs`). Tolerate one-time metadata hydration shifts on cloud placeholders (`OneDrive` / `iCloud` via `hash_with_identity`).
-- **Avoid redundant disk passes:** check exact SHA-256 matches before spawning `exiftool` or decoding images, hash bytes while streaming copies (`copy_new`), and use DCT-scaled JPEG / half-size RAW decodes for previews and thumbnails.
+- **Avoid redundant disk passes:** check exact BLAKE3 matches before spawning `exiftool` or decoding images, hash bytes while streaming copies (`copy_new`), and use DCT-scaled JPEG / half-size RAW decodes for previews and thumbnails.
 - **Scale SQLite to 100k+ items:** keep `journal_mode=WAL`, query via indexed columns/expressions rather than loading full tables (`items` or `occurrences`) into memory, and maintain counts via the `totals` triggers.
 - **Keep IPC lean:** serve thumbnails and video proxies from `.photo-dedupe/` via Tauri's `asset:` protocol (`convertFileSrc`) rather than base64 strings. Use read-only helpers (`read` / `inspect_exclusive`) for previews and queries so `"library-changed"` is only emitted when catalog state actually mutates.
 

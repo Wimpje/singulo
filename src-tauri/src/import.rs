@@ -59,7 +59,11 @@ pub fn update(app: &tauri::AppHandle, progress: &Progress) -> Result<()> {
     let state = app.state::<AppState>();
     let mut previous = state.progress.lock().map_err(|e| e.to_string())?;
     let mut updated = state.progress_updated.lock().map_err(|e| e.to_string())?;
-    if previous.status == progress.status && updated.elapsed() < Duration::from_millis(250) {
+    if previous.job_id == progress.job_id
+        && previous.status == progress.status
+        && previous.phase == progress.phase
+        && updated.elapsed() < Duration::from_millis(250)
+    {
         return Ok(());
     }
     *previous = progress.clone();
@@ -140,6 +144,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
     let mut progress = Progress {
         job_id: Some(job.id.clone()),
         status: "scanning".into(),
+        phase: "scanning".into(),
         ..Progress::default()
     };
     update(app, &progress)?;
@@ -172,15 +177,17 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
             }
             match entry {
                 Ok(entry) if entry.file_type().is_file() && media::kind(entry.path()).is_some() => {
+                    progress.current = entry.path().to_string_lossy().into();
                     files.push((root.clone(), entry.into_path()));
                     progress.folders[index].discovered += 1;
                 }
-                Ok(_) => {}
+                Ok(entry) => progress.current = entry.path().to_string_lossy().into(),
                 Err(error) => {
                     progress.folders[index].scan_errors += 1;
                     progress.errors.push(format!("Folder scan: {error}"));
                 }
             }
+            progress.timings.total_ms = started.elapsed().as_millis() as u64;
             update(app, &progress)?;
         }
         progress.folders[index].scan_complete = !state.cancel.load(Ordering::Relaxed);
@@ -190,6 +197,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
     progress.total = files.len();
     progress.timings.scan_ms = started.elapsed().as_millis() as u64;
     progress.status = "importing".into();
+    progress.phase = "hashing".into();
     update(app, &progress)?;
     let mut checkpoint = Instant::now();
     let workers = std::thread::available_parallelism()
@@ -239,7 +247,23 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                 entry.decode_ms = decode_ms;
             }
         };
-        for batch in files.chunks(64) {
+        let receive_waiting = |queue: &VecDeque<Entry>, progress: &mut Progress| {
+            progress.phase = "decoding".into();
+            if let Some(entry) = queue.front() {
+                progress.current = entry.path.to_string_lossy().into();
+            }
+            progress.timings.total_ms = started.elapsed().as_millis() as u64;
+            update(app, progress)?;
+            done_rx
+                .recv()
+                .map_err(|_| "Decoder workers stopped unexpectedly.".to_string())
+        };
+        // Show the first results promptly, then amortize metadata startup across larger batches.
+        let first_batch = files.len().min(4);
+        for batch in files[..first_batch]
+            .chunks(4)
+            .chain(files[first_batch..].chunks(64))
+        {
             if shared.cancel.load(Ordering::Relaxed) {
                 break;
             }
@@ -264,6 +288,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                     break;
                 }
                 progress.status = "importing".into();
+                progress.phase = "hashing".into();
                 progress.current = path.to_string_lossy().into();
                 progress.timings.total_ms = started.elapsed().as_millis() as u64;
                 update(app, &progress)?;
@@ -293,6 +318,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                     Ok(Some((identity, hash)))
                 })();
                 progress.timings.hash_ms += hashing.elapsed().as_millis() as u64;
+                progress.checked += 1;
                 match checked {
                     Err(error) => prepped.push(Prepped::Finished(root, path, Err(error))),
                     Ok(None) => prepped.push(Prepped::Finished(root, path, Ok(true))),
@@ -343,6 +369,11 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
             let metadata = if metadata_paths.is_empty() {
                 Ok(HashMap::new())
             } else {
+                progress.phase = "metadata".into();
+                progress.batch_files = metadata_paths.len();
+                progress.current.clear();
+                progress.timings.total_ms = started.elapsed().as_millis() as u64;
+                update(app, &progress)?;
                 media::metadata_batch(app, &metadata_paths)
             };
             progress.timings.metadata_ms += extracting.elapsed().as_millis() as u64;
@@ -360,6 +391,15 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                         decode_ms: 0,
                     },
                     Prepped::NeedsInspect(root, path, identity, hash) => {
+                        progress.phase = if media::kind(path) == Some("raw") {
+                            "raw"
+                        } else {
+                            "decoding"
+                        }
+                        .into();
+                        progress.current = path.to_string_lossy().into();
+                        progress.timings.total_ms = started.elapsed().as_millis() as u64;
+                        update(app, &progress)?;
                         if media::identity(path).ok().as_ref() != Some(&identity) {
                             Entry {
                                 root,
@@ -398,9 +438,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                                         + media.bytes as usize
                                         > BUFFER_BUDGET
                                     {
-                                        let done = done_rx
-                                            .recv()
-                                            .map_err(|_| "Decoder workers stopped unexpectedly.")?;
+                                        let done = receive_waiting(&queue, &mut progress)?;
                                         receive(&mut queue, base, done);
                                         commit_ready(
                                             app,
@@ -472,18 +510,14 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                     if queue.len() < workers * 4 || shared.cancel.load(Ordering::Relaxed) {
                         break;
                     }
-                    let done = done_rx
-                        .recv()
-                        .map_err(|_| "Decoder workers stopped unexpectedly.")?;
+                    let done = receive_waiting(&queue, &mut progress)?;
                     receive(&mut queue, base, done);
                 }
             }
         }
         drop(task_tx);
         while !queue.is_empty() && !shared.cancel.load(Ordering::Relaxed) {
-            let done = done_rx
-                .recv()
-                .map_err(|_| "Decoder workers stopped unexpectedly.")?;
+            let done = receive_waiting(&queue, &mut progress)?;
             receive(&mut queue, base, done);
             commit_ready(
                 app,
@@ -497,6 +531,10 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         }
         Ok(())
     })?;
+    progress.phase = "finalizing".into();
+    progress.current.clear();
+    progress.timings.total_ms = started.elapsed().as_millis() as u64;
+    update(app, &progress)?;
     sync_xmp_warnings(&state, &mut progress);
     progress.timings.total_ms = started.elapsed().as_millis() as u64;
     progress.current.clear();
@@ -568,6 +606,9 @@ fn commit_ready(
         .is_some_and(|entry| !matches!(entry.stage, Stage::Inspecting))
     {
         let entry = queue.pop_front().ok_or("Import queue is empty.")?;
+        progress.phase = "saving".into();
+        progress.current = entry.path.to_string_lossy().into();
+        update(app, progress)?;
         progress.timings.decode_ms += entry.decode_ms;
         *base += 1;
         let result = match entry.stage {

@@ -1,10 +1,9 @@
 use crate::model::{Media, Result};
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, Utc};
 use image::{DynamicImage, GenericImageView, ImageReader};
-use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
-    io::{BufRead, Cursor, Read, Seek, Write},
+    io::{BufRead, Cursor, Read, Seek},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
@@ -106,7 +105,7 @@ pub fn hash(path: &Path) -> Result<String> {
 }
 
 fn hash_reader(file: &mut File) -> Result<String> {
-    let mut digest = Sha256::new();
+    let mut digest = blake3::Hasher::new();
     let mut buffer = [0; 128 * 1024];
     loop {
         let count = file.read(&mut buffer).map_err(|e| e.to_string())?;
@@ -115,7 +114,7 @@ fn hash_reader(file: &mut File) -> Result<String> {
         }
         digest.update(&buffer[..count]);
     }
-    Ok(hex::encode(digest.finalize()))
+    Ok(digest.finalize().to_hex().to_string())
 }
 
 /// Reads and hashes a source file while tolerating one metadata shift caused by
@@ -327,6 +326,17 @@ pub fn decode(
     decode_sized(app, path, kind, metadata, 2200)
 }
 
+fn decode_raw(app: &tauri::AppHandle, path: &Path, half_size: bool) -> Result<DynamicImage> {
+    let mut command = Command::new(tool(app, "dcraw_emu")?);
+    command.arg("-w");
+    if half_size {
+        command.arg("-h");
+    }
+    command.args(["-T", "-Z", "-"]).arg(path);
+    let bytes = execute(command, 180)?;
+    read_image(ImageReader::new(Cursor::new(bytes)))
+}
+
 pub fn decode_sized(
     app: &tauri::AppHandle,
     path: &Path,
@@ -345,18 +355,7 @@ pub fn decode_sized(
                 reader(path)?
             }
         }
-        "raw" => {
-            let mut command = Command::new(tool(app, "dcraw_emu")?);
-            if min_side <= 1000 {
-                command.args(["-w", "-h", "-T", "-Z", "-"]).arg(path);
-            } else {
-                command.args(["-w", "-T", "-Z", "-"]).arg(path);
-            }
-            let bytes = execute(command, 180)?;
-            let mut output = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
-            output.write_all(&bytes).map_err(|e| e.to_string())?;
-            return reader(output.path());
-        }
+        "raw" => return decode_raw(app, path, min_side <= 1000),
         "heic" => {
             let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
             let output = directory.path().join("decoded.jpg");
@@ -544,12 +543,7 @@ fn preview_input(
         }
         (None, "raw") => {
             // Half-size mode skips demosaicing; it is plenty for a 512px comparison.
-            let mut command = Command::new(tool(app, "dcraw_emu")?);
-            command.args(["-w", "-h", "-T", "-Z", "-"]).arg(path);
-            let bytes = execute(command, 180)?;
-            let mut output = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
-            output.write_all(&bytes).map_err(|e| e.to_string())?;
-            let image = reader(output.path())?;
+            let image = decode_raw(app, path, true)?;
             let (w, h) = image.dimensions();
             (image, w * 2, h * 2)
         }

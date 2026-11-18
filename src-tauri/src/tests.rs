@@ -893,21 +893,25 @@ fn cleanup_requires_unchanged_source_and_exact_archived_bytes() {
     let source = directory.path().join("source.jpg");
     let target = directory.path().join("archive");
     fs::create_dir(&target).unwrap();
-    fs::write(&source, b"test").unwrap();
+    let mut bytes = vec![0x5a; 128 * 1024 + 17];
+    fs::write(&source, &bytes).unwrap();
     let source = source.canonicalize().unwrap();
-    let hash = media::hash(&source).unwrap();
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    assert_eq!(media::hash_with_identity(&source).unwrap().1, hash);
     let mut archive = Archive::open(&target).unwrap();
-    let item = Item {
+    let mut media = sample(hash.clone());
+    media.bytes = bytes.len() as u64;
+    let mut item = Item {
         id: "original".into(),
         path: "IMG.jpg".into(),
         original_name: "IMG.jpg".into(),
         state: "active".into(),
         keeper: None,
-        media: sample(hash.clone()),
+        media,
         settings: Settings::default(),
         albums: vec![],
     };
-    archive.place(&source, item, None, None).unwrap();
+    archive.place(&source, item.clone(), None, None).unwrap();
     let occurrence = Occurrence {
         id: "source".into(),
         item: "original".into(),
@@ -923,17 +927,31 @@ fn cleanup_requires_unchanged_source_and_exact_archived_bytes() {
         hash,
         identity: media::identity(&source).unwrap(),
         status: "pending".into(),
-        bytes: 4,
+        bytes: bytes.len() as u64,
     };
     assert!(archive.cleanup_check(&occurrence).is_ok());
     archive.record_occurrence(&occurrence).unwrap();
     let reader = archive.cleanup_reader().unwrap();
     assert!(reader.cleanup_rows().unwrap()[0].eligible);
-    fs::write(target.join("IMG.jpg"), b"fake").unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    fs::write(target.join("IMG.jpg"), &bytes).unwrap();
     assert!(archive.cleanup_check(&occurrence).is_err());
     assert!(!reader.cleanup_rows().unwrap()[0].eligible);
-    fs::write(&source, b"changed").unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    fs::write(target.join("IMG.jpg"), &bytes).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    fs::write(&source, &bytes).unwrap();
     assert!(archive.cleanup_check(&occurrence).is_err());
+    item.id = "changed".into();
+    item.path = "changed.jpg".into();
+    assert!(
+        archive
+            .place(&source, item, None, None)
+            .unwrap_err()
+            .contains("Copied bytes failed verification")
+    );
+    assert!(!target.join("changed.jpg").exists());
+    assert_eq!(fs::read(&source).unwrap(), bytes);
 }
 
 fn import_copy_fixture(

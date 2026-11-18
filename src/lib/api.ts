@@ -39,6 +39,9 @@ export interface Progress {
   jobId?: string | null;
   status: string;
   current: string;
+  phase?: string;
+  checked?: number;
+  batchFiles?: number;
   done: number;
   total: number;
   copied: number;
@@ -130,6 +133,7 @@ export interface Review {
 export interface Job {
   id: string;
   roots: string[];
+  queued?: boolean;
   progress: Partial<Progress>;
 }
 
