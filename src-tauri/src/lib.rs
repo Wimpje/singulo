@@ -899,8 +899,8 @@ fn show_window(app: tauri::AppHandle, kind: String) -> Result<()> {
         "Singulo Viewer"
     })
     .inner_size(
-        if kind == "drop" { 310.0 } else { 1100.0 },
-        if kind == "drop" { 260.0 } else { 800.0 },
+        if kind == "drop" { 340.0 } else { 1100.0 },
+        if kind == "drop" { 380.0 } else { 800.0 },
     )
     .always_on_top(kind == "drop");
     builder.build().map_err(|e| e.to_string())?;

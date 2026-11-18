@@ -69,7 +69,7 @@
   .large img { object-fit: contain; }
   img.low { filter: blur(1px); }
   .placeholder { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px; color: #6f786b; text-align: center; }
-  .placeholder span { font-size: 11px; letter-spacing: .05em; }
-  small { font-size: 11px; max-width: 300px; max-height: 55px; overflow: auto; }
-  .type { position: absolute; right: 9px; bottom: 9px; color: white; background: #152a20c9; border-radius: 5px; padding: 4px 7px; font-size: 10px; font-weight: 700; letter-spacing: .06em; }
+  .placeholder span { font-size: 13px; letter-spacing: .05em; }
+  small { font-size: 13px; max-width: 300px; max-height: 55px; overflow: auto; }
+  .type { position: absolute; right: 9px; bottom: 9px; color: white; background: #152a20c9; border-radius: 5px; padding: 4px 7px; font-size: 12px; font-weight: 700; letter-spacing: .06em; }
 </style>
