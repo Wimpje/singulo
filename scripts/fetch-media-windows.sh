@@ -98,8 +98,9 @@ cmake_build libheif \
   cd "$work/libraw"
   CPPFLAGS="$CPPFLAGS -DLIBRAW_NODLL" ./configure --prefix="$prefix" --host=x86_64-w64-mingw32 --disable-shared --enable-static \
     --disable-openmp --disable-lcms --enable-jpeg --enable-zlib --enable-examples
-  make -j "$jobs"
-  make install
+  # Skip the unused C samples, which can fail to link against static LibRaw.
+  make -j "$jobs" bin/dcraw_emu.exe
+  install -D -m 755 bin/dcraw_emu.exe "$prefix/bin/dcraw_emu.exe"
 )
 make -C "$work/openh264" -j "$jobs" OS=mingw_nt ARCH=x86_64 PREFIX="$prefix" install-static
 (
@@ -142,7 +143,13 @@ grep -q libopenh264 "$work/ffmpeg-encoders.txt"
 "$bundle/exiftool.exe" -ver
 "$bundle/heif-convert.exe" --list-decoders
 "$bundle/heif-convert.exe" "$work/libheif/examples/example.heic" "$work/decoded.jpg"
-"$bundle/exiftool.exe" -ImageWidth -ImageHeight "$work/decoded.jpg"
+shopt -s nullglob
+decoded=("$work"/decoded*.jpg)
+shopt -u nullglob
+if (( ${#decoded[@]} == 0 )); then
+  echo "HEIC smoke test did not produce any JPEGs." >&2; exit 1
+fi
+"$bundle/exiftool.exe" -ImageWidth -ImageHeight "${decoded[@]}"
 "$bundle/ffmpeg.exe" -v error -f lavfi -i testsrc=size=64x64:rate=1 -t 1 \
   -c:v libopenh264 -pix_fmt yuv420p "$work/test.mp4"
 "$bundle/ffprobe.exe" -v error -show_streams "$work/test.mp4"

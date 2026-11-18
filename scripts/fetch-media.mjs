@@ -149,8 +149,8 @@ try {
     `--prefix=${prefix}`, "--disable-shared", "--enable-static",
     "--disable-openmp", "--disable-lcms", "--enable-jpeg", "--enable-zlib", "--enable-examples",
   ], raw);
-  run("/usr/bin/make", ["-j", jobs], raw);
-  run("/usr/bin/make", ["install"], raw);
+  // The C samples link static LibRaw without the C++ runtime; only dcraw_emu is shipped.
+  run("/usr/bin/make", ["-j", jobs, "bin/dcraw_emu"], raw);
 
   const ffmpeg = join(work, "ffmpeg");
   run("./configure", [
@@ -165,7 +165,7 @@ try {
   run("/usr/bin/make", ["install"], ffmpeg);
   copyTool("ffmpeg");
   copyTool("ffprobe");
-  copyTool("dcraw_emu");
+  copyTool("dcraw_emu", join(raw, "bin/dcraw_emu"));
   copyTool("heif-convert");
   copyTool("exiftool", join(work, "exiftool/exiftool"));
   cpSync(join(work, "exiftool/lib"), join(bundle, "lib"), { recursive: true });
@@ -178,7 +178,10 @@ try {
   run(join(bundle, "exiftool"), ["-ver"]);
   run(join(bundle, "heif-convert"), ["--list-decoders"]);
   run(join(bundle, "heif-convert"), [join(work, "libheif/examples/example.heic"), join(work, "decoded.jpg")]);
-  run(join(bundle, "exiftool"), ["-ImageWidth", "-ImageHeight", join(work, "decoded.jpg")]);
+  // Multi-image HEICs produce numbered JPEGs instead of the requested basename.
+  const decoded = readdirSync(work).filter((name) => /^decoded(?:-\d+)?\.jpg$/.test(name));
+  if (!decoded.length) throw new Error("HEIC smoke test did not produce any JPEGs.");
+  run(join(bundle, "exiftool"), ["-ImageWidth", "-ImageHeight", ...decoded.map((name) => join(work, name))]);
   run(join(bundle, "ffmpeg"), [
     "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=1",
     "-t", "1", "-c:v", "h264_videotoolbox", "-pix_fmt", "yuv420p", join(work, "test.mp4"),
