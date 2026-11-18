@@ -197,15 +197,19 @@ pacman -S --needed make curl tar unzip mingw-w64-ucrt-x86_64-gcc \
   mingw-w64-ucrt-x86_64-nodejs
 ```
 
-Use an ordinary checkout path without spaces, for example `C:\code\photo-dedupe`. Run the following in UCRT64 on Windows, or your normal terminal on macOS:
+Use an ordinary checkout path without spaces, for example `C:\code\singulo`. Run the following in UCRT64 on Windows, or your normal terminal on macOS:
 
 ```sh
+cd "$(cygpath -u 'C:\code\singulo')"
+
 npm run fetch:media
 npm run prepare:media -- ./media-tools
 npm run tauri -- build
 ```
 
 The first command can take several minutes and a few GB of working space. Downloads are cached in the ignored `.media-build/` directory. Successful temporary builds are cleaned up; failed builds are retained there with their path printed for diagnosis. The completed input bundle goes into ignored `media-tools/`, with matching source archives, upstream notices and the build recipe under `licenses/`. An existing output directory is never overwritten; to rebuild, choose a fresh path with `npm run fetch:media -- /path/to/new-media-tools`, then pass that same path to `prepare:media`.
+
+If the Windows build fails with `CreateProcessW failed` and `fork: Permission denied`, close your MSYS2 terminals, reopen UCRT64, and retry with one build job: `SINGULO_MEDIA_JOBS=1 npm run fetch:media`. This starts a fresh build using the cached downloads. If it still fails, make sure MSYS2 is fully updated (`pacman -Syu`, following any restart prompts), and check Windows Security Protection History or your endpoint security logs for a block involving `C:\msys64\usr\bin\sh.exe`.
 
 If a build fails with undefined C++ symbols in `dcraw_half` or `half_mt`, update the checkout and rerun `npm run fetch:media`. Both the macOS and Windows recipes now skip those LibRaw samples and build only `dcraw_emu`, the executable Singulo uses. The retry reuses the downloaded archives; you can remove the failed build directory printed by the script when you no longer need it.
 

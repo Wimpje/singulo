@@ -5,6 +5,14 @@ if [[ "${MSYSTEM:-}" != UCRT64 ]] || [[ "$(uname -m)" != x86_64 ]]; then
   echo "Run npm run fetch:media in the MSYS2 UCRT64 shell on Windows x64." >&2
   exit 1
 fi
+jobs="${SINGULO_MEDIA_JOBS-}"
+if [[ ! -v SINGULO_MEDIA_JOBS ]]; then
+  jobs="$(nproc)"
+  if (( jobs > 4 )); then jobs=4; fi
+elif [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]]; then
+  echo "SINGULO_MEDIA_JOBS must be a positive integer (for example, 1)." >&2
+  exit 1
+fi
 for tool in node curl tar unzip sha256sum make gcc g++ cmake ninja pkg-config nasm objdump; do
   command -v "$tool" >/dev/null || { echo "Missing build tool: $tool. See README prerequisites." >&2; exit 1; }
 done
@@ -29,8 +37,6 @@ prefix="$work/install"
 bundle="$work/media-tools"
 licenses="$bundle/licenses"
 mkdir -p "$licenses/sources"
-jobs="$(nproc)"
-if (( jobs > 4 )); then jobs=4; fi
 export CC=gcc CXX=g++
 export CFLAGS="-O2" CXXFLAGS="-O2"
 export CPPFLAGS="-I$prefix/include" LDFLAGS="-L$prefix/lib -static -static-libgcc -static-libstdc++"
