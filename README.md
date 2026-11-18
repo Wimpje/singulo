@@ -164,9 +164,58 @@ Copy the generated `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.png`, `ic
 
 ## Offline distribution
 
-Release builds require a complete architecture-matching media bundle; they **never** silently depend on Homebrew or an end-user command-line installation.
+The media tools are external programs the app starts for metadata, RAW/HEIC decoding, and video inspection/preview. They are **not** needed to compile the Rust or Svelte code. In a development build, the app first looks in its bundled `tools/` directory, then (debug builds only) searches `PATH`, `/opt/homebrew/bin` and `/usr/local/bin`. That is why a development build can work with tools installed by Homebrew. A packaged release does not search the user's `PATH`: it needs the tools bundled with the app, so it works offline and does not depend on Homebrew or end-user setup.
 
-Prepare a directory with these executables and their libraries/runtimes:
+The tools provide these features:
+
+| Tool | Used for |
+| --- | --- |
+| `exiftool` | Reading photo/video metadata and capture dates |
+| `dcraw_emu` | Decoding RAW photos |
+| `heif-convert` | Decoding HEIC/HEIF photos |
+| `ffmpeg` | Video previews, frame extraction and thumbnail decoding |
+| `ffprobe` | Inspecting video streams and metadata |
+
+Release builds require the five executables and the generated manifest to be present; `build.rs` stops the build if any are missing. That presence check cannot guarantee all transitive libraries and runtimes are complete, so smoke-test the packaged app too. Check **Settings → Media tools** in development to see which tools the current machine can find.
+
+### Prepare a release bundle
+
+#### Automatic setup (macOS and Windows x64)
+
+Run the setup on the OS you are building for. [fetch-media.mjs](scripts/fetch-media.mjs) downloads the pinned upstream archives listed in [media-sources.json](scripts/media-sources.json), checks their SHA-256 hashes, and builds the media tools locally. It does not copy or replace your installed Homebrew tools. Windows uses [fetch-media-windows.sh](scripts/fetch-media-windows.sh) under MSYS2 UCRT64 and the upstream Windows ExifTool package, including its runtime.
+
+**macOS:** use native Node.js 22+ (not Rosetta), Xcode Command Line Tools, CMake and pkg-config. If needed, install the build prerequisites with `xcode-select --install` and `brew install cmake pkgconf`. These are build-machine requirements only, not requirements for people using the packaged app.
+
+**Windows x64:** install [MSYS2](https://www.msys2.org/), open its **UCRT64** terminal, update it with `pacman -Syu` (restart the terminal and repeat if instructed), then install:
+
+```sh
+pacman -S --needed make curl tar unzip mingw-w64-ucrt-x86_64-gcc \
+  mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja \
+  mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-nasm \
+  mingw-w64-ucrt-x86_64-nodejs
+```
+
+Use an ordinary checkout path without spaces, for example `C:\code\photo-dedupe`. Run the following in UCRT64 on Windows, or your normal terminal on macOS:
+
+```sh
+npm run fetch:media
+npm run prepare:media -- ./media-tools
+npm run tauri -- build
+```
+
+The first command can take several minutes and a few GB of working space. Downloads are cached in the ignored `.media-build/` directory. Successful temporary builds are cleaned up; failed builds are retained there with their path printed for diagnosis. The completed input bundle goes into ignored `media-tools/`, with matching source archives, upstream notices and the build recipe under `licenses/`. An existing output directory is never overwritten; to rebuild, choose a fresh path with `npm run fetch:media -- /path/to/new-media-tools`, then pass that same path to `prepare:media`.
+
+The builds avoid non-system shared libraries: FFmpeg uses Apple's `h264_videotoolbox` encoder on macOS and a source-built `libopenh264` on Windows. The scripts check architecture/dependencies, the preview encoder's presence, HEIC-to-JPEG conversion, video generation/inspection/frame extraction, and ExifTool execution. HEIC support uses libde265; optional AVIF and other HEIF codec plugins are not included. RAW camera support remains subject to LibRaw's supported models. These checks do not replace testing real photos/videos and the final installer on clean target machines. Windows setup must be validated on Windows; it cannot be smoke-tested from a macOS checkout. Windows ARM64 and cross-compilation are not covered. The Tauri app itself still needs its usual Rust/Windows SDK/MSVC build prerequisites; MSYS2 builds the media tools, not the Rust app.
+
+#### Why avoid GPL-enabled FFmpeg?
+
+GPL software is not forbidden, and using it privately does not require publishing your application. This app launches FFmpeg as a separate process rather than linking its libraries; shipping the two together does **not automatically** change Singulo's MIT license. Redistributing GPL-enabled FFmpeg still requires meeting FFmpeg's GPL obligations, including providing the corresponding source in a compliant way.
+
+The non-GPL FFmpeg requirement is this project's conservative **distribution policy**, not a technical limitation or a claim that GPL tools are unsafe. It avoids optional GPL encoders the app does not need. LGPL builds still have license, notice and source obligations; codec patents are a separate issue. The scripts collect source archives and notices to help, but do not certify legal compliance. See [FFmpeg's license explanation](https://ffmpeg.org/legal.html). `--enable-nonfree` is a separate concern: that combination may not be redistributable at all.
+
+#### Supply your own tools
+
+Prepare a directory of verified executables for the **target OS and CPU architecture**. Do not copy tools from a different architecture or assume a development machine's Homebrew installation is suitable for redistribution:
 
 ```text
 media-tools/
@@ -180,13 +229,17 @@ media-tools/
   licenses/               # Notices, corresponding sources, build instructions
 ```
 
-Use FFmpeg without `--enable-gpl` or `--enable-nonfree`; enable the H.264 preview encoder (`h264_videotoolbox` on macOS, `libopenh264` on Windows). Build libheif without GPL encoder dependencies. Include required notices and corresponding sources for LibRaw/libheif/FFmpeg and transitive dependencies. Codec patent considerations are separate from open-source licenses.
+The `licenses/` directory is required. Include the applicable notices, corresponding source archives or source locations, and build instructions for every redistributed tool and dependency. Codec patent considerations are separate from open-source licenses.
+
+FFmpeg must be built without `--enable-gpl` or `--enable-nonfree`; enable the H.264 preview encoder (`h264_videotoolbox` on macOS, `libopenh264` on Windows). The preparation script rejects FFmpeg configurations declaring either flag, and rejects known GPL encoder libraries while relocating macOS dependencies. Build libheif without GPL encoder dependencies. A package that happens to run on your machine is not necessarily suitable for redistribution: for example, the default Homebrew FFmpeg may be GPL-enabled.
+
+On macOS, provide ExifTool with its complete Perl module directory; the script copies it into the bundle and adjusts the launcher. It also relocates non-system libraries found with the tools. On Windows, supply the required DLLs and ExifTool runtime files (`exiftool_files`) alongside the executables; the script copies them as-is. The script prepares tools for the platform on which it is run, so cross-platform builds need a separately prepared matching bundle for each target.
 
 ```sh
 npm run prepare:media -- /absolute/path/to/media-tools
 npm run tauri -- build
 ```
 
-Preparation verifies required tools and FFmpeg configuration, relocates non-system macOS libraries, rejects known GPL encoder libraries, copies license material, and generates a bundle manifest. Windows inputs must already include all DLLs/runtime files. Smoke-test packaged apps on clean targets; preparation is not a substitute for that.
+Preparation copies the checked tools into the ignored `src-tauri/resources/tools/` build-resource directory, verifies required executables and FFmpeg configuration, relocates non-system macOS libraries, copies license material, and generates a bundle manifest. Keep the original bundle inputs and their license/source material for future builds. Windows inputs must already include all DLLs/runtime files. Smoke-test each packaged app on a clean target without Homebrew or other media tools installed; preparation is not a substitute for that.
 
 Signing/notarization requires your own certificates/accounts. Unsigned local builds are not notarized. Bundled codecs increase package size; measure the actual installer.

@@ -14,7 +14,8 @@
     "test": "npm run test:comparison && cargo test --manifest-path src-tauri/Cargo.toml",
     "test:comparison": "node --test tests/comparison.test.mjs",
     "desktop": "tauri dev",
-    "prepare:media": "node scripts/prepare-media.mjs"
+    "prepare:media": "node scripts/prepare-media.mjs",
+    "fetch:media": "node scripts/fetch-media.mjs"
   },
   "license": "MIT",
   "dependencies": {
