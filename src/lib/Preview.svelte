@@ -68,8 +68,8 @@
   img { width: 100%; height: 100%; object-fit: cover; }
   .large img { object-fit: contain; }
   img.low { filter: blur(1px); }
-  .placeholder { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px; color: #6f786b; text-align: center; }
-  .placeholder span { font-size: 13px; letter-spacing: .05em; }
-  small { font-size: 13px; max-width: 300px; max-height: 55px; overflow: auto; }
-  .type { position: absolute; right: 9px; bottom: 9px; color: white; background: #152a20c9; border-radius: 5px; padding: 4px 7px; font-size: 12px; font-weight: 700; letter-spacing: .06em; }
+  .placeholder { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px; color: var(--hc-muted, #6f786b); text-align: center; }
+  .placeholder span { font-size: calc(13px * var(--text-scale, 1)); letter-spacing: .05em; }
+  small { font-size: calc(13px * var(--text-scale, 1)); max-width: 300px; max-height: 55px; overflow: auto; }
+  .type { position: absolute; right: 9px; bottom: 9px; color: white; background: #152a20c9; border-radius: 5px; padding: 4px 7px; font-size: calc(12px * var(--text-scale, 1)); font-weight: 700; letter-spacing: .06em; }
 </style>
