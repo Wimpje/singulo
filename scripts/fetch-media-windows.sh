@@ -105,7 +105,7 @@ cmake_build libheif \
   CPPFLAGS="$CPPFLAGS -DLIBRAW_NODLL" ./configure --prefix="$prefix" --host=x86_64-w64-mingw32 --disable-shared --enable-static \
     --disable-openmp --disable-lcms --enable-jpeg --enable-zlib --enable-examples
   # Skip the unused C samples, which can fail to link against static LibRaw.
-  make -j "$jobs" bin/dcraw_emu.exe
+  make -j "$jobs" LDFLAGS="$LDFLAGS -all-static" bin/dcraw_emu.exe
   install -D -m 755 bin/dcraw_emu.exe "$prefix/bin/dcraw_emu.exe"
 )
 make -C "$work/openh264" -j "$jobs" OS=mingw_nt ARCH=x86_64 PREFIX="$prefix" install-static
@@ -127,7 +127,7 @@ for name in ffmpeg ffprobe dcraw_emu heif-convert; do
       kernel32.dll|user32.dll|gdi32.dll|advapi32.dll|shell32.dll|ole32.dll|oleaut32.dll|\
       ws2_32.dll|secur32.dll|bcrypt.dll|crypt32.dll|winmm.dll|version.dll|msvcrt.dll|\
       ucrtbase.dll|ntdll.dll|shlwapi.dll|psapi.dll|setupapi.dll|d3d11.dll|dxgi.dll|\
-      mf.dll|mfplat.dll|mfuuid.dll|avrt.dll|strmiids.dll|vfw32.dll|oleacc.dll|\
+      mf.dll|mfplat.dll|mfuuid.dll|avrt.dll|strmiids.dll|vfw32.dll|avicap32.dll|oleacc.dll|\
       api-ms-win-*.dll|ext-ms-win-*.dll) ;;
       *) echo "$name.exe needs an unexpected DLL: $dll. Refusing an incomplete bundle." >&2; exit 1 ;;
     esac
