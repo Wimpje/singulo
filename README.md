@@ -2,9 +2,11 @@
 
 A small, offline desktop app for organizing pictures and videos. Built with Tauri 2, Rust and Svelte.
 
+Made by **nosmallthing**.
+
 The interface is available in English and Dutch. Choose a language on the Settings page; your choice is saved on this computer.
 
-Note that this is an AI coded application, created for my personal use. I hope someone will like it :-)
+Note that this is an AI coded application, created for my personal use. I hope someone will like it :-) 
 
 ## Use it
 
@@ -245,3 +247,4 @@ npm run tauri -- build
 Preparation copies the checked tools into the ignored `src-tauri/resources/tools/` build-resource directory, verifies required executables and FFmpeg configuration, relocates non-system macOS libraries, copies license material, and generates a bundle manifest. Keep the original bundle inputs and their license/source material for future builds. Windows inputs must already include all DLLs/runtime files. Smoke-test each packaged app on a clean target without Homebrew or other media tools installed; preparation is not a substitute for that.
 
 Signing/notarization requires your own certificates/accounts. Unsigned local builds are not notarized. Bundled codecs increase package size; measure the actual installer.
+
