@@ -165,11 +165,11 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
             .follow_links(false)
             .into_iter()
             .filter_entry(|e| {
-                e.file_name() != ".photo-dedupe"
+                e.file_name() != ".singulo"
                     && !e
                         .file_name()
                         .to_string_lossy()
-                        .starts_with(".photo-dedupe-cleanup-")
+                        .starts_with(".singulo-cleanup-")
             })
         {
             if state.cancel.load(Ordering::Relaxed) {
@@ -897,7 +897,7 @@ fn import_one(
     timings.match_ms += matching.elapsed().as_millis() as u64;
     let is_lower = matched.as_ref().is_some_and(|(_, dominates)| !dominates);
     let wanted = if is_lower {
-        PathBuf::from(".photo-dedupe/undo")
+        PathBuf::from(".singulo/undo")
             .join(&id)
             .join(paths::safe_name(&original_name))
     } else if let Some(owner) = &owner {

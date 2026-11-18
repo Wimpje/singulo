@@ -44,7 +44,7 @@ const DATE_PROPERTIES: &[(&str, &str)] = &[
     (EXIF, "OffsetTimeDigitized"),
     (EXIF_EX, "OffsetTimeDigitized"),
 ];
-const OWNER: &str = "https://photo-dedupe.local/ns/xmp/1.0/";
+const OWNER: &str = "https://singulo.local/ns/xmp/1.0/";
 const EMPTY: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"></rdf:RDF></x:xmpmeta>";
 const MAX_XMP: u64 = 8 * 1024 * 1024;
 pub(super) type DirectoryNames = HashMap<PathBuf, HashMap<String, Vec<OsString>>>;
@@ -328,7 +328,7 @@ fn render(base: &str, archive: &str, item: &Item) -> Result<String> {
         }
     }
     let mut addition = format!(
-        "<rdf:Description xmlns:rdf=\"{RDF}\" rdf:about=\"\" xmlns:pda=\"{OWNER}\" pda:Archive=\"{}\" pda:Item=\"{}\" pda:OriginalHash=\"{}\">",
+        "<rdf:Description xmlns:rdf=\"{RDF}\" rdf:about=\"\" xmlns:singulo=\"{OWNER}\" singulo:Archive=\"{}\" singulo:Item=\"{}\" singulo:OriginalHash=\"{}\">",
         escaped(archive)?,
         escaped(&item.id)?,
         escaped(&item.media.hash)?
@@ -379,7 +379,7 @@ impl Archive {
     // Archive (which owns writer.lock). Browsing keeps using its own connection.
     pub fn xmp_worker(&self) -> Result<Self> {
         self.check()?;
-        let catalog = paths::inside(&self.root, Path::new(".photo-dedupe/catalog.sqlite"))?;
+        let catalog = paths::inside(&self.root, Path::new(".singulo/catalog.sqlite"))?;
         let connection = rusqlite::Connection::open_with_flags(
             catalog,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
@@ -646,7 +646,7 @@ impl Archive {
             let mode = self.xmp_mode()?;
             let publish = mode == "true"
                 && owner.state == "active"
-                && !owner.path.starts_with(".photo-dedupe/staging/")
+                && !owner.path.starts_with(".singulo/staging/")
                 && new.path == format!("{}.xmp", owner.path);
             if !publish {
                 if mode == "true" {
@@ -797,7 +797,7 @@ impl Archive {
         }
         let parked = Path::new(&pending.parked);
         if let Some(parent) = parked.parent()
-            && parent.parent() == Some(Path::new(".photo-dedupe/recovery"))
+            && parent.parent() == Some(Path::new(".singulo/recovery"))
             && parent
                 .file_name()
                 .is_some_and(|name| name.to_string_lossy().starts_with("xmp-"))
@@ -830,7 +830,7 @@ impl Archive {
             if text.len() as u64 > MAX_XMP {
                 return Err("Merged XMP would exceed the safe 8 MB size limit.".into());
             }
-            let relative = format!(".photo-dedupe/staging/xmp-{}", Uuid::new_v4());
+            let relative = format!(".singulo/staging/xmp-{}", Uuid::new_v4());
             let path = paths::inside(&self.root, Path::new(&relative))?;
             let mut file = OpenOptions::new()
                 .create_new(true)
@@ -845,7 +845,7 @@ impl Archive {
         } else {
             None
         };
-        let recovery = format!(".photo-dedupe/recovery/xmp-{}", Uuid::new_v4());
+        let recovery = format!(".singulo/recovery/xmp-{}", Uuid::new_v4());
         if old.is_some() {
             // Reserve a new private directory, not just an apparently free file
             // name. Relocation must never overwrite another recovery file.
@@ -889,7 +889,7 @@ impl Archive {
         if item.media.kind == "sidecar" {
             return Ok(true);
         }
-        if item.path.starts_with(".photo-dedupe/staging/")
+        if item.path.starts_with(".singulo/staging/")
             || matches!(item.state.as_str(), "purge-pending" | "trash-pending")
         {
             return Ok(false);

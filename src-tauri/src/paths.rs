@@ -8,7 +8,7 @@ pub fn component(value: &str) -> Result<()> {
         || value.len() > 180
         || value == "."
         || value == ".."
-        || value.eq_ignore_ascii_case(".photo-dedupe")
+        || value.eq_ignore_ascii_case(".singulo")
         || value.ends_with([' ', '.'])
         || value
             .chars()

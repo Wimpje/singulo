@@ -1,4 +1,4 @@
-# Photo Archive
+# Singulo
 
 A small, offline desktop app for organizing pictures and videos. Built with Tauri 2, Rust and Svelte.
 
@@ -11,7 +11,7 @@ The interface is available in English and Dutch. Choose a language on the Settin
 3. Browse **Photos**, the app's start page, or the separate viewer. Search original folder names such as **Holiday Germany**; folder history survives deduplication.
 4. Compare uncertain matches in **Similarity review**. The overview shows thumbnails of both files. **Start reviewing** opens them one by one with a match counter; after keeping or dismissing a match, the next one opens automatically. Keyboard: `1` / `2` keep the left / right copy, `B` keeps both, `S` or `→` skips, `←` goes back, `Z` zooms both pictures, `Esc` closes. Click a picture to zoom both at the same spot. Keep both when they are different edits, crops, burst frames or RAW/JPEG companions.
 
-Keeping one copy removes the other from the library, without a confirmation dialog. It is not deleted: it becomes a **spare copy of a removed duplicate** (Dutch: *reservekopie van een verwijderde dubbele foto*), stored in archive undo (`.photo-dedupe/undo`). A message offers **Undo** (or Cmd/Ctrl+Z) for a few seconds, which restores the copy and puts the match back in review. Spare copies stay restorable later through the **Spare copies of removed duplicates** filter in Photos, until you delete them permanently. A picture with related RAW/JPEG, sidecar or Live Photo files cannot be moved to undo on its own. If only one picture has related files, you can keep it and move the other to undo. If both have related files, choose **Keep both / dismiss match**; both remain active and the review is cleared.
+Keeping one copy removes the other from the library, without a confirmation dialog. It is not deleted: it becomes a **spare copy of a removed duplicate** (Dutch: *reservekopie van een verwijderde dubbele foto*), stored in archive undo (`.singulo/undo`). A message offers **Undo** (or Cmd/Ctrl+Z) for a few seconds, which restores the copy and puts the match back in review. Spare copies stay restorable later through the **Spare copies of removed duplicates** filter in Photos, until you delete them permanently. A picture with related RAW/JPEG, sidecar or Live Photo files cannot be moved to undo on its own. If only one picture has related files, you can keep it and move the other to undo. If both have related files, choose **Keep both / dismiss match**; both remain active and the review is cleared.
 
 In comparisons, a table lists resolution, file size, type, date, original folders, related files and location, with differing rows highlighted. A file size or pixel count at least twice the other is highlighted. A **Probably better** label appears only when the other available measurement does not favor the other picture. These are hints, not guarantees of image quality; inspect both before deciding.
 
@@ -62,17 +62,17 @@ While an import is active, a status panel explains why comparisons, source clean
 
 Copy ownership tracking starts with this version. For an older import, the app cannot safely prove which archive files it originally created, so only the keep-files clearing option is available. Clearing history does not erase the safety tracking used to protect copies shared with another import.
 
-The archive contains ordinary media files and `.photo-dedupe/` with the SQLite catalog, staging/undo/cache folders, job history, catalog backup and provenance export. Move the whole archive between computers, including this folder. Never edit the catalog while the app is running.
+The archive contains ordinary media files and `.singulo/` with the SQLite catalog, staging/undo/cache folders, job history, catalog backup and provenance export. Move the whole archive between computers, including this folder. Never edit the catalog while the app is running.
 
 Interrupted copy/relocation jobs are reconciled on opening. Conflicting/incomplete output files are reported with staging retained rather than overwritten. Stop the app and preserve the archive before manually resolving a conflict or restoring `recovery/catalog-latest.sqlite`. JSON metadata exports retain source-folder history.
 
 ### Sharing metadata with other Photo organizing tools like Immich
 
-Settings offers **Export XMP** for sharing manually corrected dates and original folder names as tags. Photo Archive creates marked `filename.ext.xmp` sidecars beside active files and keeps them updated as the archive changes. Original-folder tags include the full non-date folder path and its individual folder names. Originals are never modified. Existing fallback sidecars are merged into a separate export when safe; an occupied export filename, an ambiguous or unsupported sidecar, or an externally modified export is left untouched and reported.
+Settings offers **Export XMP** for sharing manually corrected dates and original folder names as tags. Singulo creates marked `filename.ext.xmp` sidecars beside active files and keeps them updated as the archive changes. Original-folder tags include the full non-date folder path and its individual folder names. Originals are never modified. Existing fallback sidecars are merged into a separate export when safe; an occupied export filename, an ambiguous or unsupported sidecar, or an externally modified export is left untouched and reported.
 
 **Remove exported XMP** disables the export and removes only sidecars whose ownership and unchanged contents can be verified. Existing sidecars and modified exports are kept. If an export or removal is interrupted, the app reports pending work on reopening; use Export XMP or Remove exported XMP to resume it. A date without a time remains date-only; photo tools may not apply it, so check reported items. Folder names become tags, not photo albums.
 
-For an Immich external library, mount the archive read-only and exclude `**/.photo-dedupe/**` to avoid scanning staging, undo copies and cached previews. Finish any planned reorganization first: Immich can treat a moved external file as a new asset and lose its Immich-side edits. Immich also warns that metadata edits on read-only external libraries may silently fail. See the [Immich external library](https://docs.immich.app/features/libraries/) and [XMP sidecar](https://docs.immich.app/features/xmp-sidecars/) documentation.
+For an Immich external library, mount the archive read-only and exclude `**/.singulo/**` to avoid scanning staging, undo copies and cached previews. Finish any planned reorganization first: Immich can treat a moved external file as a new asset and lose its Immich-side edits. Immich also warns that metadata edits on read-only external libraries may silently fail. See the [Immich external library](https://docs.immich.app/features/libraries/) and [XMP sidecar](https://docs.immich.app/features/xmp-sidecars/) documentation.
 
 ## Supported media
 

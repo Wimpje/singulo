@@ -2486,30 +2486,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "photo-dedupe"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "chrono",
- "fs2",
- "image",
- "jpeg-decoder",
- "roxmltree",
- "rusqlite",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tempfile",
- "trash",
- "uuid",
- "wait-timeout",
- "walkdir",
- "windows",
-]
-
-[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3191,6 +3167,30 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
+name = "singulo"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "fs2",
+ "image",
+ "jpeg-decoder",
+ "roxmltree",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tempfile",
+ "trash",
+ "uuid",
+ "wait-timeout",
+ "walkdir",
+ "windows",
+]
 
 [[package]]
 name = "siphasher"

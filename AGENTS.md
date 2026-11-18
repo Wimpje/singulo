@@ -2,7 +2,7 @@
 
 ## Scope & Priorities
 
-Photo Archive (`photo-dedupe`) is a **personal, local-only desktop tool** for consolidating and deduplicating family photos and videos (Tauri 2, Rust, Svelte 5, SQLite). It is **not** a multi-tenant or enterprise production service—avoid enterprise ceremony, over-abstraction, or unnecessary dependencies.
+Singulo is a **personal, local-only desktop tool** for consolidating and deduplicating family photos and videos (Tauri 2, Rust, Svelte 5, SQLite). It is **not** a multi-tenant or enterprise production service—avoid enterprise ceremony, over-abstraction, or unnecessary dependencies.
 
 Optimize every change around three priorities, in order:
 
@@ -28,13 +28,13 @@ Optimize every change around three priorities, in order:
 - **Respect external & cloud-backed drives:** keep source reads, hashing, and archive writes sequential on the coordinator thread (`import.rs`) so spinning USB drives do not thrash; keep parallel worker threads strictly for CPU-bound decoding (`media.rs`). Tolerate one-time metadata hydration shifts on cloud placeholders (`OneDrive` / `iCloud` via `hash_with_identity`).
 - **Avoid redundant disk passes:** check exact BLAKE3 matches before spawning `exiftool` or decoding images, hash bytes while streaming copies (`copy_new`), and use DCT-scaled JPEG / half-size RAW decodes for previews and thumbnails.
 - **Scale SQLite to 100k+ items:** keep `journal_mode=WAL`, query via indexed columns/expressions rather than loading full tables (`items` or `occurrences`) into memory, and maintain counts via the `totals` triggers.
-- **Keep IPC lean:** serve thumbnails and video proxies from `.photo-dedupe/` via Tauri's `asset:` protocol (`convertFileSrc`) rather than base64 strings. Use read-only helpers (`read` / `inspect_exclusive`) for previews and queries so `"library-changed"` is only emitted when catalog state actually mutates.
+- **Keep IPC lean:** serve thumbnails and video proxies from `.singulo/` via Tauri's `asset:` protocol (`convertFileSrc`) rather than base64 strings. Use read-only helpers (`read` / `inspect_exclusive`) for previews and queries so `"library-changed"` is only emitted when catalog state actually mutates.
 
 ## Non-Negotiable Safety Invariants
 
 - **Copy-only imports:** importing must never delete, move, or mutate source files.
 - **No silent overwrites:** path collisions always receive a deterministic `__<id>` suffix; archive-relative paths must pass `paths::inside` symlink and cross-platform validation.
-- **Reversible deduplication:** replaced lower-resolution copies go to `.photo-dedupe/undo` until explicitly purged. Keep RAW/JPEG pairs, `.xmp` / `.ext.xmp` sidecars, and Live Photo (`ContentIdentifier`) companions protected together.
+- **Reversible deduplication:** replaced lower-resolution copies go to `.singulo/undo` until explicitly purged. Keep RAW/JPEG pairs, `.xmp` / `.ext.xmp` sidecars, and Live Photo (`ContentIdentifier`) companions protected together.
 - **Trash-only source cleanup:** source cleanup must re-verify unchanged source + byte-identical archived originals and move files to native OS Trash / Recycle Bin (`recycle.rs`), never falling back to permanent deletion.
 
 ## Codebase Map

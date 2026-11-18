@@ -188,11 +188,11 @@
 
   function changeLanguage(event: Event) {
     locale.language = (event.currentTarget as HTMLSelectElement).value === "nl" ? "nl" : "en";
-    window.localStorage.setItem("photo-dedupe.language", locale.language);
+    window.localStorage.setItem("singulo.language", locale.language);
   }
 
   function syncLanguage(event: StorageEvent) {
-    if (event.key === "photo-dedupe.language") locale.language = event.newValue === "nl" ? "nl" : "en";
+    if (event.key === "singulo.language") locale.language = event.newValue === "nl" ? "nl" : "en";
   }
 
   function monthLabel(value: string, style: "long" | "short" = "long") {
@@ -382,7 +382,7 @@
   }
 
   function updateThumbSize() {
-    window.localStorage.setItem("photo-dedupe.thumbSize", String(thumbSize));
+    window.localStorage.setItem("singulo.thumbSize", String(thumbSize));
   }
 
   async function chooseArchive() {
@@ -501,7 +501,7 @@
 
   function toggleInfo() {
     showInfo = !showInfo;
-    window.localStorage.setItem("photo-dedupe.showInfo", String(showInfo));
+    window.localStorage.setItem("singulo.showInfo", String(showInfo));
   }
 
   function reviewKey(event: KeyboardEvent) {
@@ -799,7 +799,7 @@
   async function manageXmp(remove: boolean) {
     await run(async () => {
       if (!snapshot.root) return;
-      if (remove && !await confirm(t("Remove unchanged sidecars created by Photo Archive? Existing or modified sidecars will be kept."), { title: t("Remove exported XMP"), kind: "warning" })) return;
+      if (remove && !await confirm(t("Remove unchanged sidecars created by Singulo? Existing or modified sidecars will be kept."), { title: t("Remove exported XMP"), kind: "warning" })) return;
       xmpResult = null;
       const root = snapshot.root;
       const summary = await api<XmpSummary>(remove ? "remove_exported_xmp" : "export_xmp");
@@ -855,9 +855,9 @@
   });
 
   onMount(() => {
-    locale.language = window.localStorage.getItem("photo-dedupe.language") === "nl" ? "nl" : "en";
-    thumbSize = Number(window.localStorage.getItem("photo-dedupe.thumbSize")) || 200;
-    showInfo = window.localStorage.getItem("photo-dedupe.showInfo") !== "false";
+    locale.language = window.localStorage.getItem("singulo.language") === "nl" ? "nl" : "en";
+    thumbSize = Number(window.localStorage.getItem("singulo.thumbSize")) || 200;
+    showInfo = window.localStorage.getItem("singulo.showInfo") !== "false";
     revealLabel = /Mac/i.test(navigator.userAgent) ? "Show in Finder" : /Windows/i.test(navigator.userAgent) ? "Show in Explorer" : "Show in folder";
     native = isTauri();
     mode = native ? getCurrentWindow().label : new URLSearchParams(window.location.search).get("window") ?? "main";
@@ -911,7 +911,7 @@
   });
 </script>
 
-<svelte:head><title>Photo Archive</title><meta name="description" content="An offline archive for pictures and videos" /></svelte:head>
+<svelte:head><title>Singulo</title><meta name="description" content="An offline archive for pictures and videos" /></svelte:head>
 <svelte:window onkeydown={onKey} onstorage={syncLanguage} />
 
 {#snippet libraryView(viewer: boolean)}
@@ -1010,9 +1010,22 @@
   </div>
 {/snippet}
 
+{#snippet logo(size: number)}
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <g stroke="currentColor" stroke-opacity=".55" stroke-width="1">
+      <rect x="7" y="5.5" width="10" height="13" rx="1.5" transform="rotate(-14 12 12.5)" />
+      <rect x="7" y="5.5" width="10" height="13" rx="1.5" transform="rotate(13 12 12.5)" />
+    </g>
+    <rect x="7" y="5.5" width="10" height="13" rx="1.5" fill="currentColor" />
+    <rect x="8.2" y="6.7" width="7.6" height="7" rx=".7" fill="#274b38" />
+    <path d="m8.2 12.8 2.4-2.7 1.7 1.9 1.3-1.4 2.2 2.4v.7H8.2Z" fill="currentColor" fill-opacity=".75" />
+    <path d="M18.8 1.6c.3 1.3.8 1.8 2.1 2.1-1.3.3-1.8.8-2.1 2.1-.3-1.3-.8-1.8-2.1-2.1 1.3-.3 1.8-.8 2.1-2.1Z" fill="#e8c368" />
+  </svg>
+{/snippet}
+
 {#if mode === "drop"}
   <main class="mini" class:dropping>
-    <div class="mini-heading"><span class="brand-symbol">PA</span><strong>Photo Archive</strong></div>
+    <div class="mini-heading"><span class="brand-symbol">{@render logo(25)}</span><strong>Singulo</strong></div>
     <button class="mini-drop" disabled={!native} onclick={() => snapshot.root ? importFolders() : chooseArchive()}>
       <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5" /><path d="M4 15v5h16v-5" /></svg>
       <strong>{dropping ? t("Drop to copy safely") : t("Drop photo folders here")}</strong>
@@ -1025,7 +1038,7 @@
 {:else if mode === "viewer"}
   <main class="viewer-shell">
     <header class="viewer-header">
-      <div><strong>{t("Photo Archive Viewer")}</strong><small>{snapshot.root?.split(/[\\/]/).pop() ?? t("No archive open")}</small></div>
+      <div><strong>{t("Singulo Viewer")}</strong><small>{snapshot.root?.split(/[\\/]/).pop() ?? t("No archive open")}</small></div>
       <button class="secondary" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>{t("Open main app")}</button>
     </header>
     {#if error && !selected}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
@@ -1035,7 +1048,7 @@
 {:else}
   <div class="app-shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-symbol"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m3 19 6-10 4 5 3-8 5 13H3Z" /><circle cx="7" cy="5" r="1.5" /></svg></span><div><strong>Photo Archive</strong><small>{t("Pictures and videos.")}</small></div></div>
+      <div class="brand"><span class="brand-symbol">{@render logo(34)}</span><div><strong>Singulo</strong><small>{t("Pictures and videos.")}</small></div></div>
       <button class="primary full add-folders" disabled={!native} onclick={() => importFolders()}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>{t("Add folders")}
       </button>
@@ -1065,10 +1078,9 @@
         </button>
       </nav>
       <div class="sidebar-bottom">
-        <div class="safety-note"><span class="safe-dot"></span><strong>{t("Local. Private. Yours.")}</strong><p>{t("Your photos never leave your disks. Importing doesn't change the originals.")}</p></div>
         <button class="text-button full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "drop" }); })}>{t("Open floating drop window")}</button>
         <button class="text-button full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "viewer" }); })}>{t("Open separate viewer")}</button>
-        <small class="version">PHOTO ARCHIVE / 0.1</small>
+        <small class="version">SINGULO / 0.1</small>
       </div>
     </aside>
 
@@ -1089,17 +1101,46 @@
       {#if xmpAttention.length}<details class="banner warning"><summary>{xmpAttention.length} {t("XMP sidecar warning(s)")}</summary>{#each xmpAttention as issue}<p>{issue}</p>{/each}<button class="text-button" onclick={() => xmpAttention = []}>{t("Dismiss")}</button></details>{/if}
 
       {#if tab === "import"}
-        <div class="page-heading"><div><p class="eyebrow">{t("PICTURE ARCHIVE")}</p><h1>{t("Organize your pictures.")}</h1><p class="subtitle">{t("Bring scattered folders together. We'll organize the dates")}<br class="wide-only" /> {t("and help you keep the best copies.")}</p></div><span class="hero-mark" aria-hidden="true"><svg width="60" height="60" viewBox="0 0 60 60" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="7" y="12" width="37" height="35" rx="4" transform="rotate(-10 7 12)" /><rect x="15" y="10" width="37" height="35" rx="4" fill="#f5f3ec" /><circle cx="26" cy="21" r="3" /><path d="m16 39 12-12 8 8 7-7 8 11" /></svg></span></div>
+        <div class="page-heading plain"><h1>{t("Import & archive")}</h1></div>
         <section class="destination">
-          <span class="disk-icon"><svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="3" /><path d="M3 14h18M7 17h1m3 0h1" /></svg></span>
-          <div><small>{t("ARCHIVE DESTINATION")}</small><strong>{snapshot.root ?? t("Choose a folder on your external disk")}</strong><span>{snapshot.root ? t("Photos stay as ordinary files, with original folder history.") : t("A dedicated archive folder keeps things tidy.")}</span></div>
-          <button class="secondary" title={busyReason} disabled={!native || busy} onclick={chooseArchive}>{snapshot.root ? t("Change") : t("Choose folder")}</button>
+          <span class="disk-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="3" /><path d="M3 14h18M7 17h1m3 0h1" /></svg></span>
+          <div><small>{t("ARCHIVE DESTINATION")}</small><strong>{snapshot.root ?? t("No archive open")}</strong></div>
+          <button class={snapshot.root ? "secondary" : "primary"} title={busyReason} disabled={!native || busy} onclick={chooseArchive}>{snapshot.root ? t("Change") : t("Choose folder")}</button>
         </section>
-        <button class="drop-zone" class:dropping disabled={!native} onclick={() => importFolders()}>
-          <span class="drop-icon"><svg width="35" height="35" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M3 8V5h7l2 3h9v12H3V8Z" /><path d="M12 10v7m-3-3 3 3 3-3" /></svg></span>
-          <h2>{dropping ? t("Ready. Drop your folders.") : t("Drop photo folders here")}</h2><p>{t("Or click to choose folders from your computer.")}</p><span class="primary">{t("Choose source folders")} <span aria-hidden="true">+</span></span>
-          <small>{t("PHOTOS, RAW FILES & VIDEOS")} <span> / </span> {t("COPIED, NEVER MOVED DURING IMPORT")}</small>
-        </button>
+        {#if incompleteJobs.length}
+          <section class="history incomplete-imports">
+            <h3>{t("Imports needing attention")}</h3>
+            <p class="muted">{t("Retrying skips files that are already safely copied.")}</p>
+            {#each incompleteJobs as job (job.id)}
+              <article class="incomplete-import">
+                <div class="section-line"><strong>{t(jobStatus(job))}</strong><div class="review-actions"><button class="secondary" title={busyReason} disabled={busy} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button><button class="text-button" title={busyReason} disabled={busy} onclick={() => startClearImport(job)}>{t("Clear import...")}</button></div></div>
+                <p>{jobExplanation(job)}</p>
+                {#if job.progress.folders?.length}
+                  {#each job.progress.folders as folder (folder.root)}
+                    {@const incomplete = !folder.scanComplete || folder.processed < folder.discovered || folder.failed > 0 || folder.scanErrors > 0}
+                    <div class="import-folder">
+                      <strong class:field-error={incomplete}>{t(incomplete ? "Incomplete" : "Imported")}</strong>
+                      <code>{folder.root}</code>
+                      <small>{folder.copied} {t("copied")} / {folder.duplicates} {t("exact duplicates")} / {folder.processed} {t("processed out of")} {folder.discovered} {t("recognized media files found")}</small>
+                      {#if !folder.scanComplete}<p class="field-error">{t("Folder scan did not finish. The total number of source files is not yet known.")}</p>{/if}
+                      {#if folder.processed < folder.discovered}<p class="field-error">{folder.discovered - folder.processed} {t("file(s) were not reached.")}</p>{/if}
+                      {#if folder.failed || folder.scanErrors}<p class="field-error">{folder.failed} {t("file error(s)")} / {folder.scanErrors} {t("folder scan error(s). See the issues below.")}</p>{/if}
+                    </div>
+                  {/each}
+                {:else}
+                  {#each job.roots as root}<code class="import-root">{root}</code>{/each}
+                  <p class="muted">{t("No verified folder totals are available. Retry to check every source folder.")}</p>
+                {/if}
+                {#if job.progress.errors?.length}
+                  <details class="import-issues"><summary>{job.progress.errors.length} {t("issue(s): why files may be missing")}</summary>{#each job.progress.errors as issue}<p>{issue}</p>{/each}</details>
+                {/if}
+                {#if job.progress.warnings?.length}
+                  <details class="import-issues"><summary>{job.progress.warnings.length} {t("XMP sidecar warning(s)")}</summary>{#each job.progress.warnings as issue}<p>{issue}</p>{/each}</details>
+                {/if}
+              </article>
+            {/each}
+          </section>
+        {/if}
         {#if busy || snapshot.progress.total > 0}
           <section class="progress-card"><div class="section-line"><strong>{busy ? activityTitle : t(snapshot.progress.status)}</strong>{#if determinate}<span>{percent}% · {snapshot.progress.done} / {snapshot.progress.total} {t("files")}</span>{/if}</div>{@render importProgress()}
             {#if importing}
@@ -1146,43 +1187,9 @@
             {/if}
           </section>
         {/if}
-        <div class="stats"><div class="stat"><small>{t("PICTURES AND VIDEOS")}</small><strong>{snapshot.activeCount.toLocaleString()}</strong><span>{t("in your archive")}</span></div><div class="stat"><small>{t("ARCHIVE SIZE")}</small><strong>{bytes(snapshot.activeBytes)}</strong><span>{t("verified original files")}</span></div><div class="stat"><small>{t("SPARE COPIES")}</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>{t("of removed duplicates")} / {bytes(snapshot.undoBytes)}</span></div></div>
-        <section class="next-steps"><div><h3>{t("Clean up old pictures?")}</h3><p>{t("Once copies are verified, review source files for cleanup.")}<br />{t("Nothing leaves your source folders without your say-so.")}</p></div><button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={startCleanup}>{t("Review source cleanup")}</button></section>
-        {#if incompleteJobs.length}
-          <section class="history incomplete-imports">
-            <h3>{t("Imports needing attention")}</h3>
-            <p class="muted">{t("These imports stay visible until you retry successfully or clear them. Retrying skips verified exact copies.")}</p>
-            {#each incompleteJobs as job (job.id)}
-              <article class="incomplete-import">
-                <div class="section-line"><strong>{t(jobStatus(job))}</strong><div class="review-actions"><button class="secondary" title={busyReason} disabled={busy} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button><button class="text-button" title={busyReason} disabled={busy} onclick={() => startClearImport(job)}>{t("Clear import...")}</button></div></div>
-                <p>{jobExplanation(job)}</p>
-                {#if job.progress.folders?.length}
-                  {#each job.progress.folders as folder (folder.root)}
-                    {@const incomplete = !folder.scanComplete || folder.processed < folder.discovered || folder.failed > 0 || folder.scanErrors > 0}
-                    <div class="import-folder">
-                      <strong class:field-error={incomplete}>{t(incomplete ? "Incomplete" : "Imported")}</strong>
-                      <code>{folder.root}</code>
-                      <small>{folder.copied} {t("copied")} / {folder.duplicates} {t("exact duplicates")} / {folder.processed} {t("processed out of")} {folder.discovered} {t("recognized media files found")}</small>
-                      {#if !folder.scanComplete}<p class="field-error">{t("Folder scan did not finish. The total number of source files is not yet known.")}</p>{/if}
-                      {#if folder.processed < folder.discovered}<p class="field-error">{folder.discovered - folder.processed} {t("file(s) were not reached.")}</p>{/if}
-                      {#if folder.failed || folder.scanErrors}<p class="field-error">{folder.failed} {t("file error(s)")} / {folder.scanErrors} {t("folder scan error(s). See the issues below.")}</p>{/if}
-                    </div>
-                  {/each}
-                {:else}
-                  {#each job.roots as root}<code class="import-root">{root}</code>{/each}
-                  <p class="muted">{t("No verified folder totals are available. Retry to check every source folder.")}</p>
-                {/if}
-                {#if job.progress.errors?.length}
-                  <details class="import-issues"><summary>{job.progress.errors.length} {t("issue(s): why files may be missing")}</summary>{#each job.progress.errors as issue}<p>{issue}</p>{/each}</details>
-                {/if}
-                {#if job.progress.warnings?.length}
-                  <details class="import-issues"><summary>{job.progress.warnings.length} {t("XMP sidecar warning(s)")}</summary>{#each job.progress.warnings as issue}<p>{issue}</p>{/each}</details>
-                {/if}
-              </article>
-            {/each}
-          </section>
-        {/if}
-        {#if jobs.some((job) => job.progress.status === "complete")}<section class="history"><div class="section-line"><h3>{t("Recent completed imports")}</h3><small>{t("Original folder names stay searchable")}</small></div>{#each jobs.filter((job) => job.progress.status === "complete").slice(0, 5) as job (job.id)}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t("complete")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small>{#if job.progress.warnings?.length}<details class="import-issues"><summary>{job.progress.warnings.length} {t("XMP sidecar warning(s)")}</summary>{#each job.progress.warnings as issue}<p>{issue}</p>{/each}</details>{/if}</div></div>{/each}</section>{/if}
+        <div class="stats"><div class="stat"><small>{t("PICTURES AND VIDEOS")}</small><strong>{snapshot.activeCount.toLocaleString()}</strong></div><div class="stat"><small>{t("ARCHIVE SIZE")}</small><strong>{bytes(snapshot.activeBytes)}</strong></div><div class="stat" title={t("Replaced lower-quality copies, kept so a duplicate merge can be undone.")}><small>{t("SPARE COPIES")}</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>{bytes(snapshot.undoBytes)}</span></div></div>
+        <section class="next-steps"><div><h3>{t("Clean up source folders")}</h3><p>{t("Moves source files with an identical archived copy to the system Trash.")}</p></div><button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={startCleanup}>{t("Review source cleanup")}</button></section>
+        {#if jobs.some((job) => job.progress.status === "complete")}<section class="history"><h3>{t("Recent completed imports")}</h3>{#each jobs.filter((job) => job.progress.status === "complete").slice(0, 5) as job (job.id)}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t("complete")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small>{#if job.progress.warnings?.length}<details class="import-issues"><summary>{job.progress.warnings.length} {t("XMP sidecar warning(s)")}</summary>{#each job.progress.warnings as issue}<p>{issue}</p>{/each}</details>{/if}</div></div>{/each}</section>{/if}
       {:else if tab === "library"}
         <div class="library-page">{@render libraryView(false)}</div>
       {:else if tab === "review"}
@@ -1215,7 +1222,7 @@
         <button class="text-button" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={() => run(async () => { moves = await api<MoveRow[]>("rollback_preview"); undoingMoves = true; })}>{t("Preview undo of last reorganization")}</button>
         <section class="settings-card">
           <h3>{t("Export metadata to XMP")}</h3>
-          <p class="muted">{t("Share corrected dates and original folder names with apps such as Immich. Photo Archive keeps its sidecars up to date; originals and existing sidecars are not changed.")}</p>
+          <p class="muted">{t("Share corrected dates and original folder names with apps such as Immich. Singulo keeps its sidecars up to date; originals and existing sidecars are not changed.")}</p>
           <p class="muted">{t("Existing sidecars are merged when safe. If the required filename is occupied, the photo is skipped and reported. Modified exports are kept.")}</p>
           <div class="button-row">
             <button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={() => manageXmp(false)}>{t("Export XMP")}</button>
@@ -1228,7 +1235,7 @@
         </section>
         <section class="settings-card"><h3>{t("Media tools")}</h3><p class="muted">{t("RAW and video formats depend on the bundled decoders. Unsupported originals can still be archived without a preview.")}</p><div class="tool-list">{#each tools as tool}<div><span class:unavailable={!tool.available} class="safe-dot"></span><strong>{tool.name}</strong><small title={tool.detail}>{tool.available ? t("Available") : tool.detail}</small></div>{/each}</div></section>
       {/if}
-      <footer>Photo Archive. <span>{t("Sources stay safe until you explicitly clean them up.")}</span></footer>
+      <footer>Singulo <span>{t("Sources stay safe until you explicitly clean them up.")}</span></footer>
     </main>
   </div>
   {#if dropping}
@@ -1490,9 +1497,6 @@
   .sidebar-bottom { margin-top: auto; padding-top: 20px; }
   .language-setting { display: flex; flex-direction: column; gap: 6px; margin-top: 13px; color: #788273; font-size: 10px; }
   .language-setting select { width: 100%; padding: 8px 10px; font-size: 11px; }
-  .safety-note { padding: 16px 12px; margin-bottom: 15px; background: #f2f3eb; border-radius: 9px; }
-  .safety-note strong { font-size: 11px; margin-left: 6px; }
-  .safety-note p { font-size: 11px; line-height: 1.7; color: #858e7e; margin: 10px 0 0; }
   .safe-dot { display: inline-block; height: 6px; width: 6px; background: #5c8753; border-radius: 50%; }
   .version { display: block; color: #a6ac9d; font-size: 8px; text-align: center; letter-spacing: .13em; margin-top: 22px; }
   .content { flex: 1; min-width: 0; padding: 0 38px 20px; max-width: 1560px; }
@@ -1501,7 +1505,8 @@
   .page-heading { display: flex; justify-content: space-between; align-items: center; padding: 34px 0 24px; gap: 18px; }
   .eyebrow { color: #8e9b82; margin-bottom: 15px; }
   .subtitle { color: #7a8573; line-height: 1.7; font-size: 12px; margin-bottom: 0; }
-  .hero-mark { color: #a9b79b; border: 1px solid #e4e7dd; padding: 18px; border-radius: 50%; margin-right: 12px; }
+  .page-heading.plain { padding: 30px 0 18px; }
+  .page-heading.plain h1 { margin-bottom: 0; }
   .primary, .secondary, .danger-button, .text-button { display: inline-flex; align-items: center; justify-content: center; gap: 16px; border-radius: 8px; padding: 11px 17px; font-size: 11px; font-weight: 600; white-space: nowrap; }
   .primary { border: 1px solid #2a4e39; background: #2a4e39; color: #fffef6; box-shadow: 0 3px 6px #1d3c1b0f; }
   .primary:hover { background: #365f44; }
@@ -1510,20 +1515,12 @@
   .text-button { border: 0; background: transparent; color: #6d805e; padding: 10px; }
   .danger-button { border: 1px solid #e5ccc3; background: #fff9f6; color: #9d493b; }
   .full { width: 100%; }
-  .destination { display: flex; align-items: center; gap: 14px; border: 1px solid #dfe3d8; background: #fffdf8; padding: 17px 19px; border-radius: 11px; margin-bottom: 19px; }
-  .disk-icon { background: #f1f2e8; color: #83936d; padding: 11px; border-radius: 9px; }
+  .destination { display: flex; align-items: center; gap: 12px; border: 1px solid #dfe3d8; background: #fffdf8; padding: 11px 14px; border-radius: 10px; margin-bottom: 18px; }
+  .disk-icon { background: #f1f2e8; color: #83936d; padding: 8px; border-radius: 8px; display: grid; }
   .destination div { flex: 1; min-width: 0; }
   .destination small { color: #939c87; font-size: 8px; font-weight: 700; letter-spacing: .12em; }
-  .destination strong { display: block; font-size: 12px; margin: 6px 0 5px; overflow-wrap: anywhere; }
-  .destination span:not(.disk-icon) { color: #939c87; font-size: 10px; }
-  .drop-zone { width: 100%; border: 1.5px dashed #c7d4ba; background: #eff2e7; padding: 27px 20px 25px; border-radius: 13px; color: #3c5b31; display: flex; align-items: center; flex-direction: column; }
-  .drop-zone:disabled { opacity: 1; }
-  .drop-zone:hover, .dropping { background: #e5ecd8 !important; border-color: #6d9056 !important; }
-  .drop-icon { display: grid; place-items: center; width: 63px; height: 63px; background: #e4ebd8; border-radius: 16px; margin-bottom: 17px; }
-  .drop-zone h2 { font-family: Georgia, serif; font-size: 25px; font-weight: 500; margin-bottom: 9px; }
-  .drop-zone p { color: #829375; font-size: 12px; margin-bottom: 21px; }
-  .drop-zone small { color: #95a18a; font-size: 8px; letter-spacing: .08em; margin-top: 22px; }
-  .drop-zone small span { margin: 0 9px; color: #b7c0ad; }
+  .destination strong { display: block; font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+  .dropping { background: #e5ecd8 !important; border-color: #6d9056 !important; }
   .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 19px 0; }
   .stat { padding: 19px 21px; background: #fffdf8; border: 1px solid #e0e4d9; border-radius: 10px; }
   .stat small { color: #939e86; font-size: 8px; font-weight: 700; letter-spacing: .1em; }
@@ -1555,7 +1552,7 @@
   .progress-card { border: 1px solid #dce3d4; background: #fffdf8; padding: 19px; border-radius: 10px; margin-top: 18px; }
   .section-line { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 11px; }
   .section-line strong { text-transform: capitalize; }
-  .section-line span, .section-line small { color: #929c85; }
+  .section-line span { color: #929c85; }
   .progress-track { height: 5px; background: #e9eddf; margin: 13px 0 10px; border-radius: 5px; overflow: hidden; }
   .progress-track div { height: 100%; background: #6e8d54; transition: width .2s; }
   .progress-track.indeterminate:not(.paused) div { animation: progress-slide 1.5s ease-in-out infinite; }
@@ -1569,6 +1566,7 @@
   .import-queue code { overflow-wrap: anywhere; }
   .button-row { display: flex; align-items: center; gap: 10px; margin-top: 17px; flex-wrap: wrap; }
   .history { margin-top: 26px; }
+  .history.incomplete-imports { margin-top: 0; }
   .history-row { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e1e5d9; padding: 13px 0; }
   .history-row strong { display: block; font-size: 12px; margin-bottom: 5px; }
   .history-row small { color: #8c987f; }
@@ -1784,6 +1782,6 @@
   .toast span { overflow: hidden; text-overflow: ellipsis; }
   .toast .text-button { color: #d9e8c6; font-size: 12px; }
   .toast .text-button:hover { background: #ffffff14; }
-  @media (max-width: 1000px) { .sidebar { width: 204px; padding: 25px 13px; } .content { padding: 0 25px 20px; } .hero-mark { display: none; } :global(h1) { font-size: 33px; } footer span { display: none; } }
-  @media (max-width: 760px) { .sidebar { width: 170px; padding: 20px 9px; } .brand small, .safety-note, .drop-hint { display: none; } .timeline { width: 96px; } .lightbox-info { position: absolute; left: 0; right: 0; bottom: 0; width: auto; max-height: 42%; box-shadow: 0 -10px 30px #0005; z-index: 2; } .lightbox-body { position: relative; } .size-slider { display: none; } .brand { margin: 0 3px 30px; } .brand strong { font-size: 12px; } .content { padding: 0 18px 20px; } .stats { gap: 8px; } .stat { padding: 14px 12px; } .stat strong { font-size: 23px; } .next-steps { align-items: flex-start; flex-direction: column; } .comparison .detail-columns { grid-template-columns: 1fr; } .setting-columns { grid-template-columns: 1fr; } .wide-only { display: none; } }
+  @media (max-width: 1000px) { .sidebar { width: 204px; padding: 25px 13px; } .content { padding: 0 25px 20px; } :global(h1) { font-size: 33px; } footer span { display: none; } }
+  @media (max-width: 760px) { .sidebar { width: 170px; padding: 20px 9px; } .brand small, .drop-hint { display: none; } .timeline { width: 96px; } .lightbox-info { position: absolute; left: 0; right: 0; bottom: 0; width: auto; max-height: 42%; box-shadow: 0 -10px 30px #0005; z-index: 2; } .lightbox-body { position: relative; } .size-slider { display: none; } .brand { margin: 0 3px 30px; } .brand strong { font-size: 12px; } .content { padding: 0 18px 20px; } .stats { gap: 8px; } .stat { padding: 14px 12px; } .stat strong { font-size: 23px; } .next-steps { align-items: flex-start; flex-direction: column; } .comparison .detail-columns { grid-template-columns: 1fr; } .setting-columns { grid-template-columns: 1fr; } }
 </style>

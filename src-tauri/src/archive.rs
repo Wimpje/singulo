@@ -304,7 +304,7 @@ mod performance_tests {
             File::open(
                 directory
                     .path()
-                    .join(".photo-dedupe/recovery/metadata-latest.json"),
+                    .join(".singulo/recovery/metadata-latest.json"),
             )
             .unwrap(),
         )
@@ -399,7 +399,7 @@ impl Archive {
             return Err("Choose an existing destination folder.".into());
         }
         let root = paths::canonical(root)?;
-        let private = root.join(".photo-dedupe");
+        let private = root.join(".singulo");
         if private
             .symlink_metadata()
             .is_ok_and(|m| m.file_type().is_symlink())
@@ -600,7 +600,7 @@ impl Archive {
     }
 
     pub fn check(&self) -> Result<()> {
-        let id = fs::read_to_string(self.root.join(".photo-dedupe/archive-id"))
+        let id = fs::read_to_string(self.root.join(".singulo/archive-id"))
             .map_err(|e| format!("Selected archive is disconnected or inaccessible: {e}"))?;
         if id != self.id {
             return Err("The destination is no longer the selected archive.".into());
@@ -1286,7 +1286,7 @@ impl Archive {
         import_job: Option<String>,
     ) -> Result<()> {
         self.check()?;
-        let stage_relative = format!(".photo-dedupe/staging/{}", Uuid::new_v4());
+        let stage_relative = format!(".singulo/staging/{}", Uuid::new_v4());
         let stage = paths::inside(&self.root, Path::new(&stage_relative))?;
         copy_new(source, &stage, &item.media.hash)?;
         let operation = Operation {
@@ -1516,7 +1516,7 @@ impl Archive {
             return Err("This item has RAW/JPEG, sidecar or Live Photo companions. Keep the set together; automatic removal is disabled.".into());
         }
         let item = self.item(id)?;
-        let wanted = PathBuf::from(".photo-dedupe/undo")
+        let wanted = PathBuf::from(".singulo/undo")
             .join(id)
             .join(paths::safe_name(&item.original_name));
         self.relocate(id, wanted, "undo", Some(keeper.into()))
@@ -1534,7 +1534,7 @@ impl Archive {
 
     pub fn cleanup_reader(&self) -> Result<Self> {
         self.check()?;
-        let catalog = paths::inside(&self.root, Path::new(".photo-dedupe/catalog.sqlite"))?;
+        let catalog = paths::inside(&self.root, Path::new(".singulo/catalog.sqlite"))?;
         let connection = Connection::open_with_flags(catalog, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| format!("Cannot open the catalog for source verification: {e}"))?;
         Ok(Self {
@@ -1661,7 +1661,7 @@ impl Archive {
         self.cleanup_source_safe(&occurrence)?;
         let source = PathBuf::from(&occurrence.source);
         let parent = source.parent().ok_or("Missing source parent.")?;
-        let private = parent.join(format!(".photo-dedupe-cleanup-{}", Uuid::new_v4()));
+        let private = parent.join(format!(".singulo-cleanup-{}", Uuid::new_v4()));
         fs::create_dir(&private).map_err(|e| format!("Cannot safely stage source cleanup: {e}"))?;
         let stage = private.join(source.file_name().ok_or("Missing filename.")?);
         occurrence.status = format!("staged:{}", stage.display());
@@ -1793,13 +1793,13 @@ impl Archive {
         }
         for cached in [
             self.root
-                .join(".photo-dedupe/thumbnails")
+                .join(".singulo/thumbnails")
                 .join(format!("{id}-small.jpg")),
             self.root
-                .join(".photo-dedupe/thumbnails")
+                .join(".singulo/thumbnails")
                 .join(format!("{id}-large.jpg")),
             self.root
-                .join(".photo-dedupe/previews")
+                .join(".singulo/previews")
                 .join(format!("{id}.mp4")),
         ] {
             let _ = fs::remove_file(cached);
@@ -1998,7 +1998,7 @@ impl Archive {
                 if target.exists() || from_clash {
                     let mut item = self.item(&row.id)?;
                     let source = paths::inside(&self.root, Path::new(&row.from))?;
-                    let temp = format!(".photo-dedupe/staging/reloc-{}-{}", row.id, Uuid::new_v4());
+                    let temp = format!(".singulo/staging/reloc-{}-{}", row.id, Uuid::new_v4());
                     item.path = temp.clone();
                     self.place(&source, item, None, Some(row.from.clone()))?;
                     parked.insert(row.id.clone(), temp);
@@ -2021,7 +2021,7 @@ impl Archive {
 
     pub fn reorganize(&mut self, preview: &[MoveRow]) -> Result<()> {
         self.check()?;
-        let manifest = self.root.join(".photo-dedupe/recovery").join(format!(
+        let manifest = self.root.join(".singulo/recovery").join(format!(
             "reorganization-{}-{}.json",
             chrono::Utc::now().timestamp_micros(),
             Uuid::new_v4()
@@ -2051,7 +2051,7 @@ impl Archive {
     }
 
     fn latest_reorganization(&self) -> Result<(PathBuf, Reorganization)> {
-        let mut files = fs::read_dir(self.root.join(".photo-dedupe/recovery"))
+        let mut files = fs::read_dir(self.root.join(".singulo/recovery"))
             .map_err(|e| e.to_string())?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?
@@ -2361,7 +2361,7 @@ impl Archive {
                         .find(|source| self.cleanup_source_safe(source).is_ok())
                         .ok_or("No unchanged source remains. The archive copy was kept.")?;
                     self.cleanup_check_cached(&source, None)?;
-                    let isolated = PathBuf::from(".photo-dedupe/undo")
+                    let isolated = PathBuf::from(".singulo/undo")
                         .join(format!("clear-{}", Uuid::new_v4()))
                         .join(paths::safe_name(&item.original_name));
                     self.relocate(&id, isolated, "trash-pending", item.keeper.clone())?;
@@ -2415,7 +2415,7 @@ impl Archive {
 
     pub fn backup(&self) -> Result<()> {
         self.check()?;
-        let directory = self.root.join(".photo-dedupe/recovery");
+        let directory = self.root.join(".singulo/recovery");
         let backup = directory.join("catalog-latest.sqlite");
         let temporary = directory.join(format!("catalog-{}.sqlite", Uuid::new_v4()));
         self.connection

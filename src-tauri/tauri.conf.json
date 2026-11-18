@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Photo Archive",
+  "productName": "Singulo",
   "version": "0.1.0",
-  "identifier": "com.family.photoarchive",
+  "identifier": "com.family.singulo",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Photo Archive",
+        "title": "Singulo",
         "width": 1180,
         "height": 820,
         "minWidth": 850,

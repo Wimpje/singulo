@@ -157,8 +157,8 @@ async fn open_archive(app: tauri::AppHandle, path: String) -> Result<Snapshot> {
             root
         };
         let scope = app.asset_protocol_scope();
-        let _ = scope.allow_directory(root.join(".photo-dedupe/thumbnails"), false);
-        let _ = scope.allow_directory(root.join(".photo-dedupe/previews"), false);
+        let _ = scope.allow_directory(root.join(".singulo/thumbnails"), false);
+        let _ = scope.allow_directory(root.join(".singulo/previews"), false);
         let config = app.path().app_config_dir().map_err(|e| e.to_string())?;
         fs::create_dir_all(&config).map_err(|e| e.to_string())?;
         fs::write(config.join("last-archive.txt"), &path).map_err(|e| e.to_string())?;
@@ -312,7 +312,7 @@ async fn preview_image(app: tauri::AppHandle, id: String, large: bool) -> Result
         if item.state == "purged" {
             return Err("This original was purged.".into());
         }
-        let thumbnails = root.join(".photo-dedupe/thumbnails");
+        let thumbnails = root.join(".singulo/thumbnails");
         let cached = thumbnails.join(format!(
             "{}-{}.jpg",
             item.id,
@@ -384,7 +384,7 @@ async fn video_preview(app: tauri::AppHandle, id: String) -> Result<String> {
         if item.media.kind != "video" || item.state == "purged" {
             return Err("This is not an available video.".into());
         }
-        let previews = root.join(".photo-dedupe/previews");
+        let previews = root.join(".singulo/previews");
         let cache = previews.join(format!("{}.mp4", item.id));
         if !cache.exists() {
             let pending = previews.join(format!("{}.{}.pending.mp4", item.id, uuid::Uuid::new_v4()));
@@ -894,9 +894,9 @@ fn show_window(app: tauri::AppHandle, kind: String) -> Result<()> {
         WebviewUrl::App(format!("/?window={kind}").into()),
     )
     .title(if kind == "drop" {
-        "Drop into Photo Archive"
+        "Drop into Singulo"
     } else {
-        "Photo Archive Viewer"
+        "Singulo Viewer"
     })
     .inner_size(
         if kind == "drop" { 310.0 } else { 1100.0 },
@@ -961,5 +961,5 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("Failed to start Photo Archive");
+        .expect("Failed to start Singulo");
 }

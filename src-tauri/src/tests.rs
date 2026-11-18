@@ -146,7 +146,7 @@ fn xmp_reports_modified_and_colliding_files_without_hiding_partial_success() {
     assert_eq!(summary.errors.len(), 1);
     assert!(summary.errors[0].contains("Modified"));
     assert!(summary.errors[0].starts_with(&format!("{changed}:")));
-    let marker = archive.root.join(".photo-dedupe/archive-id");
+    let marker = archive.root.join(".singulo/archive-id");
     let saved = marker.with_extension("saved");
     fs::rename(&marker, &saved).unwrap();
     assert!(archive.xmp_worker_if_needed().unwrap().is_none());
@@ -181,7 +181,7 @@ fn xmp_dates_only_override_fallbacks_for_manual_corrections_without_inventing_ti
 <exif:SubSecTimeOriginal>456</exif:SubSecTimeOriginal><exifEX:OffsetTimeOriginal>+05:30</exifEX:OffsetTimeOriginal>
 </rdf:Description></rdf:RDF>"#;
     let connection =
-        rusqlite::Connection::open(archive.root.join(".photo-dedupe/catalog.sqlite")).unwrap();
+        rusqlite::Connection::open(archive.root.join(".singulo/catalog.sqlite")).unwrap();
     for (id, source, date) in [
         ("capture", "capture metadata", "2024-06-07T08:09:10"),
         (
@@ -265,7 +265,7 @@ fn xmp_dates_only_override_fallbacks_for_manual_corrections_without_inventing_ti
 fn xmp_disabled_hooks_do_not_open_workers_or_check_unrelated_archive_files() {
     let (directory, mut archive) = xmp_fixture();
     xmp_original(directory.path(), &mut archive, "photo");
-    let marker = archive.root.join(".photo-dedupe/archive-id");
+    let marker = archive.root.join(".singulo/archive-id");
     let saved = marker.with_extension("saved");
     fs::rename(&marker, &saved).unwrap();
     archive.dismiss_review("photo", "other").unwrap();
@@ -315,7 +315,7 @@ fn xmp_merges_digikam_tags_before_folder_labels_can_be_shadowed() {
     ] {
         let (directory, mut archive) = xmp_fixture();
         let path = xmp_original(directory.path(), &mut archive, "photo");
-        rusqlite::Connection::open(archive.root.join(".photo-dedupe/catalog.sqlite")).unwrap()
+        rusqlite::Connection::open(archive.root.join(".singulo/catalog.sqlite")).unwrap()
             .execute("UPDATE items SET data=json_insert(data,'$.albums[#]','New folder') WHERE id='photo'", [])
             .unwrap();
         let xml = format!(
@@ -456,7 +456,7 @@ fn xmp_import_attention_is_persisted_separately_from_import_failures() {
     assert!(saved.errors.is_empty());
     assert_eq!((saved.status.as_str(), saved.copied), ("complete", 1));
 
-    let marker = archive.root.join(".photo-dedupe/archive-id");
+    let marker = archive.root.join(".singulo/archive-id");
     let parked = marker.with_extension("saved");
     fs::rename(&marker, &parked).unwrap();
     drop(guard);
@@ -488,7 +488,7 @@ fn xmp_opening_reports_pending_work_without_draining_the_export_queue() {
     for path in &paths {
         assert!(!root.join(format!("{path}.xmp")).exists());
     }
-    let connection = rusqlite::Connection::open(root.join(".photo-dedupe/catalog.sqlite")).unwrap();
+    let connection = rusqlite::Connection::open(root.join(".singulo/catalog.sqlite")).unwrap();
     let dirty: i64 = connection
         .query_row("SELECT COUNT(*) FROM xmp_dirty", [], |r| r.get(0))
         .unwrap();
@@ -628,7 +628,7 @@ fn xmp_lifecycle_tracks_new_imports_dates_reorganization_undo_and_albums() {
     archive
         .relocate(
             "never-exported",
-            ".photo-dedupe/undo/never-exported/photo.jpg".into(),
+            ".singulo/undo/never-exported/photo.jpg".into(),
             "undo",
             None,
         )
@@ -655,7 +655,7 @@ fn xmp_recovers_parked_updates_and_retains_all_bytes_on_recovery_collision() {
         let path = xmp_original(directory.path(), &mut archive, "photo");
         assert_eq!(archive.export_xmp().unwrap().created, 1);
         let connection =
-            rusqlite::Connection::open(archive.root.join(".photo-dedupe/catalog.sqlite")).unwrap();
+            rusqlite::Connection::open(archive.root.join(".singulo/catalog.sqlite")).unwrap();
         let data: String = connection
             .query_row(
                 "SELECT data FROM exported_xmp WHERE item='photo'",
@@ -669,10 +669,10 @@ fn xmp_recovers_parked_updates_and_retains_all_bytes_on_recovery_collision() {
         let text = fs::read_to_string(&sidecar)
             .unwrap()
             .replace("Family &amp; friends", "Revised");
-        let stage = ".photo-dedupe/staging/xmp-test";
+        let stage = ".singulo/staging/xmp-test";
         fs::write(archive.root.join(stage), &text).unwrap();
         new["hash"] = media::hash(&archive.root.join(stage)).unwrap().into();
-        let parked = ".photo-dedupe/recovery/xmp-test";
+        let parked = ".singulo/recovery/xmp-test";
         fs::rename(&sidecar, archive.root.join(parked)).unwrap();
         if collide {
             fs::write(&sidecar, b"Somebody else's new sidecar").unwrap();
@@ -681,7 +681,7 @@ fn xmp_recovers_parked_updates_and_retains_all_bytes_on_recovery_collision() {
             archive
                 .relocate(
                     "photo",
-                    ".photo-dedupe/undo/photo/photo.jpg".into(),
+                    ".singulo/undo/photo/photo.jpg".into(),
                     "undo",
                     None,
                 )
@@ -1206,7 +1206,7 @@ fn clear_import_keeps_history_and_recoverable_copy_when_trash_fails() {
     archive
         .relocate(
             &source.item,
-            Path::new(".photo-dedupe/undo/interrupted.jpg").into(),
+            Path::new(".singulo/undo/interrupted.jpg").into(),
             "trash-pending",
             None,
         )
