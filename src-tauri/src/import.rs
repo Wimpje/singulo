@@ -714,6 +714,15 @@ fn import_one(
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
+    let relative = source.strip_prefix(root).unwrap_or(source);
+    let mut folder_parts = vec![album.clone()];
+    if let Some(parent) = relative.parent() {
+        folder_parts.extend(parent.components().filter_map(|part| match part {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().to_string()),
+            _ => None,
+        }));
+    }
+    let (folder_date, _) = media::folder_path_info(&folder_parts);
     let occurrence_id = archive
         .occurrence_id(source, &media.hash)?
         .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -754,6 +763,15 @@ fn import_one(
     if let Some(owner) = &owner {
         media.date = owner.media.date.clone();
         media.date_source = owner.media.date_source.clone();
+    }
+    if media.date.is_none()
+        && let Some(date) = folder_date
+    {
+        media.date = Some(date);
+        media.date_source = "estimated: folder date".into();
+        media
+            .warnings
+            .retain(|warning| warning != "No usable date. Set the date manually if known.");
     }
     let matching = Instant::now();
     let mut candidates = if media.kind == "sidecar" {
@@ -907,7 +925,7 @@ fn import_one(
             .map(|(item, _)| item.id.clone()),
         media: media.clone(),
         settings: settings.clone(),
-        albums: vec![album.clone()],
+        albums: vec![],
     };
     if matched.is_some() {
         item.media.warnings.push("Automatically grouped after full-frame equivalence checks; the higher-resolution copy is active. Original bytes remain in archive undo.".into());

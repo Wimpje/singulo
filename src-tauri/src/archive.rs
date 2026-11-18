@@ -1022,12 +1022,18 @@ impl Archive {
             )
             .map_err(|e| e.to_string())?;
         let mut item = self.item(&occurrence.item)?;
-        let mut labels = vec![occurrence.album.clone()];
+        let mut folder_parts = vec![occurrence.album.clone()];
         if let Some(parent) = Path::new(&occurrence.relative).parent() {
-            labels.extend(parent.components().filter_map(|part| match part {
+            folder_parts.extend(parent.components().filter_map(|part| match part {
                 std::path::Component::Normal(name) => Some(name.to_string_lossy().to_string()),
                 _ => None,
             }));
+        }
+        let (folder_date, folder_labels) = media::folder_path_info(&folder_parts);
+        let mut labels = Vec::new();
+        if !folder_labels.is_empty() {
+            labels.push(folder_labels.join("/"));
+            labels.extend(folder_labels);
         }
         let mut changed = false;
         for label in labels {
@@ -1035,6 +1041,16 @@ impl Archive {
                 item.albums.push(label);
                 changed = true;
             }
+        }
+        if item.media.date.is_none()
+            && let Some(date) = folder_date
+        {
+            item.media.date = Some(date);
+            item.media.date_source = "estimated: folder date".into();
+            item.media
+                .warnings
+                .retain(|warning| warning != "No usable date. Set the date manually if known.");
+            changed = true;
         }
         if changed {
             self.connection

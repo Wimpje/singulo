@@ -1,5 +1,5 @@
 use crate::model::{Media, Result};
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, Utc};
 use image::{DynamicImage, GenericImageView, ImageReader};
 use std::{
     fs::{self, File},
@@ -233,9 +233,7 @@ pub fn valid_date(input: &str) -> Option<String> {
     {
         return None;
     }
-    if normalized.len() == 10
-        || matches!(normalized.as_bytes().get(10), Some(b'Z' | b'+' | b'-'))
-    {
+    if normalized.len() == 10 || matches!(normalized.as_bytes().get(10), Some(b'Z' | b'+' | b'-')) {
         return Some(day.to_string());
     }
     if let Some(full) = normalized
@@ -248,6 +246,129 @@ pub fn valid_date(input: &str) -> Option<String> {
         .get(..16)
         .and_then(|s| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M").ok())
         .map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string())
+}
+
+fn folder_year(value: &str) -> Option<i32> {
+    if value.len() != 4 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let year = value.parse::<i32>().ok()?;
+    (1800..=Utc::now().year()).contains(&year).then_some(year)
+}
+
+fn folder_number(value: &str, max: u32) -> Option<u32> {
+    if !(1..=2).contains(&value.len()) || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let number = value.parse::<u32>().ok()?;
+    (1..=max).contains(&number).then_some(number)
+}
+
+fn folder_year_month(value: &str) -> Option<(i32, u32)> {
+    let (year, month) = if value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        (&value[..4], &value[4..])
+    } else {
+        let mut matched = None;
+        for separator in ['-', '_', '.'] {
+            let mut parts = value.split(separator);
+            if let (Some(year), Some(month), None) = (parts.next(), parts.next(), parts.next()) {
+                matched = Some((year, month));
+                break;
+            }
+        }
+        matched?
+    };
+    Some((folder_year(year)?, folder_number(month, 12)?))
+}
+
+fn folder_date_parts(value: &str) -> Option<(i32, u32, u32)> {
+    let (year, month, day) = if value.len() == 8 && value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        (&value[..4], &value[4..6], &value[6..])
+    } else {
+        let mut matched = None;
+        for separator in ['-', '_', '.'] {
+            let mut parts = value.split(separator);
+            if let (Some(year), Some(month), Some(day), None) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            {
+                matched = Some((year, month, day));
+                break;
+            }
+        }
+        matched?
+    };
+    Some((
+        folder_year(year)?,
+        folder_number(month, 12)?,
+        folder_number(day, 31)?,
+    ))
+}
+
+fn valid_folder_date(year: i32, month: u32, day: u32) -> Option<String> {
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+    (date <= Utc::now().date_naive()).then(|| date.to_string())
+}
+
+pub fn folder_path_info(parts: &[String]) -> (Option<String>, Vec<String>) {
+    let mut ignored = vec![false; parts.len()];
+    let mut date = None;
+
+    for (index, part) in parts.iter().enumerate() {
+        if let Some((year, month, day)) = folder_date_parts(part) {
+            ignored[index] = true;
+            if let Some(parsed) = valid_folder_date(year, month, day) {
+                date = Some(parsed);
+            }
+        }
+    }
+
+    for index in 0..parts.len() {
+        if index + 2 < parts.len()
+            && let (Some(year), Some(month), Some(day)) = (
+                folder_year(&parts[index]),
+                folder_number(&parts[index + 1], 12),
+                folder_number(&parts[index + 2], 31),
+            )
+        {
+            ignored[index..=index + 2].fill(true);
+            if let Some(parsed) = valid_folder_date(year, month, day) {
+                date = Some(parsed);
+            }
+        }
+
+        if index + 1 < parts.len()
+            && let Some((year, month)) = folder_year_month(&parts[index])
+            && let Some(day) = folder_number(&parts[index + 1], 31)
+        {
+            ignored[index..=index + 1].fill(true);
+            if let Some(parsed) = valid_folder_date(year, month, day) {
+                date = Some(parsed);
+            }
+        }
+    }
+
+    for index in 0..parts.len() {
+        if index + 1 < parts.len()
+            && folder_year(&parts[index]).is_some()
+            && folder_number(&parts[index + 1], 12).is_some()
+        {
+            ignored[index..=index + 1].fill(true);
+        }
+        if folder_year_month(&parts[index]).is_some() || folder_year(&parts[index]).is_some() {
+            ignored[index] = true;
+        }
+    }
+
+    (
+        date,
+        parts
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !ignored[*index])
+            .map(|(_, part)| part.clone())
+            .collect(),
+    )
 }
 
 pub fn select_date(

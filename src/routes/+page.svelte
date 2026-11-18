@@ -1272,7 +1272,7 @@
           <dl>
             <dt>{t("Date")}</dt><dd>{formatDate(item.media.date)}<small>{dateSourceLabel(item.media.dateSource)}</small></dd>
             <dt>{t("Dimensions")}</dt><dd>{item.media.width} × {item.media.height} · {bytes(item.media.bytes)} · {item.media.kind.toUpperCase()}</dd>
-            {#if item.albums.length}<dt>{t("Original folders")}</dt><dd>{item.albums.join(" / ")}</dd>{/if}
+            {#if item.albums.length}<dt>{t("Original folders")}</dt><dd>{item.albums.join(" · ")}</dd>{/if}
             <dt>{t("Location in archive")}</dt><dd><code>{item.path}</code></dd>
           </dl>
           <button class="secondary full" disabled={!native} onclick={() => reveal(item)}>{t(revealLabel)}</button>
@@ -1350,7 +1350,7 @@
             { label: t("File size"), values: pair.map((d) => bytes(d.item.media.bytes)), higher: pictureComparison?.size.substantiallyHigher, hint: t("at least 2x size") },
             { label: t("Type"), values: pair.map((d) => `${d.item.media.kind.toUpperCase()} · ${d.item.originalName.split(".").pop()?.toUpperCase() ?? ""}`) },
             { label: t("Date"), values: pair.map((d) => formatDate(d.item.media.date)), notes: pair.map((d) => dateSourceLabel(d.item.media.dateSource)) },
-            { label: t("Original folders"), values: pair.map((d) => d.item.albums.join(" / ") || "—") },
+            { label: t("Original folders"), values: pair.map((d) => d.item.albums.join(" · ") || "—") },
             { label: t("Related files"), values: pair.map((d) => d.companions.length ? t("Yes, kept together") : "—") },
             { label: t("Location in archive"), values: pair.map((d) => d.item.path), code: true },
           ] as row (row.label)}

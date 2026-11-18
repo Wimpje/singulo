@@ -782,6 +782,109 @@ fn dates_use_metadata_then_mark_estimates_and_unknown() {
 }
 
 #[test]
+fn folder_dates_are_fallbacks_and_date_parts_are_not_folder_labels() {
+    let parts = ["Photos", "2024", "07", "18", "Italy", "Day 1"].map(str::to_string);
+    assert_eq!(
+        media::folder_path_info(&parts),
+        (
+            Some("2024-07-18".into()),
+            ["Photos", "Italy", "Day 1"].map(str::to_string).to_vec()
+        )
+    );
+    let invalid = ["Photos", "2024", "02", "30", "Italy"].map(str::to_string);
+    assert_eq!(
+        media::folder_path_info(&invalid),
+        (None, ["Photos", "Italy"].map(str::to_string).to_vec())
+    );
+
+    let (directory, mut archive) = xmp_fixture();
+    let add_item = |archive: &mut Archive, id: &str, date: Option<&str>| {
+        let source = directory.path().join(format!("{id}.jpg"));
+        fs::write(&source, id.as_bytes()).unwrap();
+        let hash = media::hash(&source).unwrap();
+        let mut item_media = sample(hash.clone());
+        item_media.date = date.map(str::to_string);
+        item_media.date_source = if date.is_some() {
+            "capture metadata".into()
+        } else {
+            "unknown".into()
+        };
+        if date.is_none() {
+            item_media
+                .warnings
+                .push("No usable date. Set the date manually if known.".into());
+        }
+        archive
+            .place(
+                &source,
+                Item {
+                    id: id.into(),
+                    path: format!("{id}.jpg"),
+                    original_name: format!("{id}.jpg"),
+                    state: "active".into(),
+                    keeper: None,
+                    media: item_media,
+                    settings: Settings::default(),
+                    albums: vec![],
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        hash
+    };
+
+    for (id, original_date, expected_date, relative) in [
+        (
+            "folder-dated",
+            None,
+            "2024-07-18",
+            "2024/07/18/Italy/Day 1/folder-dated.jpg",
+        ),
+        (
+            "capture-dated",
+            Some("2019-05-06"),
+            "2019-05-06",
+            "2024/07/18/Italy/capture-dated.jpg",
+        ),
+    ] {
+        let hash = add_item(&mut archive, id, original_date);
+        archive
+            .record_occurrence(&Occurrence {
+                id: format!("source-{id}"),
+                item: id.into(),
+                source: format!("/source/Photos/{relative}"),
+                root: "/source/Photos".into(),
+                album: "Photos".into(),
+                relative: relative.into(),
+                hash,
+                identity: "fixture".into(),
+                status: "pending".into(),
+                bytes: id.len() as u64,
+            })
+            .unwrap();
+        let item = archive.item(id).unwrap();
+        assert_eq!(item.media.date.as_deref(), Some(expected_date));
+        if original_date.is_none() {
+            assert_eq!(item.media.date_source, "estimated: folder date");
+            assert_eq!(
+                item.albums,
+                ["Photos/Italy/Day 1", "Photos", "Italy", "Day 1"]
+            );
+            assert!(
+                !item
+                    .media
+                    .warnings
+                    .contains(&"No usable date. Set the date manually if known.".into())
+            );
+        } else {
+            assert_eq!(item.media.date_source, "capture metadata");
+            assert_eq!(item.albums, ["Photos/Italy", "Photos", "Italy"]);
+        }
+    }
+}
+
+#[test]
 fn layout_renders_dates_and_blocks_escaping_paths() {
     let mut settings = Settings::default();
     let media = sample(String::new());

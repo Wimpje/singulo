@@ -31,7 +31,7 @@ Settings offer date-layout presets, original or date/time filenames, an unknown-
 - Example: `Family/{yyyy}/{mm}`.
 - Collisions get a unique suffix; unrelated files are never overwritten.
 
-Capture metadata comes first, then filesystem creation time, then **visibly estimated** modification time. Unusable/default dates go to `unknown`. No timezone means the recorded calendar date is retained, with a warning for ambiguous video timestamps. Correct dates from the viewer.
+Capture metadata comes first, then filesystem creation time, then **visibly estimated** modification time. If none provides a usable date, a valid date in the selected source folder path (for example `2024/07/18`) is used as an estimate. Date folders are omitted from original-folder labels; other folders are searchable both as a full path and as individual labels. If no file or folder date is usable, the item goes to `unknown`. No timezone means the recorded calendar date is retained, with a warning for ambiguous video timestamps. Correct dates from the viewer.
 
 Settings belong to each archive and affect new import jobs. **Preview reorganization** applies saved settings to existing managed files. A reversible recovery manifest is saved; **Preview undo of last reorganization** restores the previous layout when there are no conflicts.
 
@@ -68,7 +68,7 @@ Interrupted copy/relocation jobs are reconciled on opening. Conflicting/incomple
 
 ### Sharing metadata with other Photo organizing tools like Immich
 
-Settings offers **Export XMP** for sharing manually corrected dates and original folder names as tags. Photo Archive creates marked `filename.ext.xmp` sidecars beside active files and keeps them updated as the archive changes. Originals are never modified. Existing fallback sidecars are merged into a separate export when safe; an occupied export filename, an ambiguous or unsupported sidecar, or an externally modified export is left untouched and reported.
+Settings offers **Export XMP** for sharing manually corrected dates and original folder names as tags. Photo Archive creates marked `filename.ext.xmp` sidecars beside active files and keeps them updated as the archive changes. Original-folder tags include the full non-date folder path and its individual folder names. Originals are never modified. Existing fallback sidecars are merged into a separate export when safe; an occupied export filename, an ambiguous or unsupported sidecar, or an externally modified export is left untouched and reported.
 
 **Remove exported XMP** disables the export and removes only sidecars whose ownership and unchanged contents can be verified. Existing sidecars and modified exports are kept. If an export or removal is interrupted, the app reports pending work on reopening; use Export XMP or Remove exported XMP to resume it. A date without a time remains date-only; photo tools may not apply it, so check reported items. Folder names become tags, not photo albums.
 

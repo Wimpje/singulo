@@ -10,6 +10,7 @@ const dutch: Record<string, string> = {
   "Created": "Aangemaakt",
   "Updated": "Bijgewerkt",
   "Removed": "Verwijderd",
+  "Estimated from the folder date": "Geschat op basis van de mapdatum",
   "Skipped": "Overgeslagen",
   "Sidecars needing attention": "Sidecars die aandacht nodig hebben",
   "XMP sidecar warning(s)": "waarschuwing(en) over XMP-sidecars",
@@ -386,6 +387,7 @@ export function dateSourceLabel(source: string): string {
   if (source === "unknown") return t("No usable date found");
   if (source === "estimated: filesystem creation") return t("Estimated from the file's creation date");
   if (source === "estimated: file modification") return t("Estimated from the file's last change");
+  if (source === "estimated: folder date") return t("Estimated from the folder date");
   if (source.startsWith("capture metadata:")) return `${t("From camera metadata")} (${source.slice(17).trim()})`;
   return source;
 }
