@@ -44,6 +44,7 @@ export interface Progress {
   copied: number;
   duplicates: number;
   errors: string[];
+  warnings?: string[];
   folders?: FolderProgress[];
   timings?: ImportTimings;
 }

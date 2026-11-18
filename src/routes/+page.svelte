@@ -18,6 +18,7 @@
   type VideoPlayback = { id: string; request: number; source: string; phase: "opening" | "original" | "converting" | "proxy" };
   type UndoAction = { review: Review; discarded: string; keptName: string };
   type CleanupFolder = { root: string; rows: CleanupRow[]; eligible: string[] };
+  type XmpSummary = { created: number; updated: number; removed: number; skipped: number; errors: string[] };
   const pageSize = 60;
   let native = $state(false);
   let mode = $state("main");
@@ -71,6 +72,8 @@
   let trashImportCopies = $state(false);
   let moves = $state<MoveRow[] | null>(null);
   let undoingMoves = $state(false);
+  let xmpResult = $state<{ root: string; summary: XmpSummary } | null>(null);
+  let xmpAttention = $state<string[]>([]);
   let onTop = $state(true);
   let loaded = $state(false);
   let revealLabel = $state("Show in folder");
@@ -344,6 +347,7 @@
       if (!path) return;
       await mutate(async () => {
         snapshot = await api<Snapshot>("open_archive", { path });
+        xmpAttention = [];
         config = { ...snapshot.settings };
         await refresh();
       });
@@ -748,6 +752,17 @@
     });
   }
 
+  async function manageXmp(remove: boolean) {
+    await run(async () => {
+      if (!snapshot.root) return;
+      if (remove && !await confirm(t("Remove unchanged sidecars created by Photo Archive? Existing or modified sidecars will be kept."), { title: t("Remove exported XMP"), kind: "warning" })) return;
+      xmpResult = null;
+      const root = snapshot.root;
+      const summary = await api<XmpSummary>(remove ? "remove_exported_xmp" : "export_xmp");
+      xmpResult = { root, summary };
+    });
+  }
+
   function closeDetails() {
     const id = selected && !comparing ? selected.item.id : null;
     detailSeq += 1;
@@ -821,6 +836,9 @@
       register(await listen("library-changed", () => {
         if (mutating) return;
         void refresh(true).catch((reason: unknown) => { error = message(reason); });
+      }));
+      register(await listen<{ errors: string[] }>("xmp-attention", (event) => {
+        xmpAttention = [...xmpAttention, ...event.payload.errors];
       }));
       register(await listen<string>("quit-blocked", (event) => { error = event.payload; }));
       snapshot = await api<Snapshot>("snapshot");
@@ -989,7 +1007,7 @@
         </button>
         <button class:active={tab === "import"} aria-current={tab === "import" ? "page" : undefined} onclick={() => tab = "import"}>
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3v11m-4-4 4 4 4-4" /><path d="M4 14v6h16v-6" /></svg>
-          {t("Import & archive")} {#if importing}<span class="nav-count">{determinate ? `${percent}%` : t(snapshot.progress.status)}</span>{:else if incompleteJobs.length || snapshot.progress.errors.length}<span class="nav-count attention">{incompleteJobs.length || "!"}</span>{/if}
+          {t("Import & archive")} {#if importing}<span class="nav-count">{determinate ? `${percent}%` : t(snapshot.progress.status)}</span>{:else if incompleteJobs.length || snapshot.progress.errors.length || snapshot.progress.warnings?.length}<span class="nav-count attention">{incompleteJobs.length || "!"}</span>{/if}
         </button>
         <button class:active={tab === "settings"} aria-current={tab === "settings" ? "page" : undefined} onclick={() => tab = "settings"}>
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" /></svg>
@@ -1017,6 +1035,8 @@
         </div>
       {/if}
       {#if snapshot.progress.errors.length}<details class="banner error"><summary>{snapshot.progress.errors.length} {t("import/recovery issue(s) need attention")}</summary>{#each snapshot.progress.errors as issue}<p>{issue}</p>{/each}</details>{/if}
+      {#if snapshot.progress.warnings?.length}<details class="banner warning"><summary>{snapshot.progress.warnings.length} {t("XMP sidecar warning(s)")}</summary>{#each snapshot.progress.warnings as issue}<p>{issue}</p>{/each}</details>{/if}
+      {#if xmpAttention.length}<details class="banner warning"><summary>{xmpAttention.length} {t("XMP sidecar warning(s)")}</summary>{#each xmpAttention as issue}<p>{issue}</p>{/each}<button class="text-button" onclick={() => xmpAttention = []}>{t("Dismiss")}</button></details>{/if}
 
       {#if tab === "import"}
         <div class="page-heading"><div><p class="eyebrow">{t("PICTURE ARCHIVE")}</p><h1>{t("Organize your pictures.")}</h1><p class="subtitle">{t("Bring scattered folders together. We'll organize the dates")}<br class="wide-only" /> {t("and help you keep the best copies.")}</p></div><span class="hero-mark" aria-hidden="true"><svg width="60" height="60" viewBox="0 0 60 60" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="7" y="12" width="37" height="35" rx="4" transform="rotate(-10 7 12)" /><rect x="15" y="10" width="37" height="35" rx="4" fill="#f5f3ec" /><circle cx="26" cy="21" r="3" /><path d="m16 39 12-12 8 8 7-7 8 11" /></svg></span></div>
@@ -1074,11 +1094,14 @@
                 {#if job.progress.errors?.length}
                   <details class="import-issues"><summary>{job.progress.errors.length} {t("issue(s): why files may be missing")}</summary>{#each job.progress.errors as issue}<p>{issue}</p>{/each}</details>
                 {/if}
+                {#if job.progress.warnings?.length}
+                  <details class="import-issues"><summary>{job.progress.warnings.length} {t("XMP sidecar warning(s)")}</summary>{#each job.progress.warnings as issue}<p>{issue}</p>{/each}</details>
+                {/if}
               </article>
             {/each}
           </section>
         {/if}
-        {#if jobs.some((job) => job.progress.status === "complete")}<section class="history"><div class="section-line"><h3>{t("Recent completed imports")}</h3><small>{t("Original folder names stay searchable")}</small></div>{#each jobs.filter((job) => job.progress.status === "complete").slice(0, 5) as job (job.id)}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t("complete")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small></div></div>{/each}</section>{/if}
+        {#if jobs.some((job) => job.progress.status === "complete")}<section class="history"><div class="section-line"><h3>{t("Recent completed imports")}</h3><small>{t("Original folder names stay searchable")}</small></div>{#each jobs.filter((job) => job.progress.status === "complete").slice(0, 5) as job (job.id)}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t("complete")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small>{#if job.progress.warnings?.length}<details class="import-issues"><summary>{job.progress.warnings.length} {t("XMP sidecar warning(s)")}</summary>{#each job.progress.warnings as issue}<p>{issue}</p>{/each}</details>{/if}</div></div>{/each}</section>{/if}
       {:else if tab === "library"}
         <div class="library-page">{@render libraryView(false)}</div>
       {:else if tab === "review"}
@@ -1109,6 +1132,19 @@
         <section class="settings-card"><h3>{t("Choosing an external disk")}</h3><p class="muted">{t("Mac only: prefer APFS. Windows only: prefer NTFS. For use on both, exFAT is convenient, but lacks journaling and may require extra copying during import. Always eject safely and keep another backup.")}</p><p class="muted">{t("You do not need to reformat an existing disk. Formatting erases its files; this app never formats disks.")}</p></section>
         <section class="next-steps"><div><h3>{t("Apply the saved layout to older imports?")}</h3><p>{t("Preview existing file moves first. Sources and folder history stay untouched.")}</p></div><button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={previewMoves}>{t("Preview reorganization")}</button></section>
         <button class="text-button" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={() => run(async () => { moves = await api<MoveRow[]>("rollback_preview"); undoingMoves = true; })}>{t("Preview undo of last reorganization")}</button>
+        <section class="settings-card">
+          <h3>{t("Export metadata to XMP")}</h3>
+          <p class="muted">{t("Share corrected dates and original folder names with apps such as Immich. Photo Archive keeps its sidecars up to date; originals and existing sidecars are not changed.")}</p>
+          <p class="muted">{t("Existing sidecars are merged when safe. If the required filename is occupied, the photo is skipped and reported. Modified exports are kept.")}</p>
+          <div class="button-row">
+            <button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={() => manageXmp(false)}>{t("Export XMP")}</button>
+            <button class="text-button" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={() => manageXmp(true)}>{t("Remove exported XMP")}</button>
+          </div>
+          {#if xmpResult && xmpResult.root === snapshot.root}
+            <p role="status">{t("Created")}: {xmpResult.summary.created} · {t("Updated")}: {xmpResult.summary.updated} · {t("Removed")}: {xmpResult.summary.removed} · {t("Skipped")}: {xmpResult.summary.skipped}</p>
+            {#if xmpResult.summary.errors.length}<details><summary>{t("Sidecars needing attention")}: {xmpResult.summary.errors.length}</summary><ul>{#each xmpResult.summary.errors as issue}<li>{issue}</li>{/each}</ul></details>{/if}
+          {/if}
+        </section>
         <section class="settings-card"><h3>{t("Media tools")}</h3><p class="muted">{t("RAW and video formats depend on the bundled decoders. Unsupported originals can still be archived without a preview.")}</p><div class="tool-list">{#each tools as tool}<div><span class:unavailable={!tool.available} class="safe-dot"></span><strong>{tool.name}</strong><small title={tool.detail}>{tool.available ? t("Available") : tool.detail}</small></div>{/each}</div></section>
       {/if}
       <footer>Photo Archive. <span>{t("Sources stay safe until you explicitly clean them up.")}</span></footer>

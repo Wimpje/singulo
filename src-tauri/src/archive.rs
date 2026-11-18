@@ -9,6 +9,9 @@ use std::{
 };
 use uuid::Uuid;
 
+mod xmp;
+pub use xmp::XmpSummary;
+
 #[derive(Serialize, Deserialize)]
 struct Operation {
     item: Item,
@@ -321,6 +324,8 @@ struct Reorganization {
     undone: bool,
 }
 
+type VerifiedFiles = std::sync::Mutex<std::collections::HashMap<PathBuf, (String, String)>>;
+
 pub struct Archive {
     pub root: PathBuf,
     pub settings: Settings,
@@ -328,7 +333,10 @@ pub struct Archive {
     connection: Connection,
     _lock: Option<File>,
     import_names: std::collections::HashMap<PathBuf, std::collections::HashSet<String>>,
-    verified: std::sync::Mutex<std::collections::HashMap<PathBuf, (String, String)>>,
+    verified: std::sync::Arc<VerifiedFiles>,
+    xmp_names: std::sync::Mutex<xmp::DirectoryNames>,
+    xmp_work: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    xmp_exporting: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn json<T: Serialize + ?Sized>(value: &T) -> Result<String> {
@@ -459,6 +467,10 @@ impl Archive {
              CREATE TABLE IF NOT EXISTS reviews (item TEXT NOT NULL, candidate TEXT NOT NULL, reason TEXT NOT NULL, UNIQUE(item,candidate));
              CREATE TABLE IF NOT EXISTS companions (owner TEXT NOT NULL, child TEXT NOT NULL, UNIQUE(owner,child));
              CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS exported_xmp (item TEXT PRIMARY KEY, data TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS xmp_operations (item TEXT PRIMARY KEY, data TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS xmp_dirty (item TEXT PRIMARY KEY);
+             CREATE TABLE IF NOT EXISTS xmp_baselines (item TEXT PRIMARY KEY, base TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS import_items (job TEXT NOT NULL, item TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(job,item));
              CREATE INDEX IF NOT EXISTS import_item_refs ON import_items(item,job);
@@ -488,6 +500,25 @@ impl Archive {
                  ON CONFLICT(state) DO UPDATE SET count=count+1,bytes=bytes+excluded.bytes,visible=visible+excluded.visible;
              END;"
         ).map_err(|e| e.to_string())?;
+        connection
+            .execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS xmp_item_insert AFTER INSERT ON items
+             WHEN EXISTS(SELECT 1 FROM config WHERE key='xmp-enabled' AND value='true') BEGIN
+                 INSERT INTO xmp_dirty VALUES(NEW.id) ON CONFLICT(item) DO NOTHING;
+             END;
+             CREATE TRIGGER IF NOT EXISTS xmp_item_update AFTER UPDATE ON items
+             WHEN EXISTS(SELECT 1 FROM config WHERE key='xmp-enabled' AND value='true') BEGIN
+                 INSERT INTO xmp_dirty VALUES(NEW.id) ON CONFLICT(item) DO NOTHING;
+                 INSERT INTO xmp_dirty SELECT child FROM companions WHERE owner=NEW.id ON CONFLICT(item) DO NOTHING;
+                 INSERT INTO xmp_dirty SELECT owner FROM companions WHERE child=NEW.id ON CONFLICT(item) DO NOTHING;
+             END;
+             CREATE TRIGGER IF NOT EXISTS xmp_companion_insert AFTER INSERT ON companions
+             WHEN EXISTS(SELECT 1 FROM config WHERE key='xmp-enabled' AND value='true') BEGIN
+                 INSERT INTO xmp_dirty VALUES(NEW.owner) ON CONFLICT(item) DO NOTHING;
+                 INSERT INTO xmp_dirty VALUES(NEW.child) ON CONFLICT(item) DO NOTHING;
+             END;",
+            )
+            .map_err(|e| e.to_string())?;
         let settings = connection
             .query_row("SELECT value FROM config WHERE key='settings'", [], |row| {
                 row.get::<_, String>(0)
@@ -498,6 +529,12 @@ impl Archive {
             .transpose()?
             .unwrap_or_default();
         paths::validate(&settings)?;
+        let (xmp_work, xmp_exporting): (bool, bool) = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM config WHERE key='xmp-enabled' AND value IN ('true','removing'))
+                 OR EXISTS(SELECT 1 FROM xmp_operations),
+                 EXISTS(SELECT 1 FROM config WHERE key='xmp-enabled' AND value='true')",
+            [], |r| Ok((r.get(0)?, r.get(1)?))
+        ).map_err(|e| e.to_string())?;
         let mut archive = Self {
             root,
             settings,
@@ -505,7 +542,10 @@ impl Archive {
             connection,
             _lock: Some(lock),
             import_names: std::collections::HashMap::new(),
-            verified: std::sync::Mutex::new(std::collections::HashMap::new()),
+            verified: Default::default(),
+            xmp_names: Default::default(),
+            xmp_work: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(xmp_work)),
+            xmp_exporting: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(xmp_exporting)),
         };
         let version: u32 = archive
             .connection
@@ -1419,6 +1459,7 @@ impl Archive {
                 item.original_name
             ));
         }
+        errors.extend(self.xmp_recovery_attention()?);
         Ok(errors)
     }
 
@@ -1488,7 +1529,10 @@ impl Archive {
             connection,
             _lock: None,
             import_names: std::collections::HashMap::new(),
-            verified: std::sync::Mutex::new(std::collections::HashMap::new()),
+            verified: Default::default(),
+            xmp_names: Default::default(),
+            xmp_work: self.xmp_work.clone(),
+            xmp_exporting: self.xmp_exporting.clone(),
         })
     }
 

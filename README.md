@@ -66,6 +66,14 @@ The archive contains ordinary media files and `.photo-dedupe/` with the SQLite c
 
 Interrupted copy/relocation jobs are reconciled on opening. Conflicting/incomplete output files are reported with staging retained rather than overwritten. Stop the app and preserve the archive before manually resolving a conflict or restoring `recovery/catalog-latest.sqlite`. JSON metadata exports retain source-folder history.
 
+### Sharing metadata with other Photo organizing tools like Immich
+
+Settings offers **Export XMP** for sharing manually corrected dates and original folder names as tags. Photo Archive creates marked `filename.ext.xmp` sidecars beside active files and keeps them updated as the archive changes. Originals are never modified. Existing fallback sidecars are merged into a separate export when safe; an occupied export filename, an ambiguous or unsupported sidecar, or an externally modified export is left untouched and reported.
+
+**Remove exported XMP** disables the export and removes only sidecars whose ownership and unchanged contents can be verified. Existing sidecars and modified exports are kept. If an export or removal is interrupted, the app reports pending work on reopening; use Export XMP or Remove exported XMP to resume it. A date without a time remains date-only; photo tools may not apply it, so check reported items. Folder names become tags, not photo albums.
+
+For an Immich external library, mount the archive read-only and exclude `**/.photo-dedupe/**` to avoid scanning staging, undo copies and cached previews. Finish any planned reorganization first: Immich can treat a moved external file as a new asset and lose its Immich-side edits. Immich also warns that metadata edits on read-only external libraries may silently fail. See the [Immich external library](https://docs.immich.app/features/libraries/) and [XMP sidecar](https://docs.immich.app/features/xmp-sidecars/) documentation.
+
 ## Supported media
 
 | Family | Import | Preview / similarity |

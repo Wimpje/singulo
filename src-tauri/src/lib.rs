@@ -57,13 +57,41 @@ async fn change<T: Send + 'static>(
 ) -> Result<T> {
     read(app, move |app| {
         let state = app.state::<AppState>();
-        let result = {
-            let _busy = guard(&state)?;
+        let _busy = guard(&state)?;
+        let (result, worker) = {
             let mut archive = state.archive.lock().map_err(|e| e.to_string())?;
-            action(archive.as_mut().ok_or("Choose an archive folder first.")?)
+            let archive = archive.as_mut().ok_or("Choose an archive folder first.")?;
+            let result = action(archive);
+            (result, archive.xmp_worker_if_needed())
         };
-        if result.is_ok() {
-            app.emit("library-changed", ()).map_err(|e| e.to_string())?;
+        let changed = result.is_ok();
+        let sync = worker.and_then(|worker| match worker {
+            Some(worker) => worker.sync_exported_xmp(),
+            None => Ok(archive::XmpSummary::default()),
+        });
+        let attention = match sync {
+            Ok(summary) => summary.errors,
+            Err(error) => vec![format!("Managed XMP export failed: {error}")],
+        };
+        // Notification failures must not turn a committed action into a failed
+        // command and prevent the caller's successful refresh/close behavior.
+        if changed
+            && let Err(error) = app.emit("library-changed", ())
+        {
+            eprintln!(
+                "Archive changes were saved, but could not publish library-changed: {error}"
+            );
+        }
+        if !attention.is_empty()
+            && let Err(error) = app.emit(
+                "xmp-attention",
+                serde_json::json!({"errors": &attention}),
+            )
+        {
+            eprintln!(
+                "Could not publish xmp-attention: {error}. XMP report: {}",
+                attention.join("; ")
+            );
         }
         result
     })
@@ -160,6 +188,38 @@ async fn last_archive(app: tauri::AppHandle) -> Result<Option<String>> {
 #[tauri::command]
 async fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<()> {
     change(app, move |archive| archive.save_settings(settings)).await
+}
+
+#[tauri::command]
+async fn export_xmp(app: tauri::AppHandle) -> Result<archive::XmpSummary> {
+    // Export has its own partial-success summary; do not turn it into a generic
+    // change error or retry it implicitly after constructing the summary.
+    run_xmp(app, false).await
+}
+
+#[tauri::command]
+async fn remove_exported_xmp(app: tauri::AppHandle) -> Result<archive::XmpSummary> {
+    run_xmp(app, true).await
+}
+
+async fn run_xmp(app: tauri::AppHandle, remove: bool) -> Result<archive::XmpSummary> {
+    read(app, move |app| {
+        let state = app.state::<AppState>();
+        let _busy = guard(&state)?;
+        let worker = {
+            let archive = state.archive.lock().map_err(|e| e.to_string())?;
+            archive
+                .as_ref()
+                .ok_or("Choose an archive folder first.")?
+                .xmp_worker()?
+        };
+        if remove {
+            worker.remove_exported_xmp()
+        } else {
+            worker.export_xmp()
+        }
+    })
+    .await
 }
 
 #[tauri::command]
@@ -493,6 +553,7 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
                 progress.status = "failed".into();
                 progress.job_id = Some(job.id.clone());
                 progress.errors.push(error);
+                import::sync_xmp_warnings(&state, &mut progress);
                 let saved = (|| {
                     let archive = state.archive.lock().map_err(|e| e.to_string())?;
                     archive.as_ref().ok_or("Archive unavailable.")?.save_job(&job.id,
@@ -835,6 +896,8 @@ pub fn run() {
             open_archive,
             last_archive,
             save_settings,
+            export_xmp,
+            remove_exported_xmp,
             path_examples,
             library,
             library_months,

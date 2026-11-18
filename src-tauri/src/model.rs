@@ -69,6 +69,8 @@ pub struct Progress {
     pub duplicates: usize,
     pub errors: Vec<String>,
     #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
     pub folders: Vec<FolderProgress>,
     #[serde(default)]
     pub timings: ImportTimings,
@@ -112,6 +114,7 @@ impl Default for Progress {
             copied: 0,
             duplicates: 0,
             errors: Vec::new(),
+            warnings: Vec::new(),
             folders: Vec::new(),
             timings: ImportTimings::default(),
         }

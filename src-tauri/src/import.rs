@@ -67,6 +67,33 @@ pub fn update(app: &tauri::AppHandle, progress: &Progress) -> Result<()> {
     app.emit("progress", progress).map_err(|e| e.to_string())
 }
 
+pub fn sync_xmp(state: &AppState) -> Result<Vec<String>> {
+    let worker = {
+        let archive = state.archive.lock().map_err(|e| e.to_string())?;
+        let Some(archive) = archive.as_ref() else {
+            return Ok(Vec::new());
+        };
+        archive.xmp_worker_if_needed()?
+    };
+    match worker {
+        Some(worker) => Ok(worker.sync_exported_xmp()?.errors),
+        None => Ok(Vec::new()),
+    }
+}
+
+pub fn sync_xmp_warnings(state: &AppState, progress: &mut Progress) {
+    match sync_xmp(state) {
+        Ok(warnings) => progress.warnings.extend(
+            warnings
+                .into_iter()
+                .map(|warning| format!("Managed XMP export needs attention: {warning}")),
+        ),
+        Err(error) => progress
+            .warnings
+            .push(format!("Managed XMP export needs attention: {error}")),
+    }
+}
+
 pub fn validate_roots(raw_roots: &[String], archive_root: &Path) -> Result<Vec<PathBuf>> {
     let mut roots = Vec::<PathBuf>::new();
     for root in raw_roots {
@@ -470,6 +497,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         }
         Ok(())
     })?;
+    sync_xmp_warnings(&state, &mut progress);
     progress.timings.total_ms = started.elapsed().as_millis() as u64;
     progress.current.clear();
     progress.status = if state.cancel.load(Ordering::Relaxed) {

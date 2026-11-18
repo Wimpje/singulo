@@ -1,6 +1,18 @@
 export type Language = "en" | "nl";
 
 const dutch: Record<string, string> = {
+  "Export metadata to XMP": "Metadata naar XMP exporteren",
+  "Share corrected dates and original folder names with apps such as Immich. Photo Archive keeps its sidecars up to date; originals and existing sidecars are not changed.": "Deel gecorrigeerde datums en oorspronkelijke mapnamen met apps zoals Immich. Photo Archive houdt zijn sidecars bij; originelen en bestaande sidecars blijven ongewijzigd.",
+  "Existing sidecars are merged when safe. If the required filename is occupied, the photo is skipped and reported. Modified exports are kept.": "Bestaande sidecars worden samengevoegd wanneer dat veilig kan. Als de benodigde bestandsnaam bezet is, wordt de foto overgeslagen en gemeld. Gewijzigde exports blijven bewaard.",
+  "Export XMP": "XMP exporteren",
+  "Remove exported XMP": "Geëxporteerde XMP verwijderen",
+  "Remove unchanged sidecars created by Photo Archive? Existing or modified sidecars will be kept.": "Ongewijzigde sidecars verwijderen die door Photo Archive zijn gemaakt? Bestaande of gewijzigde sidecars blijven bewaard.",
+  "Created": "Aangemaakt",
+  "Updated": "Bijgewerkt",
+  "Removed": "Verwijderd",
+  "Skipped": "Overgeslagen",
+  "Sidecars needing attention": "Sidecars die aandacht nodig hebben",
+  "XMP sidecar warning(s)": "waarschuwing(en) over XMP-sidecars",
   "Language": "Taal",
   "Choose the interface language": "Kies de taal van de app",
   "Main navigation": "Hoofdnavigatie",

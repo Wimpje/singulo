@@ -34,6 +34,7 @@ jpeg-decoder = { version = "0.3", default-features = false }
 tempfile = "3"
 trash = "5"
 wait-timeout = "0.2"
+roxmltree = "0.21"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_System_Com", "Win32_UI_Shell"] }
