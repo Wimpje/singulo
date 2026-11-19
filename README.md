@@ -212,6 +212,16 @@ If you want to build windows installers:
 npm run tauri -- build 
 ```
 
+#### Bumping the version
+
+Raise the version before building installers you want to install over an earlier one; the Windows `.msi` only upgrades to a higher version. `package.json` holds the version: `tauri.conf.json` reads it from there, and `npm version` copies it into `src-tauri/Cargo.toml`.
+
+```sh
+npm version patch --no-git-tag-version   # 0.1.1 -> 0.1.2; use minor or major for bigger steps
+```
+
+Commit the changed `package.json`, `package-lock.json` and `src-tauri/Cargo.toml` (plus `src-tauri/Cargo.lock` after the next build). Without `--no-git-tag-version`, npm also commits and tags the version itself, but only when the working tree is clean. Installers upgrade an existing installation in place; keep using the same installer type (`.exe` or `.msi`) so Windows doesn't list two installations.
+
 
 The first command can take several minutes and a few GB of working space. Downloads are cached in the ignored `.media-build/` directory. Successful temporary builds are cleaned up; failed builds are retained there with their path printed for diagnosis. The completed input bundle goes into ignored `media-tools/`, with matching source archives, upstream notices and the build recipe under `licenses/`. An existing output directory is never overwritten; to rebuild, choose a fresh path with `npm run fetch:media -- /path/to/new-media-tools`, then pass that same path to `prepare:media`.
 

@@ -15,7 +15,8 @@
     "test:comparison": "node --test tests/comparison.test.mjs",
     "desktop": "tauri dev",
     "prepare:media": "node scripts/prepare-media.mjs",
-    "fetch:media": "node scripts/fetch-media.mjs"
+    "fetch:media": "node scripts/fetch-media.mjs",
+    "version": "node scripts/sync-version.mjs"
   },
   "license": "MIT",
   "dependencies": {
