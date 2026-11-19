@@ -991,6 +991,7 @@
         xmpAttention = [...xmpAttention, ...event.payload.errors];
       }));
       register(await listen<string>("quit-blocked", (event) => { error = event.payload; }));
+      register(await listen("closing", () => { notice = t("Stopping the import safely before closing. Retry the folders later to continue; copied files are kept."); }));
       await readSnapshot();
       if (!snapshot.root && mode === "main") {
         const path = await api<string | null>("last_archive");
@@ -1138,7 +1139,7 @@
     </button>
     <div class="mini-bottom"><small>{busy ? `${activityTitle}${importing && determinate ? ` ${percent}%` : ""}` : t("Originals kept safe")}</small><button class="text-button" onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>{t("Open app")}</button></div>
     <label class="mini-pin"><input type="checkbox" bind:checked={onTop} onchange={() => run(async () => { await getCurrentWindow().setAlwaysOnTop(onTop); })} /> {t("Always on top")}</label>
-    {#if error}<p class="mini-error">{error}</p>{/if}
+    {#if error}<p class="mini-error">{error}</p>{:else if notice}<p class="mini-error mini-notice" role="status">{notice}</p>{/if}
   </main>
 {:else if mode === "viewer"}
   <main class="viewer-shell">
@@ -1147,6 +1148,7 @@
       <button class="secondary" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "main" }); })}>{t("Open main app")}</button>
     </header>
     {#if error && !selected}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
+    {#if notice}<div class="banner success" role="status">{notice}</div>{/if}
     {#if !native}<div class="banner warning">{t("Photo previews are available in the desktop app.")}</div>{/if}
     {@render libraryView(true)}
   </main>
@@ -1806,6 +1808,7 @@
   .mini-pin { display: flex; align-items: center; gap: 6px; color: var(--hc-muted, #8b9c7a); }
   .mini-pin input { accent-color: #536f40; }
   .mini-error { font-size: calc(12px * var(--text-scale, 1)); color: #a65b45; overflow-wrap: anywhere; margin-top: 11px; }
+  .mini-notice { color: var(--hc-muted, #788273); }
   .brand { display: flex; align-items: center; gap: 10px; margin: 0 4px 26px; }
   .add-folders { gap: 8px; padding: 12px 14px; font-size: calc(14px * var(--text-scale, 1)); }
   .drop-hint { color: var(--hc-muted, #7d8676); font-size: calc(13px * var(--text-scale, 1)); line-height: 1.5; text-align: center; margin: 9px 0 18px; }

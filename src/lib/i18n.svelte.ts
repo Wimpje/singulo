@@ -144,6 +144,7 @@ const dutch: Record<string, string> = {
   "Folders queued after the current import.": "De mappen worden geïmporteerd zodra de huidige import klaar is.",
   "These folders are already queued or importing.": "Deze mappen staan al in de wachtrij of worden geïmporteerd.",
   "You can still browse photos and switch tabs.": "Je kunt nog steeds door foto's bladeren en van tabblad wisselen.",
+  "Stopping the import safely before closing. Retry the folders later to continue; copied files are kept.": "De import wordt veilig gestopt voordat Singulo sluit. Probeer de mappen later opnieuw om verder te gaan; gekopieerde bestanden blijven bewaard.",
   "The photo list changed. Refresh the library and try again.": "De lijst met foto's is net veranderd. Probeer het nog eens.",
   "All similar matches have been reviewed.": "Alle vergelijkbare foto's zijn bekeken.",
   "Select at least one eligible file.": "Kies minstens één bestand dat opgeruimd kan worden.",

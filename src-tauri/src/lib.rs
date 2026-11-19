@@ -599,6 +599,9 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
         if let Err(error) = handle.emit("library-changed", ()) {
             eprintln!("Could not publish library update: {error}");
         }
+        if state.quit_after_import.load(Ordering::SeqCst) {
+            handle.exit(0);
+        }
     });
     Ok(true)
 }
@@ -614,16 +617,58 @@ fn control_import(app: tauri::AppHandle, action: String) -> Result<()> {
         "pause" | "resume" if state.cancel.requested() => {}
         "pause" => state.pause.store(true, Ordering::Relaxed),
         "resume" => state.pause.store(false, Ordering::Relaxed),
-        "cancel" => {
-            state.cancel.request();
-            state.pause.store(false, Ordering::Relaxed);
-            if import::mark_cancelling(&mut progress) {
-                app.emit("progress", &*progress).map_err(|e| e.to_string())?;
-            }
-        }
+        "cancel" => cancel_import(&app, &mut progress)?,
         _ => return Err("Unknown import control.".into()),
     }
     Ok(())
+}
+
+fn cancel_import(app: &tauri::AppHandle, progress: &mut Progress) -> Result<()> {
+    let state = app.state::<AppState>();
+    state.cancel.request();
+    state.pause.store(false, Ordering::Relaxed);
+    if import::mark_cancelling(progress) {
+        app.emit("progress", &*progress).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Closing the last window stops a running import at a safe point and quits once it has
+/// stopped; a later retry skips files that were already copied. Other operations still block.
+fn close_requested(window: &tauri::Window, api: &tauri::CloseRequestApi) {
+    if window.app_handle().webview_windows().len() > 1 {
+        return;
+    }
+    let state = window.state::<AppState>();
+    // Set before checking `importing`; the import thread clears `importing` before reading this.
+    state.quit_after_import.store(true, Ordering::SeqCst);
+    if state.importing.load(Ordering::SeqCst) {
+        api.prevent_close();
+        let stopped = state
+            .progress
+            .lock()
+            .map_err(|e| e.to_string())
+            .and_then(|mut progress| cancel_import(window.app_handle(), &mut progress))
+            .and_then(|()| {
+                window
+                    .emit("closing", ())
+                    .map_err(|e| e.to_string())
+            });
+        if let Err(error) = stopped {
+            eprintln!("Could not stop the import before closing: {error}");
+        }
+        return;
+    }
+    state.quit_after_import.store(false, Ordering::SeqCst);
+    if state.busy.load(Ordering::SeqCst) {
+        api.prevent_close();
+        if let Err(error) = window.emit(
+            "quit-blocked",
+            "Finish or cancel the active operation before quitting.",
+        ) {
+            eprintln!("Could not report blocked quit: {error}");
+        }
+    }
 }
 
 #[tauri::command]
@@ -968,16 +1013,8 @@ pub fn run() {
             show_window
         ])
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event
-                && window.state::<AppState>().busy.load(Ordering::SeqCst)
-            {
-                api.prevent_close();
-                if let Err(error) = window.emit(
-                    "quit-blocked",
-                    "Finish or cancel the active operation before quitting.",
-                ) {
-                    eprintln!("Could not report blocked quit: {error}");
-                }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                close_requested(window, api);
             }
         })
         .run(tauri::generate_context!())
