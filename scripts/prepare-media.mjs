@@ -76,6 +76,13 @@ if (process.platform === "win32") {
     const path = join(source, entry);
     if (entry.endsWith(".dll") || entry === "exiftool_files") cpSync(path, join(destination, entry), { recursive: true });
   }
+  const makeWritable = (path) => {
+    chmodSync(path, 0o755);
+    if (statSync(path).isDirectory()) {
+      for (const entry of readdirSync(path)) makeWritable(join(path, entry));
+    }
+  };
+  makeWritable(destination);
 }
 const licenseSource = join(source, "licenses");
 if (!existsSync(licenseSource) || !statSync(licenseSource).isDirectory()) {
