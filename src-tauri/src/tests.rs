@@ -1270,6 +1270,15 @@ fn clear_import_protects_legacy_files_and_retains_older_incomplete_history() {
             .any(|job| job["id"] == "legacy")
     );
     assert!(!archive.jobs().unwrap().iter().any(|job| job["id"] == "retried"));
+    archive.save_job("interrupted", &serde_json::json!({"id":"interrupted","roots":["/twice"],"progress":{"status":"cancelled"}})).unwrap();
+    archive.save_job("interrupted-retry", &serde_json::json!({"id":"interrupted-retry","roots":["/twice"],"progress":{"status":"importing"}})).unwrap();
+    let listed = |archive: &Archive, id: &str| archive.jobs().unwrap().iter().any(|job| job["id"] == id);
+    assert!(listed(&archive, "interrupted-retry") && !listed(&archive, "interrupted"));
+    archive
+        .clear_import_with("interrupted-retry", false, |_| panic!("Keep must not call Trash"))
+        .unwrap();
+    // The earlier attempt may still own copies, so it returns once the later one is cleared.
+    assert!(listed(&archive, "interrupted") && !listed(&archive, "interrupted-retry"));
     assert!(
         !archive
             .clear_import_preview("legacy")

@@ -163,7 +163,7 @@
   const canNext = $derived(absoluteIndex >= 0 && (absoluteIndex < monthCount - 1 || monthPosition < months.length - 1));
   const settingsDirty = $derived((Object.keys(defaults) as (keyof Settings)[]).some((key) => config[key] !== snapshot.settings[key]));
   const filtered = $derived(search.trim() !== "" || filter !== "all");
-  const incompleteJobs = $derived(jobs.filter((job, index) => canRetry(job, index)));
+  const incompleteJobs = $derived(jobs.filter(canRetry));
   const cleanupSelected = $derived(new Set(cleanupSelection));
   const cleanupBytes = $derived((cleanup ?? []).reduce((total, row) => total + (cleanupSelected.has(row.id) ? row.bytes : 0), 0));
   const cleanupFolders = $derived.by(() => {
@@ -274,11 +274,11 @@
   }
 
   // Jobs are newest first. Unfinished statuses belong to the running import, or to one interrupted by a quit.
-  function canRetry(job: Job, index: number) {
+  // Job history already hides attempts superseded by a later import of the same folders.
+  function canRetry(job: Job) {
     const status = job.progress.status ?? "queued";
     if (status === "complete") return false;
-    if (job.queued || (importing && job.id === snapshot.progress.jobId)) return false;
-    return !jobs.slice(0, index).some((newer) => newer.progress.status === "complete" && job.roots.every((root) => newer.roots.includes(root)));
+    return !job.queued && !(importing && job.id === snapshot.progress.jobId);
   }
 
   function jobStatus(job: Job) {
@@ -327,6 +327,7 @@
   }
 
   function refreshImportedPhotos(progress: Progress) {
+    if (mode === "drop") return;
     const job = progress.jobId ?? "";
     if (job !== importLibraryJob) {
       importLibraryJob = job;

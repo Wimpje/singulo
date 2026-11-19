@@ -25,7 +25,7 @@
         "url": "/?window=viewer",
         "width": 1100,
         "height": 800,
-        "visible": false
+        "create": false
       },
       {
         "label": "drop",
@@ -33,7 +33,7 @@
         "url": "/?window=drop",
         "width": 340,
         "height": 380,
-        "visible": false,
+        "create": false,
         "alwaysOnTop": true,
         "resizable": false
       }

@@ -418,9 +418,33 @@ fn copy_new_with_cancel(
     Err(error)
 }
 
+fn register_functions(connection: &Connection) -> Result<()> {
+    connection
+        .create_scalar_function(
+            "unicode_lower",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |context| Ok(context.get::<String>(0)?.to_lowercase()),
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn stored_settings(connection: &Connection) -> Result<Settings> {
+    connection
+        .query_row("SELECT value FROM config WHERE key='settings'", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(|e| e.to_string())?
+        .map(|value| parse(&value))
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
 impl Archive {
+    /// Read-only view of an already opened archive, for browsing while the writer is busy.
     pub fn open_reader(root: &Path) -> Result<Self> {
-        let root = paths::canonical(root)?;
         let private = root.join(".singulo");
         let id = fs::read_to_string(private.join("archive-id"))
             .map_err(|e| format!("Selected archive is disconnected or inaccessible: {e}"))?;
@@ -429,29 +453,10 @@ impl Archive {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .map_err(|e| e.to_string())?;
-        connection
-            .create_scalar_function(
-                "unicode_lower",
-                1,
-                rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                    | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-                |context| Ok(context.get::<String>(0)?.to_lowercase()),
-            )
-            .map_err(|e| e.to_string())?;
-        connection
-            .execute_batch("PRAGMA query_only=ON; PRAGMA foreign_keys=ON;")
-            .map_err(|e| e.to_string())?;
-        let settings = connection
-            .query_row("SELECT value FROM config WHERE key='settings'", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .optional()
-            .map_err(|e| e.to_string())?
-            .map(|value| parse(&value))
-            .transpose()?
-            .unwrap_or_default();
+        register_functions(&connection)?;
+        let settings = stored_settings(&connection)?;
         Ok(Self {
-            root,
+            root: root.to_path_buf(),
             settings,
             id,
             connection,
@@ -512,15 +517,7 @@ impl Archive {
         };
         let connection =
             Connection::open(private.join("catalog.sqlite")).map_err(|e| e.to_string())?;
-        connection
-            .create_scalar_function(
-                "unicode_lower",
-                1,
-                rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                    | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-                |context| Ok(context.get::<String>(0)?.to_lowercase()),
-            )
-            .map_err(|e| e.to_string())?;
+        register_functions(&connection)?;
         connection.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
              CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -588,15 +585,7 @@ impl Archive {
              END;",
             )
             .map_err(|e| e.to_string())?;
-        let settings = connection
-            .query_row("SELECT value FROM config WHERE key='settings'", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .optional()
-            .map_err(|e| e.to_string())?
-            .map(|v| parse(&v))
-            .transpose()?
-            .unwrap_or_default();
+        let settings = stored_settings(&connection)?;
         paths::validate(&settings)?;
         let (xmp_work, xmp_exporting): (bool, bool) = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM config WHERE key='xmp-enabled' AND value IN ('true','removing'))
@@ -2308,8 +2297,9 @@ impl Archive {
                 AND (coalesce(json_extract(j.data,'$.progress.status'),'queued')!='complete'
                     OR j.id IN (SELECT id FROM jobs WHERE json_extract(data,'$.progress.status')='complete' ORDER BY rowid DESC LIMIT 20))
                 AND (json_extract(j.data,'$.progress.status')='complete' OR NOT EXISTS (
+                    -- A later attempt at the same folders represents them; only the latest needs attention.
                     SELECT 1 FROM jobs newer WHERE newer.rowid>j.rowid
-                    AND json_extract(newer.data,'$.progress.status')='complete'
+                    AND coalesce(json_extract(newer.data,'$.cleared'),0)=0
                     AND json_array_length(j.data,'$.roots')>0
                     AND NOT EXISTS (
                         SELECT 1 FROM json_each(j.data,'$.roots') root

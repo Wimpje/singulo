@@ -39,21 +39,29 @@ async fn read<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
-fn read_catalog<T>(state: &AppState, action: impl FnOnce(&Archive) -> Result<T>) -> Result<T> {
+/// Imports hold the archive lock while placing each file. Rather than letting browsing wait for
+/// that, contended reads use a short-lived read-only connection, which WAL keeps consistent.
+fn with_catalog<T>(
+    state: &AppState,
+    action: impl FnOnce(Option<&Archive>) -> Result<T>,
+) -> Result<T> {
     match state.archive.try_lock() {
-        Ok(archive) => action(archive.as_ref().ok_or("Choose an archive first.")?),
+        Ok(archive) => action(archive.as_ref()),
         Err(std::sync::TryLockError::WouldBlock) => {
-            let root = state
-                .archive_root
-                .read()
-                .map_err(|e| e.to_string())?
-                .clone()
-                .ok_or("Choose an archive first.")?;
-            let reader = Archive::open_reader(&root)?;
-            action(&reader)
+            let root = state.archive_root.read().map_err(|e| e.to_string())?.clone();
+            match root {
+                Some(root) => action(Some(&Archive::open_reader(&root)?)),
+                None => action(None),
+            }
         }
         Err(std::sync::TryLockError::Poisoned(error)) => Err(error.to_string()),
     }
+}
+
+fn read_catalog<T>(state: &AppState, action: impl FnOnce(&Archive) -> Result<T>) -> Result<T> {
+    with_catalog(state, |archive| {
+        action(archive.ok_or("Choose an archive first.")?)
+    })
 }
 
 async fn inspect_exclusive<T: Send + 'static>(
@@ -119,32 +127,30 @@ async fn change<T: Send + 'static>(
 fn current_snapshot(app: &tauri::AppHandle) -> Result<Snapshot> {
     let state = app.state::<AppState>();
     let progress = state.progress.lock().map_err(|e| e.to_string())?.clone();
-    let catalog = read_catalog(&state, |archive| {
+    with_catalog(&state, |archive| {
+        let Some(archive) = archive else {
+            return Ok(Snapshot {
+                root: None,
+                settings: Settings::default(),
+                progress,
+                active_count: 0,
+                undo_count: 0,
+                active_bytes: 0,
+                undo_bytes: 0,
+            });
+        };
         let (_, active_bytes, active_count) = archive.totals("active")?;
         let (undo_count, undo_bytes, _) = archive.totals("undo")?;
         Ok(Snapshot {
             root: Some(archive.root.to_string_lossy().into()),
             settings: archive.settings.clone(),
-            progress: progress.clone(),
+            progress,
             active_count,
             undo_count,
             active_bytes,
             undo_bytes,
         })
-    });
-    match catalog {
-        Ok(snapshot) => Ok(snapshot),
-        Err(error) if error == "Choose an archive first." => Ok(Snapshot {
-            root: None,
-            settings: Settings::default(),
-            progress,
-            active_count: 0,
-            undo_count: 0,
-            active_bytes: 0,
-            undo_bytes: 0,
-        }),
-        Err(error) => Err(error),
-    }
+    })
 }
 
 #[tauri::command]
@@ -166,7 +172,10 @@ async fn open_archive(app: tauri::AppHandle, path: String) -> Result<Snapshot> {
                 drop(slot);
                 return current_snapshot(app);
             }
+            // Keep the fallback reader root in step with the slot while holding its lock.
+            let mut reader_root = state.archive_root.write().map_err(|e| e.to_string())?;
             *slot = None;
+            *reader_root = None;
             let mut archive = Archive::open(Path::new(&path))?;
             let errors = archive.recover()?;
             let root = archive.root.clone();
@@ -175,12 +184,9 @@ async fn open_archive(app: tauri::AppHandle, path: String) -> Result<Snapshot> {
                 ..Progress::default()
             };
             *slot = Some(archive);
+            *reader_root = Some(root.clone());
             root
         };
-        *state
-            .archive_root
-            .write()
-            .map_err(|e| e.to_string())? = Some(root.clone());
         let scope = app.asset_protocol_scope();
         let _ = scope.allow_directory(root.join(".singulo/thumbnails"), false);
         let _ = scope.allow_directory(root.join(".singulo/previews"), false);
@@ -898,14 +904,24 @@ async fn tool_status(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>> {
     .await
 }
 
+// Must stay async: creating a window from a synchronous command deadlocks on Windows (wry#583).
 #[tauri::command]
-fn show_window(app: tauri::AppHandle, kind: String) -> Result<()> {
-    if !["main", "drop", "viewer"].contains(&kind.as_str()) {
-        return Err("Unknown window.".into());
-    }
-    let window = app
-        .get_webview_window(&kind)
-        .ok_or_else(|| format!("The {kind} window is unavailable."))?;
+async fn show_window(app: tauri::AppHandle, kind: String) -> Result<()> {
+    let window = match app.get_webview_window(&kind) {
+        Some(window) => window,
+        None => {
+            let config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == kind)
+                .ok_or("Unknown window.")?;
+            tauri::WebviewWindowBuilder::from_config(&app, config)
+                .and_then(|builder| builder.build())
+                .map_err(|e| e.to_string())?
+        }
+    };
     window.show().map_err(|e| e.to_string())?;
     window.set_focus().map_err(|e| e.to_string())?;
     Ok(())
@@ -952,17 +968,9 @@ pub fn run() {
             show_window
         ])
         .on_window_event(|window, event| {
-            let tauri::WindowEvent::CloseRequested { api, .. } = event else {
-                return;
-            };
-            if window.label() != "main" {
-                api.prevent_close();
-                if let Err(error) = window.hide() {
-                    eprintln!("Could not hide {} window: {error}", window.label());
-                }
-                return;
-            }
-            if window.state::<AppState>().busy.load(Ordering::SeqCst) {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && window.state::<AppState>().busy.load(Ordering::SeqCst)
+            {
                 api.prevent_close();
                 if let Err(error) = window.emit(
                     "quit-blocked",
