@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Singulo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.nosmallthing.singulo",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,11 +12,30 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Singulo",
         "width": 1180,
         "height": 820,
         "minWidth": 850,
         "minHeight": 640
+      },
+      {
+        "label": "viewer",
+        "title": "Singulo Viewer",
+        "url": "/?window=viewer",
+        "width": 1100,
+        "height": 800,
+        "visible": false
+      },
+      {
+        "label": "drop",
+        "title": "Drop into Singulo",
+        "url": "/?window=drop",
+        "width": 340,
+        "height": 380,
+        "visible": false,
+        "alwaysOnTop": true,
+        "resizable": false
       }
     ],
     "security": {

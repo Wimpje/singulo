@@ -419,6 +419,51 @@ fn copy_new_with_cancel(
 }
 
 impl Archive {
+    pub fn open_reader(root: &Path) -> Result<Self> {
+        let root = paths::canonical(root)?;
+        let private = root.join(".singulo");
+        let id = fs::read_to_string(private.join("archive-id"))
+            .map_err(|e| format!("Selected archive is disconnected or inaccessible: {e}"))?;
+        let connection = Connection::open_with_flags(
+            private.join("catalog.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|e| e.to_string())?;
+        connection
+            .create_scalar_function(
+                "unicode_lower",
+                1,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+                |context| Ok(context.get::<String>(0)?.to_lowercase()),
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .execute_batch("PRAGMA query_only=ON; PRAGMA foreign_keys=ON;")
+            .map_err(|e| e.to_string())?;
+        let settings = connection
+            .query_row("SELECT value FROM config WHERE key='settings'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(|e| e.to_string())?
+            .map(|value| parse(&value))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Self {
+            root,
+            settings,
+            id,
+            connection,
+            _lock: None,
+            import_names: std::collections::HashMap::new(),
+            verified: Default::default(),
+            xmp_names: Default::default(),
+            xmp_work: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            xmp_exporting: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    }
+
     pub fn open(root: &Path) -> Result<Self> {
         if !root.is_dir() {
             return Err("Choose an existing destination folder.".into());

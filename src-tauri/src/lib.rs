@@ -11,7 +11,7 @@ mod tests;
 use archive::Archive;
 use model::*;
 use std::{fs, io::Cursor, path::Path, process::Command, sync::atomic::Ordering};
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager};
 
 struct Busy<'a>(&'a AppState);
 impl Drop for Busy<'_> {
@@ -37,6 +37,23 @@ async fn read<T: Send + 'static>(
     tauri::async_runtime::spawn_blocking(move || action(&app))
         .await
         .map_err(|e| e.to_string())?
+}
+
+fn read_catalog<T>(state: &AppState, action: impl FnOnce(&Archive) -> Result<T>) -> Result<T> {
+    match state.archive.try_lock() {
+        Ok(archive) => action(archive.as_ref().ok_or("Choose an archive first.")?),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            let root = state
+                .archive_root
+                .read()
+                .map_err(|e| e.to_string())?
+                .clone()
+                .ok_or("Choose an archive first.")?;
+            let reader = Archive::open_reader(&root)?;
+            action(&reader)
+        }
+        Err(std::sync::TryLockError::Poisoned(error)) => Err(error.to_string()),
+    }
 }
 
 async fn inspect_exclusive<T: Send + 'static>(
@@ -101,10 +118,23 @@ async fn change<T: Send + 'static>(
 
 fn current_snapshot(app: &tauri::AppHandle) -> Result<Snapshot> {
     let state = app.state::<AppState>();
-    let archive = state.archive.lock().map_err(|e| e.to_string())?;
     let progress = state.progress.lock().map_err(|e| e.to_string())?.clone();
-    let Some(archive) = archive.as_ref() else {
-        return Ok(Snapshot {
+    let catalog = read_catalog(&state, |archive| {
+        let (_, active_bytes, active_count) = archive.totals("active")?;
+        let (undo_count, undo_bytes, _) = archive.totals("undo")?;
+        Ok(Snapshot {
+            root: Some(archive.root.to_string_lossy().into()),
+            settings: archive.settings.clone(),
+            progress: progress.clone(),
+            active_count,
+            undo_count,
+            active_bytes,
+            undo_bytes,
+        })
+    });
+    match catalog {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) if error == "Choose an archive first." => Ok(Snapshot {
             root: None,
             settings: Settings::default(),
             progress,
@@ -112,19 +142,9 @@ fn current_snapshot(app: &tauri::AppHandle) -> Result<Snapshot> {
             undo_count: 0,
             active_bytes: 0,
             undo_bytes: 0,
-        });
-    };
-    let (_, active_bytes, active_count) = archive.totals("active")?;
-    let (undo_count, undo_bytes, _) = archive.totals("undo")?;
-    Ok(Snapshot {
-        root: Some(archive.root.to_string_lossy().into()),
-        settings: archive.settings.clone(),
-        progress,
-        active_count,
-        undo_count,
-        active_bytes,
-        undo_bytes,
-    })
+        }),
+        Err(error) => Err(error),
+    }
 }
 
 #[tauri::command]
@@ -157,6 +177,10 @@ async fn open_archive(app: tauri::AppHandle, path: String) -> Result<Snapshot> {
             *slot = Some(archive);
             root
         };
+        *state
+            .archive_root
+            .write()
+            .map_err(|e| e.to_string())? = Some(root.clone());
         let scope = app.asset_protocol_scope();
         let _ = scope.allow_directory(root.join(".singulo/thumbnails"), false);
         let _ = scope.allow_directory(root.join(".singulo/previews"), false);
@@ -262,10 +286,9 @@ async fn library(
     offset: usize,
 ) -> Result<Vec<Item>> {
     read(app, move |app| {
-        let state = app.state::<AppState>();
-        let archive = state.archive.lock().map_err(|e| e.to_string())?;
-        let archive = archive.as_ref().ok_or("Choose an archive first.")?;
-        archive.page(&search, &filter, month.as_deref(), offset)
+        read_catalog(&app.state::<AppState>(), |archive| {
+            archive.page(&search, &filter, month.as_deref(), offset)
+        })
     })
     .await
 }
@@ -277,12 +300,9 @@ async fn library_months(
     filter: String,
 ) -> Result<Vec<archive::LibraryMonth>> {
     read(app, move |app| {
-        let state = app.state::<AppState>();
-        let archive = state.archive.lock().map_err(|e| e.to_string())?;
-        archive
-            .as_ref()
-            .ok_or("Choose an archive first.")?
-            .months(&search, &filter)
+        read_catalog(&app.state::<AppState>(), |archive| {
+            archive.months(&search, &filter)
+        })
     })
     .await
 }
@@ -290,12 +310,11 @@ async fn library_months(
 #[tauri::command]
 async fn item_details(app: tauri::AppHandle, id: String) -> Result<serde_json::Value> {
     read(app, move |app| {
-        let state = app.state::<AppState>();
-        let archive = state.archive.lock().map_err(|e| e.to_string())?;
-        let archive = archive.as_ref().ok_or("Choose an archive first.")?;
-        Ok(serde_json::json!({"item":archive.item(&id)?,
-            "sources":archive.item_occurrences(&id)?,
-            "companions":archive.companions(&id)?}))
+        read_catalog(&app.state::<AppState>(), |archive| {
+            Ok(serde_json::json!({"item":archive.item(&id)?,
+                "sources":archive.item_occurrences(&id)?,
+                "companions":archive.companions(&id)?}))
+        })
     })
     .await
 }
@@ -304,12 +323,10 @@ async fn item_details(app: tauri::AppHandle, id: String) -> Result<serde_json::V
 async fn preview_image(app: tauri::AppHandle, id: String, large: bool) -> Result<String> {
     read(app, move |app| {
         let state = app.state::<AppState>();
-        let (root, item) = {
-            let archive = state.archive.lock().map_err(|e| e.to_string())?;
-            let archive = archive.as_ref().ok_or("Choose an archive first.")?;
+        let (root, item) = read_catalog(&state, |archive| {
             archive.check()?;
-            (archive.root.clone(), archive.item(&id)?)
-        };
+            Ok((archive.root.clone(), archive.item(&id)?))
+        })?;
         if item.state == "purged" {
             return Err("This original was purged.".into());
         }
@@ -351,12 +368,10 @@ async fn preview_image(app: tauri::AppHandle, id: String, large: bool) -> Result
 async fn video_original(app: tauri::AppHandle, id: String) -> Result<String> {
     read(app, move |app| {
         let state = app.state::<AppState>();
-        let (root, item) = {
-            let archive = state.archive.lock().map_err(|e| e.to_string())?;
-            let archive = archive.as_ref().ok_or("Choose an archive first.")?;
+        let (root, item) = read_catalog(&state, |archive| {
             archive.check()?;
-            (archive.root.clone(), archive.item(&id)?)
-        };
+            Ok((archive.root.clone(), archive.item(&id)?))
+        })?;
         if item.media.kind != "video" || item.state == "purged" {
             return Err("This is not an available video.".into());
         }
@@ -376,12 +391,10 @@ async fn video_original(app: tauri::AppHandle, id: String) -> Result<String> {
 async fn video_preview(app: tauri::AppHandle, id: String) -> Result<String> {
     read(app, move |app| {
         let state = app.state::<AppState>();
-        let (root, item) = {
-            let archive = state.archive.lock().map_err(|e| e.to_string())?;
-            let archive = archive.as_ref().ok_or("Choose an archive first.")?;
+        let (root, item) = read_catalog(&state, |archive| {
             archive.check()?;
-            (archive.root.clone(), archive.item(&id)?)
-        };
+            Ok((archive.root.clone(), archive.item(&id)?))
+        })?;
         if item.media.kind != "video" || item.state == "purged" {
             return Err("This is not an available video.".into());
         }
@@ -890,27 +903,11 @@ fn show_window(app: tauri::AppHandle, kind: String) -> Result<()> {
     if !["main", "drop", "viewer"].contains(&kind.as_str()) {
         return Err("Unknown window.".into());
     }
-    if let Some(window) = app.get_webview_window(&kind) {
-        window.show().map_err(|e| e.to_string())?;
-        window.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    let builder = WebviewWindowBuilder::new(
-        &app,
-        &kind,
-        WebviewUrl::App(format!("/?window={kind}").into()),
-    )
-    .title(if kind == "drop" {
-        "Drop into Singulo"
-    } else {
-        "Singulo Viewer"
-    })
-    .inner_size(
-        if kind == "drop" { 340.0 } else { 1100.0 },
-        if kind == "drop" { 380.0 } else { 800.0 },
-    )
-    .always_on_top(kind == "drop");
-    builder.build().map_err(|e| e.to_string())?;
+    let window = app
+        .get_webview_window(&kind)
+        .ok_or_else(|| format!("The {kind} window is unavailable."))?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -955,9 +952,17 @@ pub fn run() {
             show_window
         ])
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event
-                && window.state::<AppState>().busy.load(Ordering::SeqCst)
-            {
+            let tauri::WindowEvent::CloseRequested { api, .. } = event else {
+                return;
+            };
+            if window.label() != "main" {
+                api.prevent_close();
+                if let Err(error) = window.hide() {
+                    eprintln!("Could not hide {} window: {error}", window.label());
+                }
+                return;
+            }
+            if window.state::<AppState>().busy.load(Ordering::SeqCst) {
                 api.prevent_close();
                 if let Err(error) = window.emit(
                     "quit-blocked",

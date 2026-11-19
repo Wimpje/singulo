@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
   import { isTauri, convertFileSrc } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open, confirm } from "@tauri-apps/plugin-dialog";
@@ -24,6 +25,7 @@
   let textScale = $state(storedTextScale());
   let highContrast = $state(window.localStorage.getItem("singulo.highContrast") === "true");
   let native = $state(false);
+  let appVersion = $state("");
   let mode = $state("main");
   let tab = $state<Tab>("library");
   let snapshot = $state<Snapshot>(structuredClone(emptySnapshot));
@@ -957,6 +959,7 @@
     native = isTauri();
     mode = native ? getCurrentWindow().label : new URLSearchParams(window.location.search).get("window") ?? "main";
     if (!native) return;
+    void getVersion().then((version) => { appVersion = version; }).catch((reason: unknown) => { console.error(reason); });
     const removers: UnlistenFn[] = [];
     let disposed = false;
     const register = (unsubscribe: UnlistenFn) => { if (disposed) unsubscribe(); else removers.push(unsubscribe); };
@@ -1191,7 +1194,7 @@
         </div>
         <button class="text-button full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "drop" }); })}>{t("Open floating drop window")}</button>
         <button class="text-button full" disabled={!native} onclick={() => run(async () => { await api("show_window", { kind: "viewer" }); })}>{t("Open separate viewer")}</button>
-        <small class="version">SINGULO / 0.1</small>
+        <small class="version">SINGULO{appVersion ? ` / ${appVersion}` : ""}</small>
       </div>
     </aside>
 
