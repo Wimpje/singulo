@@ -479,10 +479,21 @@
     window.localStorage.setItem("singulo.thumbSize", String(thumbSize));
   }
 
+  // Opened outside run() so the busy status only appears once folders have been chosen.
+  async function chooseFolders(title: string, multiple: boolean) {
+    try {
+      const chosen = await open({ directory: true, multiple, title });
+      return typeof chosen === "string" ? [chosen] : chosen;
+    } catch (reason: unknown) {
+      error = message(reason);
+      return null;
+    }
+  }
+
   async function chooseArchive() {
+    const [path] = await chooseFolders(t("Choose the archive folder, ideally on an external disk"), false) ?? [];
+    if (!path) return;
     await run(async () => {
-      const path = await open({ directory: true, multiple: false, title: t("Choose the archive folder, ideally on an external disk") });
-      if (!path) return;
       await mutate(async () => {
         snapshot = await api<Snapshot>("open_archive", { path });
         xmpAttention = [];
@@ -502,10 +513,10 @@
       await chooseArchive();
       if (!snapshot.root) return;
     }
+    const folders = paths ?? await chooseFolders(t("Choose photo folders to copy"), true);
+    if (!folders?.length) return;
     await run(async () => {
-      const folders = paths ?? await open({ directory: true, multiple: true, title: t("Choose photo folders to copy") });
-      if (!folders) return;
-      const started = await api<boolean>("start_import", { roots: typeof folders === "string" ? [folders] : folders });
+      const started = await api<boolean>("start_import", { roots: folders });
       notice = started ? t("Folders added. Originals stay untouched during import.") : t("Folders queued after the current import.");
       await refreshJobs();
     });
