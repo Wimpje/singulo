@@ -86,12 +86,21 @@
   let mutating = false;
   let moreRequest: Promise<void> | null = null;
   let jobsRequest = 0;
+  let progressRevision = 0;
+  let importLibraryJob = "";
+  let importLibraryCopied = 0;
+  let importLibraryTimer: ReturnType<typeof setTimeout> | undefined;
+  let stageProgress = $state<Progress>(emptySnapshot.progress);
   let progressClock = $state(Date.now());
   let progressStartedAt = $state(Date.now());
-  const cancelling = $derived(snapshot.progress.status === "cancelling");
+  const importStatus = $derived(snapshot.progress.status);
+  const cancelling = $derived(importStatus === "cancelling");
   const importing = $derived(cancelling || ["scanning", "importing", "paused"].includes(snapshot.progress.status));
   const progressKey = $derived(importing ? snapshot.progress.jobId ?? "active" : null);
   const busy = $derived(working || importing || cleanupLoading || clearLoading);
+  const retryBlocked = $derived(working || cancelling || cleanupLoading || clearLoading);
+  const displayedStage = $derived(stageProgress.jobId === snapshot.progress.jobId && stageProgress.status === importStatus
+    ? stageProgress : snapshot.progress);
   const hasArchive = $derived(!!snapshot.root);
   const percent = $derived(snapshot.progress.total ? Math.round(snapshot.progress.done / snapshot.progress.total * 100) : 0);
   const determinate = $derived(snapshot.progress.status !== "scanning" && snapshot.progress.total > 0 && (!importing || snapshot.progress.done > 0));
@@ -101,7 +110,7 @@
     if (cancelling) return t("Cancelling import...");
     if (snapshot.progress.status === "paused") return t("Import paused");
     if (snapshot.progress.status === "scanning") return t("Finding photos and videos...");
-    switch (snapshot.progress.phase) {
+    switch (displayedStage.phase) {
       case "hashing": return t("Reading originals and checking exact copies...");
       case "metadata": return t("Reading dates and camera details...");
       case "raw": return t("Developing a RAW comparison preview...");
@@ -115,9 +124,9 @@
     if (cancelling) return t("Waiting for the current operation to stop safely. Your source files are unchanged.");
     if (snapshot.progress.status === "paused") return t("Resume or cancel the import to make these actions available again.");
     if (snapshot.progress.status === "scanning") return `${(snapshot.progress.folders ?? []).reduce((total, folder) => total + folder.discovered, 0).toLocaleString()} ${t("recognized media files found")}`;
-    if (snapshot.progress.phase === "hashing") return `${(snapshot.progress.checked ?? 0).toLocaleString()} / ${snapshot.progress.total.toLocaleString()} ${t("originals checked")}`;
-    if (snapshot.progress.phase === "metadata") return `${snapshot.progress.batchFiles ?? 0} ${t("files in this metadata batch")}`;
-    if (snapshot.progress.phase === "raw") return t("RAW files such as PEF need decoding before they can be compared. Your original stays unchanged.");
+    if (displayedStage.phase === "hashing") return `${(displayedStage.checked ?? 0).toLocaleString()} / ${displayedStage.total.toLocaleString()} ${t("originals checked")}`;
+    if (displayedStage.phase === "metadata") return `${displayedStage.batchFiles ?? 0} ${t("files in this metadata batch")}`;
+    if (displayedStage.phase === "raw") return t("RAW files such as PEF need decoding before they can be compared. Your original stays unchanged.");
     return "";
   });
   const activityTitle = $derived(importing
@@ -185,6 +194,15 @@
     progressClock = now;
     progressStartedAt = now - untrack(() => snapshot.progress.timings?.totalMs ?? 0);
     const timer = setInterval(() => { progressClock = Date.now(); }, 1000);
+    return () => clearInterval(timer);
+  });
+
+  $effect(() => {
+    if (!progressKey || !importStatus) return;
+    // Sample the stage, its details, and its path together. Counts and control states stay live.
+    const sample = () => { stageProgress = snapshot.progress; };
+    untrack(sample);
+    const timer = setInterval(sample, 1000);
     return () => clearInterval(timer);
   });
 
@@ -267,6 +285,14 @@
       && ["scanning", "importing", "paused", "cancelling", "queued"].includes(status) ? "interrupted" : status;
   }
 
+  function retryReason(job: Job) {
+    if (retryBlocked) return busyReason;
+    if (jobs.some((other) => (other.queued || (importing && other.id === snapshot.progress.jobId))
+      && job.roots.every((root) => other.roots.includes(root)))) {
+      return t("These folders are already queued or importing.");
+    }
+  }
+
   function jobExplanation(job: Job) {
     const status = jobStatus(job);
     if (status === "cancelled") return t("Import canceled. Files that were not reached are still only in your source folders.");
@@ -290,8 +316,33 @@
     finally { working = false; }
   }
 
+  async function readSnapshot() {
+    const revision = progressRevision;
+    const next = await api<Snapshot>("snapshot");
+    // Don't overwrite a newer live progress event with a snapshot that was already in flight.
+    if (next.root === snapshot.root && revision !== progressRevision) next.progress = snapshot.progress;
+    snapshot = next;
+  }
+
+  function refreshImportedPhotos(progress: Progress) {
+    const job = progress.jobId ?? "";
+    if (job !== importLibraryJob) {
+      importLibraryJob = job;
+      importLibraryCopied = 0;
+    }
+    const added = progress.copied > importLibraryCopied;
+    importLibraryCopied = progress.copied;
+    if (!added || !loaded || !snapshot.root || importLibraryTimer) return;
+    importLibraryTimer = setTimeout(() => {
+      importLibraryTimer = undefined;
+      void readSnapshot()
+        .then(() => loadLibrary(true))
+        .catch((reason: unknown) => { error = message(reason); });
+    }, 1000);
+  }
+
   async function refresh(preservePages = false) {
-    snapshot = await api<Snapshot>("snapshot");
+    await readSnapshot();
     if (snapshot.root) {
       if (mode === "main") {
         [reviews] = await Promise.all([api<Review[]>("review_list"), refreshJobs()]);
@@ -919,7 +970,9 @@
         }));
       }
       register(await listen<Progress>("progress", (event) => {
+        progressRevision += 1;
         snapshot.progress = event.payload;
+        refreshImportedPhotos(event.payload);
       }));
       if (mode === "main") {
         register(await listen("imports-changed", () => {
@@ -934,7 +987,7 @@
         xmpAttention = [...xmpAttention, ...event.payload.errors];
       }));
       register(await listen<string>("quit-blocked", (event) => { error = event.payload; }));
-      snapshot = await api<Snapshot>("snapshot");
+      await readSnapshot();
       if (!snapshot.root && mode === "main") {
         const path = await api<string | null>("last_archive");
         if (path) {
@@ -951,7 +1004,7 @@
       await refresh();
       loaded = true;
     });
-    return () => { disposed = true; clearTimeout(undoTimer); for (const remove of removers) remove(); };
+    return () => { disposed = true; clearTimeout(undoTimer); clearTimeout(importLibraryTimer); for (const remove of removers) remove(); };
   });
 </script>
 
@@ -1034,7 +1087,7 @@
         <p>{busyReason}</p>
         {#if importing}
           {#if tab !== "import"}<p><strong>{phaseTitle}</strong> {phaseDetail}</p>{/if}
-          <p>{t("You can still browse photos, switch tabs and queue more folders.")}</p>
+          <p>{t(cancelling ? "You can still browse photos and switch tabs." : "You can still browse photos, switch tabs and queue more folders.")}</p>
           {#if snapshot.progress.status === "paused"}<p><strong>{t("Resume or cancel the import to make these actions available again.")}</strong></p>{/if}
         {/if}
       </div>
@@ -1170,8 +1223,9 @@
             <h3>{t("Imports needing attention")}</h3>
             <p class="muted">{t("Retrying skips files that are already safely copied.")}</p>
             {#each incompleteJobs as job (job.id)}
+              {@const reason = retryReason(job)}
               <article class="incomplete-import">
-                <div class="section-line"><strong>{t(jobStatus(job))}</strong><div class="review-actions"><button class="secondary" title={busyReason} disabled={busy} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button><button class="text-button" title={busyReason} disabled={busy} onclick={() => startClearImport(job)}>{t("Clear import...")}</button></div></div>
+                <div class="section-line"><strong>{t(jobStatus(job))}</strong><div class="review-actions"><button class="secondary" title={reason} disabled={!!reason} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button><button class="text-button" title={busyReason} disabled={busy} onclick={() => startClearImport(job)}>{t("Clear import...")}</button></div></div>
                 <p>{jobExplanation(job)}</p>
                 {#if job.progress.folders?.length}
                   {#each job.progress.folders as folder (folder.root)}
@@ -1204,12 +1258,15 @@
             {#if importing}
               <div class="import-stage">
                 <strong>{phaseTitle}</strong>
-                {#if phaseDetail}<p>{phaseDetail}</p>{/if}
-                {#if snapshot.progress.done === 0 && snapshot.progress.status === "importing" && snapshot.progress.phase !== "finalizing"}<p>{t("Preparing the first files. The percentage starts when files have been processed.")}</p>{/if}
-                {#if snapshot.progress.status === "importing" && ["hashing", "metadata"].includes(snapshot.progress.phase ?? "")}<p>{t("Cloud-only originals may need to download first. External drives can also take longer to read.")}</p>{/if}
+                <p class="stage-detail">
+                  {phaseDetail || (displayedStage.done === 0 && displayedStage.status === "importing" && displayedStage.phase !== "finalizing" ? t("Preparing the first files. The percentage starts when files have been processed.") : "")}
+                  {#if displayedStage.status === "importing" && ["hashing", "metadata"].includes(displayedStage.phase ?? "")}
+                    <span>{t("Cloud-only originals may need to download first. External drives can also take longer to read.")}</span>
+                  {/if}
+                </p>
               </div>
             {/if}
-            {#if snapshot.progress.current}<p class="current-file">{snapshot.progress.current}</p>{/if}
+            {#if importing}<p class="current-file" title={displayedStage.current || undefined}>{displayedStage.current}</p>{/if}
             <p class="muted">{snapshot.progress.copied} {t("originals copied")} / {snapshot.progress.duplicates} {t("exact duplicates skipped")} · {t("Total elapsed")}: {(elapsedMs / 1000).toFixed(0)} s</p>
             {#if snapshot.progress.timings}
               {@const timings = snapshot.progress.timings}
@@ -1640,9 +1697,11 @@
   @media (prefers-reduced-motion: reduce) {
     .activity-indicator, .progress-track.indeterminate:not(.paused) div { animation: none; }
   }
-  .current-file { font-size: calc(12px * var(--text-scale, 1)); color: var(--hc-muted, #8a9680); overflow-wrap: anywhere; margin-bottom: 0; }
+  .current-file { font-size: calc(12px * var(--text-scale, 1)); color: var(--hc-muted, #8a9680); min-block-size: 1lh; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-bottom: 0; }
   .import-stage { font-size: calc(14px * var(--text-scale, 1)); line-height: 1.6; }
   .import-stage p { margin: 5px 0; color: var(--hc-muted, #788273); }
+  .stage-detail { min-block-size: 2lh; }
+  .stage-detail span { display: block; }
   .import-queue code { overflow-wrap: anywhere; }
   .button-row { display: flex; align-items: center; gap: 10px; margin-top: 17px; flex-wrap: wrap; }
   .history { margin-top: 26px; }

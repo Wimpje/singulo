@@ -142,6 +142,8 @@ const dutch: Record<string, string> = {
   "Choose photo folders to copy": "Kies de fotomappen die je wilt kopiëren",
   "Folders added. Originals stay untouched during import.": "Mappen toegevoegd. Je originelen worden alleen gekopieerd, niet gewijzigd.",
   "Folders queued after the current import.": "De mappen worden geïmporteerd zodra de huidige import klaar is.",
+  "These folders are already queued or importing.": "Deze mappen staan al in de wachtrij of worden geïmporteerd.",
+  "You can still browse photos and switch tabs.": "Je kunt nog steeds door foto's bladeren en van tabblad wisselen.",
   "The photo list changed. Refresh the library and try again.": "De lijst met foto's is net veranderd. Probeer het nog eens.",
   "All similar matches have been reviewed.": "Alle vergelijkbare foto's zijn bekeken.",
   "Select at least one eligible file.": "Kies minstens één bestand dat opgeruimd kan worden.",
