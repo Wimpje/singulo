@@ -1664,6 +1664,7 @@ fn video_review_candidates_require_capture_day_and_close_duration() {
     }))
     .unwrap();
     assert!(!legacy_settings.deep_video_matching);
+    assert!(!legacy_settings.prevent_sleep_during_import);
     for (id, day, duration, capture) in [
         ("same", "2023-07-18", Some(100.0), true),
         ("boundary", "2023-07-18", Some(101.0), true),

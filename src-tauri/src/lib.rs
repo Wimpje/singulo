@@ -5,6 +5,7 @@ mod media;
 mod model;
 mod paths;
 mod recycle;
+mod sleep;
 #[cfg(test)]
 mod tests;
 

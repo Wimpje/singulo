@@ -6,6 +6,7 @@ export interface Settings {
   unknownFolder: string;
   automaticMatches: boolean;
   deepVideoMatching: boolean;
+  preventSleepDuringImport: boolean;
 }
 
 export interface Media {
@@ -149,6 +150,7 @@ export const defaults: Settings = {
   unknownFolder: "unknown",
   automaticMatches: true,
   deepVideoMatching: false,
+  preventSleepDuringImport: false,
 };
 
 export const emptySnapshot: Snapshot = {

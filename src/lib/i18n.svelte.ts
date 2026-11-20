@@ -27,6 +27,8 @@ const dutch: Record<string, string> = {
   "Pictures and videos.": "Foto's en video's.",
   "Similarity review": "Vergelijkbare foto's",
   "Settings": "Instellingen",
+  "Keep the computer awake during imports": "Computer wakker houden tijdens het importeren",
+  "Prevents automatic sleep during imports, including while paused. The screen may still turn off. Closing a laptop lid or choosing Sleep can still interrupt an import.": "Voorkomt automatische slaapstand tijdens het importeren, ook als het importeren is gepauzeerd. Het scherm kan wel uitgaan. Door de laptop dicht te klappen of zelf de slaapstand te kiezen kan het importeren alsnog worden onderbroken.",
   "Open floating drop window": "Klein sleepvenster openen",
   "Open separate viewer": "Fotoviewer in eigen venster openen",
   "Your collection": "Je collectie",

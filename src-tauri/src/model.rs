@@ -12,6 +12,8 @@ pub struct Settings {
     pub automatic_matches: bool,
     #[serde(default)]
     pub deep_video_matching: bool,
+    #[serde(default)]
+    pub prevent_sleep_during_import: bool,
 }
 
 impl Default for Settings {
@@ -22,6 +24,7 @@ impl Default for Settings {
             unknown_folder: "unknown".into(),
             automatic_matches: true,
             deep_video_matching: false,
+            prevent_sleep_during_import: false,
         }
     }
 }

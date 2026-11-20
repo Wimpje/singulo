@@ -160,6 +160,11 @@ pub fn validate_roots(raw_roots: &[String], archive_root: &Path) -> Result<Vec<P
 }
 
 pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
+    let _sleep_inhibitor = if job.settings.prevent_sleep_during_import {
+        Some(crate::sleep::SleepInhibitor::acquire()?)
+    } else {
+        None
+    };
     let started = Instant::now();
     let state = app.state::<AppState>();
     let archive_root = {
