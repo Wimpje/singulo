@@ -934,6 +934,17 @@ async fn set_date(app: tauri::AppHandle, id: String, date: String) -> Result<()>
 }
 
 #[tauri::command]
+async fn repair_estimated_dates(
+    app: tauri::AppHandle,
+    confirmed: bool,
+) -> Result<archive::DateRepairSummary> {
+    if !confirmed {
+        return Err("Correcting estimated dates requires explicit confirmation.".into());
+    }
+    change(app, |archive| archive.repair_estimated_dates()).await
+}
+
+#[tauri::command]
 async fn tool_status(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>> {
     read(app, |app| {
         Ok(
@@ -1009,6 +1020,7 @@ pub fn run() {
             rollback_preview,
             rollback_archive,
             set_date,
+            repair_estimated_dates,
             tool_status,
             show_window
         ])

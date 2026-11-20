@@ -932,6 +932,230 @@ fn folder_dates_are_fallbacks_and_date_parts_are_not_folder_labels() {
 }
 
 #[test]
+fn repair_estimated_dates_moves_safely_and_preserves_protected_dates() {
+    let (directory, mut archive) = xmp_fixture();
+    let add =
+        |archive: &mut Archive, id: &str, name: &str, kind: &str, source: &str, relative: &str| {
+            let file = directory.path().join(source);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, id.as_bytes()).unwrap();
+            let hash = media::hash(&file).unwrap();
+            let mut item_media = sample(hash.clone());
+            item_media.kind = kind.into();
+            item_media.date_source = match id {
+                "capture" => "capture metadata",
+                "folder-priority" => "estimated: folder date",
+                _ => "estimated: filesystem creation",
+            }
+            .into();
+            archive
+                .place(
+                    &file,
+                    Item {
+                        id: id.into(),
+                        path: format!("2023/07/18/{name}"),
+                        original_name: name.into(),
+                        state: "active".into(),
+                        keeper: None,
+                        media: item_media,
+                        settings: Settings::default(),
+                        albums: vec![],
+                    },
+                    Some(Occurrence {
+                        id: format!("occ-{id}"),
+                        item: id.into(),
+                        source: file.to_string_lossy().into(),
+                        root: directory.path().to_string_lossy().into(),
+                        album: "Photos".into(),
+                        relative: relative.into(),
+                        hash,
+                        identity: media::identity(&file).unwrap(),
+                        status: "pending".into(),
+                        bytes: id.len() as u64,
+                    }),
+                    None,
+                )
+                .unwrap();
+        };
+    add(
+        &mut archive,
+        "photo",
+        "IMG-20170114-WA0005.jpg",
+        "photo",
+        "source/IMG-20170114-WA0005.jpg",
+        "IMG-20170114-WA0005.jpg",
+    );
+    add(
+        &mut archive,
+        "sidecar",
+        "IMG-20170114-WA0005.jpg.xmp",
+        "sidecar",
+        "source/IMG-20170114-WA0005.jpg.xmp",
+        "IMG-20170114-WA0005.jpg.xmp",
+    );
+    add(
+        &mut archive,
+        "folder",
+        "folder.jpg",
+        "photo",
+        "source/folder.jpg",
+        "2020/03/04/folder.jpg",
+    );
+    add(
+        &mut archive,
+        "folder-priority",
+        "IMG-20160101-pref.jpg",
+        "photo",
+        "source/IMG-20160101-pref.jpg",
+        "IMG-20160101-pref.jpg",
+    );
+    add(
+        &mut archive,
+        "conflict",
+        "conflict.jpg",
+        "photo",
+        "source/conflict.jpg",
+        "2020/03/04/conflict.jpg",
+    );
+    let conflict = archive.item("conflict").unwrap();
+    archive
+        .record_occurrence(&Occurrence {
+            id: "other-conflict".into(),
+            item: "conflict".into(),
+            source: "another/conflict.jpg".into(),
+            root: "another".into(),
+            album: "Photos".into(),
+            relative: "2021\\04\\05\\conflict.jpg".into(),
+            hash: conflict.media.hash,
+            identity: "fixture".into(),
+            status: "pending".into(),
+            bytes: 8,
+        })
+        .unwrap();
+    add(
+        &mut archive,
+        "manual",
+        "20170114-manual.jpg",
+        "photo",
+        "source/20170114-manual.jpg",
+        "20170114-manual.jpg",
+    );
+    archive.correct_date("manual", "2018-01-02").unwrap();
+    add(
+        &mut archive,
+        "capture",
+        "20170114-capture.jpg",
+        "photo",
+        "source/20170114-capture.jpg",
+        "20170114-capture.jpg",
+    );
+    add(
+        &mut archive,
+        "shared-jpeg",
+        "IMG-20180101.jpg",
+        "photo",
+        "source/IMG-20180101.jpg",
+        "IMG-20180101.jpg",
+    );
+    add(
+        &mut archive,
+        "shared-raw",
+        "IMG-20180101.CR2",
+        "raw",
+        "source/IMG-20180101.CR2",
+        "IMG-20180101.CR2",
+    );
+    add(
+        &mut archive,
+        "shared-xmp",
+        "IMG-20180101.jpg.xmp",
+        "sidecar",
+        "source/IMG-20180101.jpg.xmp",
+        "IMG-20180101.jpg.xmp",
+    );
+
+    let occupied = directory
+        .path()
+        .join("archive/2017/01/14/IMG-20170114-WA0005.jpg");
+    fs::create_dir_all(occupied.parent().unwrap()).unwrap();
+    fs::write(&occupied, b"unmanaged").unwrap();
+    let summary = serde_json::to_value(archive.repair_estimated_dates().unwrap()).unwrap();
+    assert_eq!(summary["updated"], 3);
+    assert_eq!(summary["skipped"], 3);
+    assert_eq!(summary["errors"], serde_json::json!([]));
+    let photo = archive.item("photo").unwrap();
+    assert_eq!(photo.media.date.as_deref(), Some("2017-01-14"));
+    assert_eq!(photo.media.date_source, "estimated: filename date");
+    assert_eq!(photo.path, "2017/01/14/IMG-20170114-WA0005__photo.jpg");
+    assert_eq!(fs::read(&occupied).unwrap(), b"unmanaged");
+    assert_eq!(
+        fs::read(directory.path().join("archive").join(&photo.path)).unwrap(),
+        b"photo"
+    );
+    let sidecar = archive.item("sidecar").unwrap();
+    assert_eq!(sidecar.path, "2017/01/14/IMG-20170114-WA0005__photo.xmp");
+    assert_eq!(sidecar.media.date, photo.media.date);
+    assert_eq!(
+        archive.item("folder").unwrap().path,
+        "2020/03/04/folder.jpg"
+    );
+    assert_eq!(
+        archive.item("folder-priority").unwrap().path,
+        "2016/01/01/IMG-20160101-pref.jpg"
+    );
+    assert_eq!(
+        archive.item("conflict").unwrap().media.date_source,
+        "estimated: filesystem creation"
+    );
+    assert_eq!(
+        archive.item("shared-jpeg").unwrap().path,
+        "2023/07/18/IMG-20180101.jpg"
+    );
+    assert_eq!(
+        archive.item("shared-raw").unwrap().path,
+        "2023/07/18/IMG-20180101.CR2"
+    );
+    assert_eq!(
+        archive.item("shared-xmp").unwrap().path,
+        "2023/07/18/IMG-20180101.jpg.xmp"
+    );
+    assert_eq!(
+        archive.item("manual").unwrap().media.date.as_deref(),
+        Some("2018-01-02T14:32:10")
+    );
+    assert_eq!(
+        archive.item("capture").unwrap().media.date.as_deref(),
+        Some("2023-07-18T14:32:10")
+    );
+    assert_eq!(
+        fs::read(directory.path().join("source/IMG-20170114-WA0005.jpg")).unwrap(),
+        b"photo"
+    );
+    let again = serde_json::to_value(archive.repair_estimated_dates().unwrap()).unwrap();
+    assert_eq!(again["updated"], 0);
+    assert_eq!(again["skipped"], 3);
+
+    add(
+        &mut archive,
+        "bad",
+        "IMG-20190102-bad.jpg",
+        "photo",
+        "source/IMG-20190102-bad.jpg",
+        "IMG-20190102-bad.jpg",
+    );
+    let original = directory.path().join("archive/2023/07/18/IMG-20190102-bad.jpg");
+    fs::write(&original, b"changed").unwrap();
+    let failed = serde_json::to_value(archive.repair_estimated_dates().unwrap()).unwrap();
+    assert_eq!(failed["updated"], 0);
+    assert!(!failed["errors"].as_array().unwrap().is_empty());
+    assert_eq!(fs::read(&original).unwrap(), b"changed");
+    fs::write(&original, b"bad").unwrap();
+    let retried = serde_json::to_value(archive.repair_estimated_dates().unwrap()).unwrap();
+    assert_eq!(retried["updated"], 1);
+    assert_eq!(archive.item("bad").unwrap().path, "2019/01/02/IMG-20190102-bad.jpg");
+}
+
+#[test]
 fn layout_renders_dates_and_blocks_escaping_paths() {
     let mut settings = Settings::default();
     let media = sample(String::new());

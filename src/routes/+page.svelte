@@ -20,6 +20,7 @@
   type UndoAction = { review: Review; discarded: string; keptName: string };
   type CleanupFolder = { root: string; rows: CleanupRow[]; eligible: string[] };
   type XmpSummary = { created: number; updated: number; removed: number; skipped: number; errors: string[] };
+  type DateRepairSummary = { updated: number; skipped: number; errors: string[] };
   const pageSize = 60;
   const textScales = [0.9, 1, 1.1, 1.2, 1.35, 1.5];
   let textScale = $state(storedTextScale());
@@ -858,6 +859,19 @@
     });
   }
 
+  async function repairDates() {
+    await run(async () => {
+      const prompt = t("Find dates in original filenames and folders, then move affected archive files to their matching folders? Camera and manually corrected dates stay unchanged. Source files are never changed. This cannot be undone automatically and may take a while.");
+      if (!await confirm(prompt, { title: t("Correct estimated dates"), kind: "warning" })) return;
+      await mutate(async () => {
+        const result = await api<DateRepairSummary>("repair_estimated_dates", { confirmed: true });
+        await refresh(true);
+        notice = `${t("Dates corrected")}: ${result.updated} · ${t("Skipped for safety")}: ${result.skipped}`;
+        if (result.errors.length) error = result.errors.join("\n");
+      });
+    });
+  }
+
   async function applyMoves() {
     await run(async () => {
       const movePrompt = locale.language === "nl"
@@ -1352,6 +1366,12 @@
         <section class="settings-card"><h3>{t("Choosing an external disk")}</h3><p class="muted">{t("Mac only: prefer APFS. Windows only: prefer NTFS. For use on both, exFAT is convenient, but lacks journaling and may require extra copying during import. Always eject safely and keep another backup.")}</p><p class="muted">{t("You do not need to reformat an existing disk. Formatting erases its files; this app never formats disks.")}</p></section>
         <section class="next-steps"><div><h3>{t("Apply the saved layout to older imports?")}</h3><p>{t("Preview existing file moves first. Sources and folder history stay untouched.")}</p></div><button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={previewMoves}>{t("Preview reorganization")}</button></section>
         <button class="text-button" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={() => run(async () => { moves = await api<MoveRow[]>("rollback_preview"); undoingMoves = true; })}>{t("Preview undo of last reorganization")}</button>
+        <section class="settings-card">
+          <h3>{t("Correct estimated dates")}</h3>
+          <p class="muted">{t("Find dates in original filenames and folders for existing photos and videos. Affected archive files move to match their corrected dates; source files stay untouched. Camera and manually corrected dates are kept.")}</p>
+          <p class="muted">{t("Items with conflicting folder dates or shared sidecars are skipped for safety. Spare copies are not changed.")}</p>
+          <button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={repairDates}>{t("Correct estimated dates")}</button>
+        </section>
         <section class="settings-card">
           <h3>{t("Export metadata to XMP")}</h3>
           <p class="muted">{t("Share corrected dates and original folder names with apps such as Immich. Singulo keeps its sidecars up to date; originals and existing sidecars are not changed.")}</p>

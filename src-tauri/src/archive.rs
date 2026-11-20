@@ -28,6 +28,14 @@ pub struct LibraryMonth {
     count: i64,
 }
 
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DateRepairSummary {
+    updated: usize,
+    skipped: usize,
+    errors: Vec<String>,
+}
+
 const LIBRARY_SEARCH: &str =
     "AND (?2='' OR instr(unicode_lower(json_extract(data,'$.originalName')),?2)>0
     OR instr(json_extract(data,'$.media.date'),?2)>0
@@ -2217,6 +2225,155 @@ impl Archive {
         let mut visited = std::collections::HashSet::new();
         self.correct_date_inner(id, date, None, &mut visited)?;
         self.backup()
+    }
+
+    fn estimated_path_date(&self, item: &Item) -> Result<(Option<Media>, bool)> {
+        let mut updated = item.media.clone();
+        media::apply_path_date(&mut updated, &item.original_name, None);
+        if updated.date_source == "estimated: filename date" {
+            return Ok((Some(updated), false));
+        }
+        if item.media.date_source == "estimated: folder date" {
+            return Ok((None, false));
+        }
+        let mut folder_date: Option<String> = None;
+        for occurrence in self.item_occurrences(&item.id)? {
+            let mut parts = vec![occurrence.album];
+            let mut relative: Vec<&str> = occurrence.relative.split(['/', '\\']).collect();
+            relative.pop();
+            parts.extend(relative.into_iter().map(str::to_string));
+            if let Some(date) = media::folder_path_info(&parts).0 {
+                if folder_date
+                    .as_ref()
+                    .is_some_and(|existing| existing != &date)
+                {
+                    return Ok((None, true));
+                }
+                folder_date = Some(date);
+            }
+        }
+        media::apply_path_date(&mut updated, &item.original_name, folder_date.as_deref());
+        Ok((folder_date.map(|_| updated), false))
+    }
+
+    fn move_estimated_date(&mut self, mut item: Item, updated: Media) -> Result<bool> {
+        let old = item.path.clone();
+        let source = paths::inside(&self.root, Path::new(&old))?;
+        if !source.is_file() {
+            return Err(format!("Archived file is missing: {old}"));
+        }
+        item.media = updated;
+        let wanted = paths::relative(&item.settings, &item.media, &item.original_name)?;
+        let next = paths::unique_for(&self.root, &wanted, &item.id, Some(Path::new(&old)))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let mut sidecars = Vec::new();
+        for id in self.companions(&item.id)? {
+            let sidecar = self.item(&id)?;
+            if sidecar.state != "active" || sidecar.media.kind != "sidecar" {
+                continue;
+            }
+            for other in self.companions(&id)? {
+                if other != item.id {
+                    let other = self.item(&other)?;
+                    if other.state == "active" && other.media.kind != "sidecar" {
+                        return Ok(false);
+                    }
+                }
+            }
+            sidecars.push(sidecar);
+        }
+        for mut sidecar in sidecars {
+            let old_sidecar = sidecar.path.clone();
+            let target = PathBuf::from(&next).with_extension("xmp");
+            let new_sidecar = paths::unique_for(
+                &self.root,
+                &target,
+                &sidecar.id,
+                Some(Path::new(&old_sidecar)),
+            )?
+            .to_string_lossy()
+            .replace('\\', "/");
+            if sidecar.media.date_source != "manual"
+                && !sidecar.media.date_source.starts_with("capture")
+            {
+                sidecar.media.date = item.media.date.clone();
+                sidecar.media.date_source = item.media.date_source.clone();
+                sidecar
+                    .media
+                    .warnings
+                    .retain(|warning| warning != "No usable date. Set the date manually if known.");
+            }
+            if new_sidecar == old_sidecar {
+                self.transaction(|archive| archive.store(&sidecar))?;
+            } else {
+                let source = paths::inside(&self.root, Path::new(&old_sidecar))?;
+                sidecar.path = new_sidecar;
+                self.place(&source, sidecar, None, Some(old_sidecar))?;
+            }
+        }
+        if next == old {
+            self.transaction(|archive| archive.store(&item))?;
+        } else {
+            item.path = next;
+            self.place(&source, item, None, Some(old))?;
+        }
+        Ok(true)
+    }
+
+    pub fn repair_estimated_dates(&mut self) -> Result<DateRepairSummary> {
+        self.check()?;
+        let mut summary = DateRepairSummary::default();
+        let mut last_row = 0_i64;
+        let result: Result<()> = (|| {
+            loop {
+                let batch: Vec<(i64, String)> = {
+                    let mut query = self.connection.prepare(
+                        "SELECT rowid,data FROM items NOT INDEXED WHERE rowid>?1 AND state='active'
+                         AND json_extract(data,'$.media.kind')!='sidecar'
+                         AND json_extract(data,'$.media.dateSource') IN
+                         ('unknown','estimated: filesystem creation','estimated: file modification','estimated: folder date')
+                         ORDER BY rowid LIMIT 128"
+                    ).map_err(|e| e.to_string())?;
+                    let rows = query
+                        .query_map([last_row], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<std::result::Result<_, _>>()
+                        .map_err(|e| e.to_string())?
+                };
+                if batch.is_empty() {
+                    break;
+                }
+                for (rowid, data) in batch {
+                    last_row = rowid;
+                    let item: Item = parse(&data)?;
+                    let (updated, ambiguous) = self.estimated_path_date(&item)?;
+                    if ambiguous {
+                        summary.skipped += 1;
+                    } else if let Some(updated) = updated {
+                        if self.move_estimated_date(item, updated)? {
+                            summary.updated += 1;
+                        } else {
+                            summary.skipped += 1;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            summary.errors.push(format!(
+                "Date correction stopped; some items may already have changed. Restart the app to recover any interrupted move before retrying: {error}"
+            ));
+        }
+        if (summary.updated > 0 || !summary.errors.is_empty())
+            && let Err(error) = self.backup()
+        {
+            summary
+                .errors
+                .push(format!("Could not update the recovery backup: {error}"));
+        }
+        Ok(summary)
     }
 
     fn correct_date_inner(

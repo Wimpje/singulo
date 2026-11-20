@@ -363,6 +363,13 @@ fn filename_date(filename: &str) -> Option<String> {
 }
 
 pub fn apply_path_date(media: &mut Media, filename: &str, folder_date: Option<&str>) {
+    if media.date_source == "estimated: folder date" {
+        if let Some(date) = filename_date(filename) {
+            media.date = Some(date);
+            media.date_source = "estimated: filename date".into();
+        }
+        return;
+    }
     if media.date.is_some()
         && !matches!(
             media.date_source.as_str(),
