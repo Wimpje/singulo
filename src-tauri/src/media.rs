@@ -335,7 +335,52 @@ fn folder_date_parts(value: &str) -> Option<(i32, u32, u32)> {
 
 fn valid_folder_date(year: i32, month: u32, day: u32) -> Option<String> {
     let date = NaiveDate::from_ymd_opt(year, month, day)?;
-    (date <= Utc::now().date_naive()).then(|| date.to_string())
+    if date > Utc::now().date_naive() {
+        return None;
+    }
+    valid_date(&date.to_string())
+}
+
+fn filename_date(filename: &str) -> Option<String> {
+    let bytes = filename.as_bytes();
+    for start in 0..bytes.len() {
+        if start > 0 && bytes[start - 1].is_ascii_digit() {
+            continue;
+        }
+        for length in [8, 9, 10] {
+            let end = start + length;
+            if end > bytes.len() || bytes.get(end).is_some_and(u8::is_ascii_digit) {
+                continue;
+            }
+            if let Some((year, month, day)) = filename.get(start..end).and_then(folder_date_parts)
+                && let Some(date) = valid_folder_date(year, month, day)
+            {
+                return Some(date);
+            }
+        }
+    }
+    None
+}
+
+pub fn apply_path_date(media: &mut Media, filename: &str, folder_date: Option<&str>) {
+    if media.date.is_some()
+        && !matches!(
+            media.date_source.as_str(),
+            "estimated: filesystem creation" | "estimated: file modification"
+        )
+    {
+        return;
+    }
+    let candidate = filename_date(filename)
+        .map(|date| (date, "estimated: filename date"))
+        .or_else(|| folder_date.map(|date| (date.to_string(), "estimated: folder date")));
+    if let Some((date, source)) = candidate {
+        media.date = Some(date);
+        media.date_source = source.into();
+        media
+            .warnings
+            .retain(|warning| warning != "No usable date. Set the date manually if known.");
+    }
 }
 
 pub fn folder_path_info(parts: &[String]) -> (Option<String>, Vec<String>) {

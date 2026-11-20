@@ -782,6 +782,52 @@ fn dates_use_metadata_then_mark_estimates_and_unknown() {
 }
 
 #[test]
+fn path_dates_precede_filesystem_dates_without_overriding_capture_dates() {
+    let mut media = sample(String::new());
+    media.date_source = "estimated: filesystem creation".into();
+    media::apply_path_date(&mut media, "IMG-20170114-WA0005.jpg", Some("2020-03-04"));
+    assert_eq!(media.date.as_deref(), Some("2017-01-14"));
+    assert_eq!(media.date_source, "estimated: filename date");
+    assert_eq!(
+        paths::relative(&Settings::default(), &media, "IMG-20170114-WA0005.jpg").unwrap(),
+        Path::new("2017/01/14/IMG-20170114-WA0005.jpg")
+    );
+
+    media.date_source = "capture metadata".into();
+    media::apply_path_date(&mut media, "2024-07-18.jpg", Some("2020-03-04"));
+    assert_eq!(media.date.as_deref(), Some("2017-01-14"));
+
+    for filename in [
+        "IMG-20230230-WA0005.jpg",
+        "IMG-19700101.jpg",
+        "IMG-99991231.jpg",
+        "IMG-1201701149.jpg",
+    ] {
+        media.date_source = "estimated: file modification".into();
+        media::apply_path_date(&mut media, filename, Some("2020-03-04"));
+        assert_eq!(media.date.as_deref(), Some("2020-03-04"), "{filename}");
+        assert_eq!(media.date_source, "estimated: folder date");
+    }
+
+    media.date = None;
+    media.date_source = "unknown".into();
+    media.warnings = vec!["No usable date. Set the date manually if known.".into()];
+    media::apply_path_date(&mut media, "photo_2024-07-18.jpg", None);
+    assert_eq!(media.date.as_deref(), Some("2024-07-18"));
+    assert!(media.warnings.is_empty());
+
+    media.date_source = "estimated: file modification".into();
+    media::apply_path_date(&mut media, "photo_2024-7-8.jpg", None);
+    assert_eq!(media.date.as_deref(), Some("2024-07-08"));
+
+    media.date = Some("2023-07-18T14:32:10".into());
+    media.date_source = "estimated: filesystem creation".into();
+    media::apply_path_date(&mut media, "photo.jpg", None);
+    assert_eq!(media.date.as_deref(), Some("2023-07-18T14:32:10"));
+    assert_eq!(media.date_source, "estimated: filesystem creation");
+}
+
+#[test]
 fn folder_dates_are_fallbacks_and_date_parts_are_not_folder_labels() {
     let parts = ["Photos", "2024", "07", "18", "Italy", "Day 1"].map(str::to_string);
     assert_eq!(
@@ -796,6 +842,7 @@ fn folder_dates_are_fallbacks_and_date_parts_are_not_folder_labels() {
         media::folder_path_info(&invalid),
         (None, ["Photos", "Italy"].map(str::to_string).to_vec())
     );
+    assert_eq!(media::folder_path_info(&["1970-01-01".into()]).0, None);
 
     let (directory, mut archive) = xmp_fixture();
     let add_item = |archive: &mut Archive, id: &str, date: Option<&str>| {

@@ -797,6 +797,12 @@ fn import_one(
         }));
     }
     let (folder_date, _) = media::folder_path_info(&folder_parts);
+    let original_name = source
+        .file_name()
+        .ok_or("Missing source filename.")?
+        .to_string_lossy()
+        .to_string();
+    media::apply_path_date(&mut media, &original_name, folder_date.as_deref());
     let occurrence_id = archive
         .occurrence_id(source, &media.hash)?
         .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -825,11 +831,6 @@ fn import_one(
         return Ok(true);
     }
     let id = Uuid::new_v4().to_string();
-    let original_name = source
-        .file_name()
-        .ok_or("Missing source filename.")?
-        .to_string_lossy()
-        .to_string();
     let owner = if media.kind == "sidecar" {
         archive.sidecar_owner(source)?
     } else {
