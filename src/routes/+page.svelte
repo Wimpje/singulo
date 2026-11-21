@@ -11,7 +11,7 @@
   import {
     api, bytes, defaults, emptySnapshot, message,
     type Snapshot, type Settings, type Progress, type Item, type Details,
-    type Review, type CleanupRow, type ClearImportPreview, type MoveRow, type Job, type ToolStatus,
+    type Review, type CleanupRow, type ClearImportPreview, type MoveRow, type Job, type ToolStatus, type FolderSearch,
   } from "$lib/api";
 
   type Tab = "library" | "review" | "import" | "settings";
@@ -81,6 +81,13 @@
   let undoingMoves = $state(false);
   let xmpResult = $state<{ root: string; summary: XmpSummary } | null>(null);
   let xmpAttention = $state<string[]>([]);
+  let folderSearch = $state<FolderSearch | null>(null);
+  let folderSearchPending = $state(false);
+  let folderSearchSelection = $state<string[]>([]);
+  let includeSingleFolders = $state(false);
+  let folderSearchLimit = $state(100);
+  let folderSearchTimer: ReturnType<typeof setTimeout> | undefined;
+  let folderSearchDisposed = false;
   let onTop = $state(true);
   let loaded = $state(false);
   let revealLabel = $state("Show in folder");
@@ -100,6 +107,9 @@
   const importStatus = $derived(snapshot.progress.status);
   const cancelling = $derived(importStatus === "cancelling");
   const importing = $derived(cancelling || ["scanning", "importing", "paused"].includes(snapshot.progress.status));
+  const folderSearchActive = $derived(folderSearchPending || !!folderSearch?.running);
+  const folderSearchCandidates = $derived((folderSearch?.folders ?? []).filter((folder) => includeSingleFolders || folder.count > 1));
+  const folderSearchSelected = $derived(new Set(folderSearchSelection));
   const progressKey = $derived(importing ? snapshot.progress.jobId ?? "active" : null);
   const busy = $derived(working || importing || cleanupLoading || clearLoading);
   const retryBlocked = $derived(working || cancelling || cleanupLoading || clearLoading);
@@ -513,6 +523,10 @@
   }
 
   async function chooseArchive() {
+    if (folderSearchActive) {
+      notice = t("Stop the folder search before changing the archive.");
+      return;
+    }
     const [path] = await chooseFolders(t("Choose the archive folder, ideally on an external disk"), false) ?? [];
     if (!path) return;
     await run(async () => {
@@ -527,6 +541,10 @@
   }
 
   async function importFolders(paths?: string[]) {
+    if (folderSearchActive) {
+      notice = t("Stop the folder search before importing.");
+      return;
+    }
     if (cancelling) {
       notice = t("Waiting for the current operation to stop safely. Your source files are unchanged.");
       return;
@@ -542,6 +560,61 @@
       notice = started ? t("Folders added. Originals stay untouched during import.") : t("Folders queued after the current import.");
       await refreshJobs();
     });
+  }
+
+  async function pollFolderSearch() {
+    try {
+      const status = await api<FolderSearch>("folder_search_status");
+      if (folderSearchDisposed) return;
+      folderSearch = status.root ? status : null;
+      if (status.running) folderSearchTimer = setTimeout(() => { void pollFolderSearch(); }, 500);
+    } catch (reason: unknown) {
+      error = message(reason);
+      if (!folderSearchDisposed && folderSearch?.running) {
+        folderSearchTimer = setTimeout(() => { void pollFolderSearch(); }, 2000);
+      }
+    }
+  }
+
+  async function findPhotoFolders() {
+    const [root] = await chooseFolders(t("Choose a disk or folder to search"), false) ?? [];
+    if (!root) return;
+    folderSearchPending = true;
+    try {
+      await api("start_folder_search", { root });
+      folderSearch = { root, running: true, cancelling: false, cancelled: false, current: "", directories: 0, files: 0, skipped: 0, issues: [], excluded: 0, folders: [], error: null };
+      folderSearchSelection = [];
+      folderSearchLimit = 100;
+      await pollFolderSearch();
+    } catch (reason: unknown) {
+      error = message(reason);
+    } finally {
+      folderSearchPending = false;
+    }
+  }
+
+  async function cancelFolderSearch() {
+    try {
+      await api("cancel_folder_search");
+      if (folderSearch) folderSearch.cancelling = true;
+    } catch (reason: unknown) {
+      error = message(reason);
+    }
+  }
+
+  function selectFoundFolder(path: string, checked: boolean) {
+    folderSearchSelection = checked
+      ? [...folderSearchSelection, path]
+      : folderSearchSelection.filter((selectedPath) => selectedPath !== path);
+  }
+
+  function changeSingleFolders(checked: boolean) {
+    includeSingleFolders = checked;
+    folderSearchLimit = 100;
+    if (!checked) {
+      const allowed = new Set((folderSearch?.folders ?? []).filter((folder) => folder.count > 1).map((folder) => folder.path));
+      folderSearchSelection = folderSearchSelection.filter((path) => allowed.has(path));
+    }
   }
 
   function showDetail(detail: Details) {
@@ -1018,6 +1091,7 @@
           if (key in portable) window.localStorage.setItem(key, portable[key]);
           else window.localStorage.removeItem(key);
         }
+        if (mode === "main") await pollFolderSearch();
         locale.language = window.localStorage.getItem("singulo.language") === "nl" ? "nl" : "en";
         textScale = storedTextScale();
         highContrast = window.localStorage.getItem("singulo.highContrast") === "true";
@@ -1068,7 +1142,7 @@
       await refresh();
       loaded = true;
     });
-    return () => { disposed = true; clearTimeout(undoTimer); clearTimeout(importLibraryTimer); for (const remove of removers) remove(); };
+    return () => { disposed = true; folderSearchDisposed = true; clearTimeout(folderSearchTimer); clearTimeout(undoTimer); clearTimeout(importLibraryTimer); for (const remove of removers) remove(); };
   });
 </script>
 
@@ -1281,7 +1355,47 @@
         <section class="destination">
           <span class="disk-icon">{@render diskIcon(20)}</span>
           <div><small>{t("ARCHIVE DESTINATION")}</small><strong>{snapshot.root ?? t("No archive open")}</strong>{#if !snapshot.root}<p>{t("Singulo copies your photos and videos into this folder and keeps them organized there. Use a dedicated folder, ideally on an external disk with plenty of space.")}</p>{/if}</div>
-          <button class={snapshot.root ? "secondary" : "primary"} title={busyReason} disabled={!native || busy} onclick={chooseArchive}>{snapshot.root ? t("Change") : t("Choose folder")}</button>
+          <button class={snapshot.root ? "secondary" : "primary"} title={busyReason} disabled={!native || busy || folderSearchActive} onclick={chooseArchive}>{snapshot.root ? t("Change") : t("Choose folder")}</button>
+        </section>
+        <section class="folder-search">
+          <div class="section-line">
+            <div><h3>{t("Find photo folders")}</h3><p class="muted">{t("Search a disk or folder for photos and videos you may want to back up. Nothing is imported automatically.")}</p></div>
+            <button class="secondary" disabled={!native || busy || folderSearchActive} onclick={findPhotoFolders}>{t("Choose where to search")}</button>
+          </div>
+          <p class="muted">{t("The search stays on the selected filesystem and does not follow shortcuts or symlinks. Search other disks separately.")}</p>
+          {#if folderSearch}
+            <p class="folder-search-root"><strong>{t("Searching in")}</strong> <code>{folderSearch.root}</code></p>
+            {#if folderSearch.running}
+              <div role="status" class="folder-search-progress">
+                <p>{t(folderSearch.cancelling ? "Stopping folder search..." : "Searching for photo folders...")} {folderSearch.directories.toLocaleString()} {t("folders checked")} · {folderSearch.files.toLocaleString()} {t("photos and videos found")}</p>
+                {#if folderSearch.current}<code>{folderSearch.current}</code>{/if}
+                <button class="text-button" disabled={folderSearch.cancelling} onclick={cancelFolderSearch}>{t("Stop search")}</button>
+              </div>
+            {:else}
+              {#if folderSearch.error}<p class="field-error" role="alert">{folderSearch.error}</p>{/if}
+              {#if folderSearch.cancelled}<p class="banner warning">{t("Search stopped. These results may be incomplete.")}</p>{/if}
+              {#if folderSearch.skipped}
+                <details class="banner warning"><summary>{folderSearch.skipped} {t("folder or file(s) could not be checked")}</summary>{#each folderSearch.issues as issue}<p>{issue}</p>{/each}{#if folderSearch.skipped > folderSearch.issues.length}<p>{t("Only the first 20 issues are shown.")}</p>{/if}</details>
+              {/if}
+              {#if folderSearch.excluded}<p class="banner warning">{t("Files directly in folders containing the archive are not suggested, because those folders cannot be imported safely.")}</p>{/if}
+              <p class="muted">{t("Counts show photos and videos directly in each folder. Importing a selected folder also includes its subfolders.")}</p>
+              <label class="check-setting"><input type="checkbox" checked={includeSingleFolders} onchange={(event) => changeSingleFolders(event.currentTarget.checked)} /><span>{t("Show folders with one photo or video")}</span></label>
+              <p>{folderSearchCandidates.length.toLocaleString()} {t("suggested folder(s)")}</p>
+              {#if !folderSearchCandidates.length && !folderSearch.error}<p class="muted">{t("No matching folders found. Try including folders with one photo or video.")}</p>{/if}
+              <div class="found-folders">
+                {#each folderSearchCandidates.slice(0, folderSearchLimit) as folder (folder.path)}
+                  <label class="found-folder">
+                    <input type="checkbox" checked={folderSearchSelected.has(folder.path)} onchange={(event) => selectFoundFolder(folder.path, event.currentTarget.checked)} />
+                    <span><code>{folder.path}</code><small>{folder.count.toLocaleString()} {t("photos and videos")} · {folder.samples.join(", ")}</small></span>
+                  </label>
+                {/each}
+              </div>
+              {#if folderSearchLimit < folderSearchCandidates.length}<button class="text-button" onclick={() => folderSearchLimit += 100}>{t("Show more folders")}</button>{/if}
+              {#if folderSearchCandidates.length}
+                <div class="button-row"><span>{folderSearchSelection.length} {t("selected")}</span><button class="primary" disabled={!folderSearchSelection.length || cancelling || working} onclick={() => importFolders(folderSearchSelection)}>{t("Import selected folders")}</button></div>
+              {/if}
+            {/if}
+          {/if}
         </section>
         {#if incompleteJobs.length}
           <section class="history incomplete-imports">
@@ -1734,6 +1848,14 @@
   .destination small { color: var(--hc-muted, #939c87); font-size: calc(10px * var(--text-scale, 1)); font-weight: 700; letter-spacing: .12em; }
   .destination strong { display: block; font-size: calc(14px * var(--text-scale, 1)); margin-top: 4px; overflow-wrap: anywhere; }
   .destination p { margin: 6px 0 0; max-width: 60ch; color: var(--hc-muted, #75816c); font-size: calc(13px * var(--text-scale, 1)); line-height: 1.5; }
+  .folder-search { padding: 18px; border: 1px solid #dfe3d8; background: #fffdf8; border-radius: 10px; margin-bottom: 20px; }
+  .folder-search h3, .folder-search p { margin: 0 0 10px; }
+  .folder-search-root code, .folder-search-progress code, .found-folder code { overflow-wrap: anywhere; }
+  .folder-search-progress code, .found-folder code, .found-folder small { display: block; }
+  .found-folders { max-height: 420px; overflow-y: auto; margin-bottom: 10px; }
+  .found-folder { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-top: 1px solid #e6decb; }
+  .found-folder span { min-width: 0; }
+  .found-folder small { margin-top: 4px; color: var(--hc-muted, #75816c); overflow-wrap: anywhere; }
   .dropping { background: #e5ecd8 !important; border-color: #6d9056 !important; }
   .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 19px 0; }
   .stat { padding: 19px 21px; background: #fffdf8; border: 1px solid #e0e4d9; border-radius: 10px; }

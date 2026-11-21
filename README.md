@@ -25,6 +25,12 @@ Video playback tries the archived original first. If the built-in player cannot 
 
 Imports **copy**, never delete or modify sources. Exact duplicates share one verified archived copy. Conservative visual matching can keep a clearly higher-resolution equivalent active; other original bytes remain in **archive undo** until you explicitly purge them. Resolution and visual comparisons are quality estimates, not a promise of photographic quality.
 
+### Find photo folders
+
+On **Import & archive**, choose **Find photo folders** and select a disk or folder. The optional search lists folders with at least two recognized photos or videos directly inside them; enable the single-file option to see the rest. Counts exclude sidecars and samples are filenames, not previews. Select the folders you want and choose **Import selected folders**; importing also includes their subfolders. Searching alone never imports or changes files.
+
+The search runs in the background and can be stopped; stopped results may be incomplete. It does not follow symlinks or cross filesystem boundaries, and excludes the open archive. Inaccessible paths are counted and reported. Folders containing the archive cannot be suggested as import roots. Finish or stop an import before searching, and finish or stop the search before starting an import or changing the archive.
+
 ### Dates and folder layout
 
 Default: `yyyy/mm/dd/original-name.ext`.

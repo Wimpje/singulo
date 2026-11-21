@@ -134,6 +134,23 @@ pub fn canonical(path: &Path) -> Result<PathBuf> {
     Ok(real)
 }
 
+pub fn starts_with(path: &Path, base: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let mut path_components = path.components();
+        base.components().all(|component| {
+            path_components.next().is_some_and(|part| {
+                part.as_os_str().to_string_lossy().to_lowercase()
+                    == component.as_os_str().to_string_lossy().to_lowercase()
+            })
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(base)
+    }
+}
+
 pub fn suffixed(wanted: &Path, id: &str) -> Result<PathBuf> {
     let stem = wanted
         .file_stem()

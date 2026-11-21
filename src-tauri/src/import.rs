@@ -147,13 +147,13 @@ pub fn validate_roots(raw_roots: &[String], archive_root: &Path) -> Result<Vec<P
         if !root.is_dir() {
             return Err("Drop folders rather than individual files.".into());
         }
-        if root.starts_with(archive_root) || archive_root.starts_with(&root) {
+        if paths::starts_with(&root, archive_root) || paths::starts_with(archive_root, &root) {
             return Err("Source and destination folders must not overlap.".into());
         }
-        if roots.iter().any(|existing| root.starts_with(existing)) {
+        if roots.iter().any(|existing| paths::starts_with(&root, existing)) {
             continue;
         }
-        roots.retain(|existing| !existing.starts_with(&root));
+        roots.retain(|existing| !paths::starts_with(existing, &root));
         roots.push(root);
     }
     Ok(roots)

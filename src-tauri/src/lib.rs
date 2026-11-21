@@ -1,6 +1,7 @@
 mod archive;
 mod cancel;
 mod computer;
+mod discovery;
 mod import;
 mod media;
 mod model;
@@ -164,9 +165,90 @@ async fn snapshot(app: tauri::AppHandle) -> Result<Snapshot> {
 }
 
 #[tauri::command]
+async fn start_folder_search(app: tauri::AppHandle, root: String) -> Result<()> {
+    read(app, move |app| {
+        let state = app.state::<AppState>();
+        let _gate = state.discovery_gate.lock().map_err(|e| e.to_string())?;
+        if state.importing.load(Ordering::SeqCst) {
+            return Err("Finish or cancel the import before searching for folders.".into());
+        }
+        if state.busy.load(Ordering::SeqCst) {
+            return Err("Wait for the current archive operation before searching for folders.".into());
+        }
+        let archive = state.archive_root.read().map_err(|e| e.to_string())?.clone();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let mut search = state.discovery.lock().map_err(|e| e.to_string())?;
+            if search.status.running {
+                return Err("A folder search is already running.".into());
+            }
+            search.status = discovery::Status {
+                root: root.clone(),
+                running: true,
+                ..Default::default()
+            };
+            search.cancel = cancel.clone();
+        }
+        let handle = app.clone();
+        let spawned = std::thread::Builder::new().name("folder-search".into()).spawn(move || {
+            let outcome = discovery::scan(&root, archive.as_deref(), &cancel, |progress| {
+                let state = handle.state::<AppState>();
+                let mut search = state.discovery.lock().map_err(|e| e.to_string())?;
+                search.status = progress.clone();
+                search.status.cancelling = cancel.load(Ordering::Relaxed);
+                Ok(())
+            });
+            let state = handle.state::<AppState>();
+            match state.discovery.lock() {
+                Ok(mut search) => match outcome {
+                    Ok(status) => search.status = status,
+                    Err(error) => {
+                        search.status.running = false;
+                        search.status.cancelling = false;
+                        search.status.error = Some(error);
+                    }
+                },
+                Err(error) => eprintln!("Cannot report folder search results: {error}"),
+            };
+        });
+        if let Err(error) = spawned {
+            state.discovery.lock().map_err(|e| e.to_string())?.status.running = false;
+            return Err(format!("Cannot start folder search: {error}"));
+        }
+        Ok(())
+    }).await
+}
+
+#[tauri::command]
+async fn folder_search_status(app: tauri::AppHandle) -> Result<discovery::Status> {
+    read(app, |app| {
+        let state = app.state::<AppState>();
+        let search = state.discovery.lock().map_err(|e| e.to_string())?;
+        Ok(search.status.clone())
+    }).await
+}
+
+#[tauri::command]
+async fn cancel_folder_search(app: tauri::AppHandle) -> Result<()> {
+    read(app, |app| {
+        let state = app.state::<AppState>();
+        let mut search = state.discovery.lock().map_err(|e| e.to_string())?;
+        if search.status.running {
+            search.cancel.store(true, Ordering::Relaxed);
+            search.status.cancelling = true;
+        }
+        Ok(())
+    }).await
+}
+
+#[tauri::command]
 async fn open_archive(app: tauri::AppHandle, path: String, remembered: Option<bool>) -> Result<Snapshot> {
     read(app, move |app| {
         let state = app.state::<AppState>();
+        let _discovery_gate = state.discovery_gate.lock().map_err(|e| e.to_string())?;
+        if state.discovery.lock().map_err(|e| e.to_string())?.status.running {
+            return Err("Stop the folder search before changing the archive.".into());
+        }
         let _busy = guard(&state)?;
         let root = {
             let mut slot = state.archive.lock().map_err(|e| e.to_string())?;
@@ -498,6 +580,10 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
     }
     computer::current()?;
     let state = app.state::<AppState>();
+    let _discovery_gate = state.discovery_gate.lock().map_err(|e| e.to_string())?;
+    if state.discovery.lock().map_err(|e| e.to_string())?.status.running {
+        return Err("Stop the folder search before importing.".into());
+    }
     if state.importing.load(Ordering::SeqCst) && state.cancel.requested() {
         return Err("Current import is cancelling; wait a moment before starting another.".into());
     }
@@ -1044,6 +1130,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             snapshot,
+            start_folder_search,
+            folder_search_status,
+            cancel_folder_search,
             open_archive,
             last_archive,
             portable_preferences,

@@ -118,6 +118,21 @@ export interface ClearImportPreview {
   reasons: string[];
 }
 
+export interface FolderSearch {
+  root: string;
+  running: boolean;
+  cancelling: boolean;
+  cancelled: boolean;
+  current: string;
+  directories: number;
+  files: number;
+  skipped: number;
+  issues: string[];
+  excluded: number;
+  folders: { path: string; count: number; samples: string[] }[];
+  error: string | null;
+}
+
 export interface MoveRow {
   id: string;
   from: string;

@@ -1246,6 +1246,51 @@ fn remembered_archive_requires_matching_identity_and_existing_catalog() {
 }
 
 #[test]
+fn folder_search_excludes_archive_and_never_touches_sources() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let source = root.join("pictures");
+    let archive_root = root.join("archive");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&archive_root).unwrap();
+    drop(Archive::open(&archive_root).unwrap());
+    fs::write(source.join("one.jpg"), b"original").unwrap();
+    fs::write(source.join("two.MOV"), b"video").unwrap();
+    fs::write(source.join("one.xmp"), b"sidecar").unwrap();
+    fs::write(root.join("root.jpg"), b"root original").unwrap();
+    fs::write(archive_root.join("archived.jpg"), b"archived").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&archive_root, root.join("archive-link")).unwrap();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let status = crate::discovery::scan(
+        &root.to_string_lossy(),
+        Some(&archive_root),
+        &cancel,
+        |_| Ok(()),
+    ).unwrap();
+    let status = serde_json::to_value(status).unwrap();
+    let folders = status["folders"].as_array().unwrap();
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders[0]["path"], fs::canonicalize(&source).unwrap().to_string_lossy().as_ref());
+    assert_eq!(folders[0]["count"], 2);
+    assert_eq!(status["excluded"], 1);
+    assert_eq!(fs::read(source.join("one.jpg")).unwrap(), b"original");
+    assert_eq!(fs::read(archive_root.join("archived.jpg")).unwrap(), b"archived");
+    assert!(crate::discovery::scan(&archive_root.to_string_lossy(), Some(&archive_root), &cancel, |_| Ok(())).is_err());
+    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let stopped = crate::discovery::scan(&root.to_string_lossy(), Some(&archive_root), &cancel, |_| Ok(())).unwrap();
+    assert!(stopped.cancelled);
+    assert!(stopped.folders.is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_archive_overlap_ignores_path_case_and_respects_components() {
+    assert!(paths::starts_with(Path::new(r"c:\Photos\Archive\2024"), Path::new(r"C:\photos\archive")));
+    assert!(!paths::starts_with(Path::new(r"C:\photos\archive-copy"), Path::new(r"C:\photos\archive")));
+}
+
+#[test]
 fn portable_archive_location_moves_with_app_and_checks_identity() {
     let directory = tempfile::tempdir().unwrap();
     let disk = directory.path().join("disk");

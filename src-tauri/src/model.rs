@@ -206,6 +206,8 @@ pub struct AppState {
     pub importing: AtomicBool,
     pub quit_after_import: AtomicBool,
     pub cancel: crate::cancel::Cancellation,
+    pub discovery: Mutex<crate::discovery::State>,
+    pub discovery_gate: Mutex<()>,
     pub pause: AtomicBool,
     pub queue: Mutex<std::collections::VecDeque<QueuedJob>>,
 }
@@ -227,6 +229,8 @@ impl Default for AppState {
             importing: AtomicBool::new(false),
             quit_after_import: AtomicBool::new(false),
             cancel: crate::cancel::Cancellation::default(),
+            discovery: Mutex::new(crate::discovery::State::default()),
+            discovery_gate: Mutex::new(()),
             pause: AtomicBool::new(false),
             queue: Mutex::new(std::collections::VecDeque::new()),
         }
