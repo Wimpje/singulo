@@ -11,7 +11,7 @@
   import {
     api, bytes, defaults, emptySnapshot, message,
     type Snapshot, type Settings, type Progress, type Item, type Details,
-    type Review, type CleanupRow, type ClearImportPreview, type MoveRow, type Job, type ToolStatus, type FolderSearch,
+    type Review, type CleanupRow, type ClearImportPreview, type MoveRow, type Job, type ToolStatus, type FolderSearch, type DeferredFolder, type CatalogCleanupFolder, type CatalogCleanupResult,
   } from "$lib/api";
 
   type Tab = "library" | "review" | "import" | "settings";
@@ -40,6 +40,13 @@
   let itemsStart = $state(0);
   let reviews = $state<Review[]>([]);
   let jobs = $state<Job[]>([]);
+  let deferredFolders = $state<DeferredFolder[]>([]);
+  let deferredSelection = $state<string[]>([]);
+  let deferredLimits = $state<Record<string, number>>({});
+  let catalogCleanup = $state<CatalogCleanupFolder[] | null>(null);
+  let catalogCleanupSelection = $state<string[]>([]);
+  let catalogCleanupLimit = $state(100);
+  let catalogCleanupResult = $state<CatalogCleanupResult | null>(null);
   let tools = $state<ToolStatus[]>([]);
   let search = $state("");
   let filter = $state("all");
@@ -120,6 +127,17 @@
   const determinate = $derived(snapshot.progress.status !== "scanning" && snapshot.progress.total > 0 && (!importing || snapshot.progress.done > 0));
   const elapsedMs = $derived(importing ? Math.max(snapshot.progress.timings?.totalMs ?? 0, progressClock - progressStartedAt) : snapshot.progress.timings?.totalMs ?? 0);
   const queuedJobs = $derived(jobs.filter((job) => job.queued && job.id !== snapshot.progress.jobId).reverse());
+  const deferredSelected = $derived(new Set(deferredSelection));
+  const catalogCleanupSelected = $derived(new Set(catalogCleanupSelection));
+  const deferredGroups = $derived.by(() => {
+    const groups = new Map<string, DeferredFolder[]>();
+    for (const folder of deferredFolders) {
+      const group = groups.get(folder.root) ?? [];
+      group.push(folder);
+      groups.set(folder.root, group);
+    }
+    return [...groups.entries()];
+  });
   const phaseTitle = $derived.by(() => {
     if (cancelling) return t("Cancelling import...");
     if (snapshot.progress.status === "paused") return t("Import paused");
@@ -385,6 +403,9 @@
       await loadLibrary(preservePages);
     } else {
       items = [];
+      jobs = [];
+      deferredFolders = [];
+      deferredSelection = [];
       itemsStart = 0;
       months = [];
       month = "";
@@ -397,8 +418,16 @@
   async function refreshJobs() {
     const request = ++jobsRequest;
     const root = snapshot.root;
-    const result = await api<Job[]>("job_history");
-    if (request === jobsRequest && root === snapshot.root) jobs = result;
+    const [result, deferred] = await Promise.all([
+      api<Job[]>("job_history"),
+      api<DeferredFolder[]>("deferred_folders"),
+    ]);
+    if (request === jobsRequest && root === snapshot.root) {
+      jobs = result;
+      deferredFolders = deferred;
+      const available = new Set(deferred.map((folder) => folder.path));
+      deferredSelection = deferredSelection.filter((path) => available.has(path));
+    }
   }
 
   async function mutate(action: () => Promise<void>) {
@@ -531,6 +560,10 @@
     if (!path) return;
     await run(async () => {
       await mutate(async () => {
+        deferredSelection = [];
+        deferredLimits = {};
+        catalogCleanup = null;
+        catalogCleanupResult = null;
         snapshot = await api<Snapshot>("open_archive", { path });
         xmpAttention = [];
         config = { ...snapshot.settings };
@@ -540,7 +573,7 @@
     });
   }
 
-  async function importFolders(paths?: string[]) {
+  async function importFolders(paths?: string[], deferredOnly = false) {
     if (folderSearchActive) {
       notice = t("Stop the folder search before importing.");
       return;
@@ -556,9 +589,56 @@
     const folders = paths ?? await chooseFolders(t("Choose photo folders to copy"), true);
     if (!folders?.length) return;
     await run(async () => {
-      const started = await api<boolean>("start_import", { roots: folders });
+      const started = await api<boolean>("start_import", { roots: folders, deferredOnly });
       notice = started ? t("Folders added. Originals stay untouched during import.") : t("Folders queued after the current import.");
       await refreshJobs();
+    });
+  }
+
+  function selectDeferred(paths: string[], checked: boolean) {
+    const selected = new Set(deferredSelection);
+    for (const path of paths) {
+      if (checked) selected.add(path);
+      else selected.delete(path);
+    }
+    deferredSelection = [...selected];
+  }
+
+  function catalogFolderKey(folder: CatalogCleanupFolder) {
+    return JSON.stringify([folder.computer, folder.path]);
+  }
+
+  function selectCatalogFolders(folders: CatalogCleanupFolder[], checked: boolean) {
+    const selected = new Set(catalogCleanupSelection);
+    for (const folder of folders) {
+      if (checked) selected.add(catalogFolderKey(folder));
+      else selected.delete(catalogFolderKey(folder));
+    }
+    catalogCleanupSelection = [...selected];
+  }
+
+  async function previewCatalogCleanup() {
+    await run(async () => {
+      catalogCleanup = await api<CatalogCleanupFolder[]>("catalog_cleanup_preview");
+      catalogCleanupSelection = [];
+      catalogCleanupLimit = 100;
+      catalogCleanupResult = null;
+    });
+  }
+
+  async function cleanCatalog() {
+    const folders = (catalogCleanup ?? []).filter((folder) => catalogCleanupSelected.has(catalogFolderKey(folder)));
+    if (!folders.length) return;
+    if (!await confirm(t("Move the selected archive files to system Trash? They may be the only remaining copies. Emptying Trash permanently deletes them. Source folders are not changed."), { title: t("Move archive files to Trash"), kind: "warning" })) return;
+    await run(async () => {
+      await mutate(async () => {
+        catalogCleanupResult = await api<CatalogCleanupResult>("catalog_cleanup", { folders, confirmed: true });
+        catalogCleanup = null;
+        catalogCleanupSelection = [];
+        await refresh(true);
+        if (catalogCleanupResult.errors.length) error = catalogCleanupResult.errors.join("\n");
+        else notice = `${t("Moved to Trash")}: ${catalogCleanupResult.trashed}${catalogCleanupResult.skippedShared ? ` · ${catalogCleanupResult.skippedShared} ${t("shared pictures kept because not every original folder was selected")}` : ""}`;
+      });
     });
   }
 
@@ -1346,6 +1426,12 @@
           <button class="secondary" onclick={() => tab = "import"}>{t("Review incomplete imports")}</button>
         </div>
       {/if}
+      {#if deferredFolders.length && !importing && !queuedJobs.length && tab !== "import"}
+        <div class="banner warning incomplete-notice" role="status">
+          <div><strong>{deferredFolders.length} {t("folders set aside for review")}</strong><p>{t("Some folders may contain thumbnails or other small images. You can choose which to import.")}</p></div>
+          <button class="secondary" onclick={() => tab = "import"}>{t("Review set-aside folders")}</button>
+        </div>
+      {/if}
       {#if snapshot.progress.errors.length}<details class="banner error"><summary>{snapshot.progress.errors.length} {t("import/recovery issue(s) need attention")}</summary>{#each snapshot.progress.errors as issue}<p>{issue}</p>{/each}</details>{/if}
       {#if snapshot.progress.warnings?.length}<details class="banner warning"><summary>{snapshot.progress.warnings.length} {t("XMP sidecar warning(s)")}</summary>{#each snapshot.progress.warnings as issue}<p>{issue}</p>{/each}</details>{/if}
       {#if xmpAttention.length}<details class="banner warning"><summary>{xmpAttention.length} {t("XMP sidecar warning(s)")}</summary>{#each xmpAttention as issue}<p>{issue}</p>{/each}<button class="text-button" onclick={() => xmpAttention = []}>{t("Dismiss")}</button></details>{/if}
@@ -1357,6 +1443,28 @@
           <div><small>{t("ARCHIVE DESTINATION")}</small><strong>{snapshot.root ?? t("No archive open")}</strong>{#if !snapshot.root}<p>{t("Singulo copies your photos and videos into this folder and keeps them organized there. Use a dedicated folder, ideally on an external disk with plenty of space.")}</p>{/if}</div>
           <button class={snapshot.root ? "secondary" : "primary"} title={busyReason} disabled={!native || busy || folderSearchActive} onclick={chooseArchive}>{snapshot.root ? t("Change") : t("Choose folder")}</button>
         </section>
+        {#if deferredFolders.length && !importing && !queuedJobs.length}
+          <section class="folder-search">
+            <h3>{t("Folders set aside for review")}</h3>
+            <p class="muted">{t("Select any folders you want to import. Only files directly inside selected folders will be imported; source files stay untouched. The list is kept for this computer.")}</p>
+            {#each deferredGroups as [root, folders] (root)}
+              <details open={folders.length <= 100}>
+                <summary><code>{root}</code> · {folders.length} {t("folders")}</summary>
+                <label class="check-setting"><input type="checkbox" checked={folders.every((folder) => deferredSelected.has(folder.path))} onchange={(event) => selectDeferred(folders.map((folder) => folder.path), event.currentTarget.checked)} /><span>{t("Select all folders in this source")}</span></label>
+                <div class="found-folders">
+                  {#each folders.slice(0, deferredLimits[root] ?? 100) as folder (folder.path)}
+                    <label class="found-folder">
+                      <input type="checkbox" checked={deferredSelected.has(folder.path)} onchange={(event) => selectDeferred([folder.path], event.currentTarget.checked)} />
+                      <span><code>{folder.path}</code><small>{folder.count.toLocaleString()} {t("photos and videos")} · {t(folder.reason === "named" ? "Named cache folder" : "All checked images are 300 × 300 or smaller")}</small></span>
+                    </label>
+                  {/each}
+                </div>
+                {#if (deferredLimits[root] ?? 100) < folders.length}<button class="text-button" onclick={() => deferredLimits = { ...deferredLimits, [root]: (deferredLimits[root] ?? 100) + 100 }}>{t("Show more folders")}</button>{/if}
+              </details>
+            {/each}
+            <div class="button-row"><span>{deferredSelection.length} {t("selected")}</span><button class="primary" disabled={!deferredSelection.length || busy || folderSearchActive} onclick={() => importFolders(deferredSelection, true)}>{t("Import selected folders")}</button></div>
+          </section>
+        {/if}
         <section class="folder-search">
           <div class="section-line">
             <div><h3>{t("Find photo folders")}</h3><p class="muted">{t("Search a disk or folder for photos and videos you may want to back up. Nothing is imported automatically.")}</p></div>
@@ -1404,7 +1512,7 @@
             {#each incompleteJobs as job (job.id)}
               {@const reason = retryReason(job)}
               <article class="incomplete-import">
-                <div class="section-line"><strong>{t(jobStatus(job))}</strong><div class="review-actions"><button class="secondary" title={reason} disabled={!!reason} onclick={() => importFolders(job.roots)}>{t("Retry folders")}</button><button class="text-button" title={busyReason} disabled={busy} onclick={() => startClearImport(job)}>{t("Clear import...")}</button></div></div>
+                <div class="section-line"><strong>{t(jobStatus(job))}</strong><div class="review-actions"><button class="secondary" title={reason} disabled={!!reason} onclick={() => importFolders(job.roots, job.deferredOnly)}>{t("Retry folders")}</button><button class="text-button" title={busyReason} disabled={busy} onclick={() => startClearImport(job)}>{t("Clear import...")}</button></div></div>
                 <p>{jobExplanation(job)}</p>
                 {#if job.progress.folders?.length}
                   {#each job.progress.folders as folder (folder.root)}
@@ -1513,11 +1621,42 @@
           <div class="setting-columns"><label>{t("Filenames")}<select bind:value={config.filenames}><option value="original">{t("Keep original filenames")}</option><option value="date">{t("Use photo date / time")}</option></select></label><label>{t("Unknown-date folder")}<input bind:value={config.unknownFolder} /></label></div>
           <div class="path-preview"><small>{t("YOUR FILES WOULD LOOK LIKE THIS")}</small>{#each examples as example}<code>{example}</code>{/each}{#if !native}<code>2023/07/18/IMG_1234.jpg</code><code>unknown/undated.jpg</code>{/if}{#if configError}<p class="field-error">{configError}</p>{/if}<p>{t("Name collisions receive a unique suffix. Estimated dates stay marked; missing times aren't invented.")}</p></div>
           <label class="check-setting"><input type="checkbox" bind:checked={config.automaticMatches} /><span><strong>{t("Automatically group very confident matches")}</strong><small>{t("The clearly better version stays in your library. The duplicate is removed, but a spare copy is kept so you can restore it. Doubtful cases are left for you to compare.")}</small></span></label>
+          <label class="check-setting"><input type="checkbox" bind:checked={config.deferPotentialThumbnails} /><span><strong>{t("Set aside possible thumbnails and caches")}</strong><small>{t("Set aside folders named thumbnails, cache or temp, and folders where every recognized media file is a photo at most 300 × 300 pixels. Review them after importing. Outside named folders, files whose dimensions cannot be checked are imported normally.")}</small></span></label>
           <label class="check-setting"><input type="checkbox" bind:checked={config.deepVideoMatching} disabled={!config.automaticMatches} /><span><strong>{t("Deep video comparison (slower)")}</strong><small>{t("Off by default: exact video duplicates are recognized by hash; possible matches from a preview or capture date and duration go to manual review. Enable to compare every frame and audio before automatically grouping a clearly higher-resolution equivalent. Requires automatic grouping above and can slow imports substantially.")}</small></span></label>
           <label class="check-setting"><input type="checkbox" bind:checked={config.preventSleepDuringImport} /><span><strong>{t("Keep the computer awake during imports")}</strong><small>{t("Prevents automatic sleep during imports, including while paused. The screen may still turn off. Closing a laptop lid or choosing Sleep can still interrupt an import.")}</small></span></label>
           <div class="button-row"><button class="primary" title={busyReason} disabled={!native || !snapshot.root || busy || !!configError || !settingsDirty} onclick={() => run(async () => { await mutate(async () => { await api("save_settings", { settings: config }); await refresh(true); }); notice = t("Settings saved for future imports. Existing files haven't moved."); })}>{t("Save archive settings")}</button>{#if settingsDirty}<span class="pill unsaved">{t("Unsaved changes")}</span><button class="text-button" onclick={() => config = { ...snapshot.settings }}>{t("Discard changes")}</button>{/if}<button class="text-button" onclick={() => config = { ...defaults }}>{t("Reset defaults")}</button></div>
         </section>
         <section class="settings-card"><h3>{t("Choosing an external disk")}</h3><p class="muted">{t("Mac only: prefer APFS. Windows only: prefer NTFS. For use on both, exFAT is convenient, but lacks journaling and may require extra copying during import. Always eject safely and keep another backup.")}</p><p class="muted">{t("You do not need to reformat an existing disk. Formatting erases its files; this app never formats disks.")}</p></section>
+        <h2>{t("Maintain your existing archive")}</h2>
+        <section class="settings-card">
+          <h3>{t("Find possible thumbnails and caches")}</h3>
+          <p class="muted">{t("Find archive files from folders named thumbnails, cache or temp, and folders where all known cataloged media are photos at most 300 × 300 pixels. Only catalog history is checked; the original folders are not scanned.")}</p>
+          <p class="muted">{t("Pictures from non-matching folders or with related files are left alone. For pictures in several matching folders, select every folder to remove them.")}</p>
+          <p class="muted">{t("To recover a file from Trash, restore it outside the archive and import it again.")}</p>
+          <button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={previewCatalogCleanup}>{t("Find folders to review")}</button>
+          {#if catalogCleanup}
+            <p>{catalogCleanup.length.toLocaleString()} {t("folders to review")}</p>
+            {#if catalogCleanup.length}
+              <label class="check-setting"><input type="checkbox" checked={catalogCleanup.every((folder) => catalogCleanupSelected.has(catalogFolderKey(folder)))} onchange={(event) => selectCatalogFolders(catalogCleanup ?? [], event.currentTarget.checked)} /><span>{t("Select all folders")}</span></label>
+              <div class="found-folders">
+                {#each catalogCleanup.slice(0, catalogCleanupLimit) as folder (catalogFolderKey(folder))}
+                  <label class="found-folder">
+                    <input type="checkbox" checked={catalogCleanupSelected.has(catalogFolderKey(folder))} onchange={(event) => selectCatalogFolders([folder], event.currentTarget.checked)} />
+                    <span><code>{folder.path}</code><small>{folder.computerName || t("Unknown computer")} · {folder.count.toLocaleString()} {t("photos and videos")} · {bytes(folder.bytes)} · {folder.samples.join(", ")}</small></span>
+                  </label>
+                {/each}
+              </div>
+              {#if catalogCleanupLimit < catalogCleanup.length}<button class="text-button" onclick={() => catalogCleanupLimit += 100}>{t("Show more folders")}</button>{/if}
+              <div class="button-row"><span>{catalogCleanupSelection.length} {t("selected")}</span><button class="secondary" disabled={!catalogCleanupSelection.length || busy} onclick={cleanCatalog}>{t("Move selected to Trash...")}</button><button class="text-button" disabled={busy} onclick={() => catalogCleanup = null}>{t("Close")}</button></div>
+            {:else}
+              <p class="muted">{t("No eligible folders found.")}</p>
+            {/if}
+          {/if}
+          {#if catalogCleanupResult}
+            <p role="status">{t("Moved to Trash")}: {catalogCleanupResult.trashed}</p>
+            {#if catalogCleanupResult.skippedShared}<p>{catalogCleanupResult.skippedShared} {t("shared pictures kept because not every original folder was selected")}</p>{/if}
+          {/if}
+        </section>
         <section class="next-steps"><div><h3>{t("Apply the saved layout to older imports?")}</h3><p>{t("Preview existing file moves first. Sources and folder history stay untouched.")}</p></div><button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={previewMoves}>{t("Preview reorganization")}</button></section>
         <button class="text-button" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={() => run(async () => { moves = await api<MoveRow[]>("rollback_preview"); undoingMoves = true; })}>{t("Preview undo of last reorganization")}</button>
         <section class="settings-card">

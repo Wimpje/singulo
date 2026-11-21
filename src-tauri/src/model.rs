@@ -14,6 +14,12 @@ pub struct Settings {
     pub deep_video_matching: bool,
     #[serde(default)]
     pub prevent_sleep_during_import: bool,
+    #[serde(default = "default_true")]
+    pub defer_potential_thumbnails: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -25,6 +31,7 @@ impl Default for Settings {
             automatic_matches: true,
             deep_video_matching: false,
             prevent_sleep_during_import: false,
+            defer_potential_thumbnails: true,
         }
     }
 }
@@ -216,6 +223,37 @@ pub struct QueuedJob {
     pub id: String,
     pub roots: Vec<String>,
     pub settings: Settings,
+    pub deferred_only: bool,
+    pub deferred_roots: std::collections::HashMap<String, String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeferredFolder {
+    pub root: String,
+    pub path: String,
+    pub count: usize,
+    pub reason: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogCleanupFolder {
+    pub computer: String,
+    pub computer_name: String,
+    pub path: String,
+    pub count: usize,
+    pub bytes: u64,
+    pub token: String,
+    pub samples: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogCleanupResult {
+    pub trashed: usize,
+    pub skipped_shared: usize,
+    pub errors: Vec<String>,
 }
 
 impl Default for AppState {

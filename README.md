@@ -25,6 +25,8 @@ Video playback tries the archived original first. If the built-in player cannot 
 
 Imports **copy**, never delete or modify sources. Exact duplicates share one verified archived copy. Conservative visual matching can keep a clearly higher-resolution equivalent active; other original bytes remain in **archive undo** until you explicitly purge them. Resolution and visual comparisons are quality estimates, not a promise of photographic quality.
 
+In Settings, **Set aside possible thumbnails and caches** is on by default. Imports set aside media in folders named `thumbnails`, `cache`, or `temp` (including their subfolders), and folders whose recognized photos are all at most 300 × 300 pixels. Folder names are matched case-insensitively. A folder with video, RAW, HEIC/HEIF/AVIF, or an image whose dimensions cannot be checked is not set aside based on size alone. After importing, review the grouped folder list on **Import & archive** and select any folders to import; only files directly in selected folders are included. The list persists for the same computer, and source files remain untouched.
+
 ### Find photo folders
 
 On **Import & archive**, choose **Find photo folders** and select a disk or folder. The optional search lists folders with at least two recognized photos or videos directly inside them; enable the single-file option to see the rest. Counts exclude sidecars and samples are filenames, not previews. Select the folders you want and choose **Import selected folders**; importing also includes their subfolders. Searching alone never imports or changes files.
@@ -58,6 +60,12 @@ Opening an older catalog upgrades it automatically, after creating a backup name
 ### Source cleanup
 
 Source cleanup is temporarily unavailable while multi-computer safety is being completed. Clearing an import only removes its history entry and keeps all archived and source files. If an earlier cleanup was interrupted, the app reports the retained staging location; check the files on the original computer and recover them manually. Do not delete the staged files blindly.
+
+### Maintain an existing archive
+
+Settings groups the existing-archive tools together: preview layout reorganization or its undo, correct estimated dates, and manage XMP exports. **Find possible thumbnails and caches** previews archive copies from the named folders above and folders whose known cataloged photos are all at most 300 × 300 pixels. It uses catalog history, not a new scan of the original folders; unknown dimensions, videos and RAW/HEIC prevent a size-only match. Items from non-matching folders, or with related files, dependent spare copies, or managed XMP exports are excluded for safety. If an item came from several matching folders, select all of them to remove it.
+
+Select folders and confirm to move their eligible archive copies to system Trash; sources are not changed. The archive files may be the only remaining copies, and emptying Trash permanently deletes them. To recover a file from Trash, restore it outside the archive and import it again; restoring it to its staged location does not automatically add it back. If Trash fails, cleanup stops and any retained staged copy remains in Singulo's spare copies.
 
 ### Interruptions and recovery
 

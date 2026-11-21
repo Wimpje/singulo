@@ -10,6 +10,7 @@ use std::{
 use uuid::Uuid;
 
 mod xmp;
+mod cleanup;
 pub use xmp::XmpSummary;
 
 #[derive(Serialize, Deserialize)]
@@ -448,7 +449,8 @@ fn register_functions(connection: &Connection) -> Result<()> {
                 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
             |context| Ok(context.get::<String>(0)?.to_lowercase()),
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    cleanup::register_functions(connection)
 }
 
 fn stored_settings(connection: &Connection) -> Result<Settings> {
@@ -581,6 +583,10 @@ impl Archive {
              CREATE TABLE IF NOT EXISTS xmp_dirty (item TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS xmp_baselines (item TEXT PRIMARY KEY, base TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS deferred_folders (
+                 computer TEXT NOT NULL, path TEXT NOT NULL, data TEXT NOT NULL,
+                 PRIMARY KEY(computer,path)
+             );
              CREATE TABLE IF NOT EXISTS import_items (job TEXT NOT NULL, item TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(job,item));
              CREATE INDEX IF NOT EXISTS import_item_refs ON import_items(item,job);
              CREATE INDEX IF NOT EXISTS item_keeper ON items(json_extract(data,'$.keeper'));
@@ -1602,9 +1608,16 @@ impl Archive {
         for mut item in pending_trash {
             let path = paths::inside(&self.root, Path::new(&item.path))?;
             item.state = if path.exists() { "undo" } else { "purged" }.into();
-            self.store(&item)?;
+            self.transaction(|archive| {
+                archive.store(&item)?;
+                if item.state == "purged" {
+                    archive.connection.execute("DELETE FROM source_groups WHERE item=?1", [&item.id])
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })?;
             errors.push(format!(
-                "Interrupted import clearing for {}. Check OS Trash; any retained archive copy is in spare copies. Nothing will be trashed automatically.",
+                "Interrupted archive cleanup for {}. Check OS Trash; any retained archive copy is in spare copies. Nothing will be trashed automatically.",
                 item.original_name
             ));
         }
@@ -2502,6 +2515,39 @@ impl Archive {
             )
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn deferred_folders(&self, computer: &str) -> Result<Vec<DeferredFolder>> {
+        let mut query = self.connection.prepare(
+            "SELECT data FROM deferred_folders WHERE computer=?1 ORDER BY path"
+        ).map_err(|e| e.to_string())?;
+        query.query_map([computer], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .map(|row| parse(&row.map_err(|e| e.to_string())?))
+            .collect()
+    }
+
+    pub fn save_deferred_folders(&mut self, computer: &str, folders: &[DeferredFolder]) -> Result<()> {
+        let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
+        for folder in folders {
+            transaction.execute(
+                "INSERT INTO deferred_folders(computer,path,data) VALUES(?1,?2,?3)
+                 ON CONFLICT(computer,path) DO UPDATE SET data=excluded.data",
+                params![computer, folder.path, json(folder)?],
+            ).map_err(|e| e.to_string())?;
+        }
+        transaction.commit().map_err(|e| e.to_string())
+    }
+
+    pub fn remove_deferred_folders(&mut self, computer: &str, paths: &[String]) -> Result<()> {
+        let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
+        for path in paths {
+            transaction.execute(
+                "DELETE FROM deferred_folders WHERE computer=?1 AND path=?2",
+                params![computer, path],
+            ).map_err(|e| e.to_string())?;
+        }
+        transaction.commit().map_err(|e| e.to_string())
     }
 
     pub fn jobs(&self) -> Result<Vec<serde_json::Value>> {

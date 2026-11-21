@@ -18,6 +18,205 @@ fn sample(hash: String) -> Media {
     }
 }
 
+#[test]
+fn deferred_thumbnail_folders_are_conservatively_classified() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let mut files = Vec::new();
+    for (folder, name, size) in [
+        ("small", "one.png", (300, 300)),
+        ("small", "two.png", (1, 200)),
+        ("mixed", "small.png", (200, 200)),
+        ("mixed", "large.png", (301, 300)),
+        ("unknown", "small.png", (50, 50)),
+        ("Cache/nested", "large.png", (500, 500)),
+    ] {
+        let directory = root.join(folder);
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(name);
+        image::RgbImage::new(size.0, size.1).save(&path).unwrap();
+        files.push((root.to_path_buf(), path));
+    }
+    let raw = root.join("unknown").join("photo.heic");
+    fs::write(&raw, b"unknown dimensions").unwrap();
+    files.push((root.to_path_buf(), raw));
+    let complete = [root.to_path_buf()].into_iter().collect();
+    let cancel = crate::cancel::Cancellation::default();
+    let found = crate::import::classify_deferred_folders(&files, &complete, &cancel, |_| Ok(())).unwrap();
+    assert_eq!(found.len(), 2);
+    assert_eq!(found[&root.join("small")].count, 2);
+    assert_eq!(found[&root.join("small")].reason, "small");
+    assert_eq!(found[&root.join("Cache/nested")].reason, "named");
+    let incomplete = crate::import::classify_deferred_folders(&files, &Default::default(), &cancel, |_| Ok(())).unwrap();
+    assert_eq!(incomplete.len(), 1);
+    assert!(incomplete.contains_key(&root.join("Cache/nested")));
+    let nested = root.join("Cache/nested");
+    let files = vec![(nested.clone(), nested.join("large.png"))];
+    let found = crate::import::classify_deferred_folders(&files, &[nested.clone()].into_iter().collect(), &cancel, |_| Ok(())).unwrap();
+    assert_eq!(found[&nested].reason, "named");
+    cancel.request();
+    assert!(crate::import::classify_deferred_folders(&files, &complete, &cancel, |_| Ok(())).is_err());
+}
+
+#[test]
+fn deferred_folders_persist_and_are_scoped_to_the_computer() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("archive");
+    fs::create_dir(&root).unwrap();
+    let mut archive = Archive::open(&root).unwrap();
+    let folder = DeferredFolder {
+        root: "/source".into(),
+        path: "/source/thumbnails".into(),
+        count: 4,
+        reason: "named".into(),
+    };
+    archive.save_deferred_folders("one", std::slice::from_ref(&folder)).unwrap();
+    archive.save_deferred_folders("two", std::slice::from_ref(&folder)).unwrap();
+    drop(archive);
+    let mut archive = Archive::open(&root).unwrap();
+    assert_eq!(archive.deferred_folders("one").unwrap()[0].count, 4);
+    archive.remove_deferred_folders("one", &[folder.path]).unwrap();
+    assert!(archive.deferred_folders("one").unwrap().is_empty());
+    assert_eq!(archive.deferred_folders("two").unwrap().len(), 1);
+}
+
+fn catalog_cleanup_item(archive: &mut Archive, source: &Path, id: &str, kind: &str, width: u32, height: u32) -> Occurrence {
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(source, id.as_bytes()).unwrap();
+    let hash = media::hash(source).unwrap();
+    let mut media = sample(hash.clone());
+    media.kind = kind.into();
+    media.width = width;
+    media.height = height;
+    media.bytes = id.len() as u64;
+    let item = Item {
+        id: id.into(),
+        path: format!("catalog/{id}.jpg"),
+        original_name: source.file_name().unwrap().to_string_lossy().into(),
+        state: "active".into(),
+        keeper: None,
+        media,
+        settings: Settings::default(),
+        albums: vec![],
+    };
+    let occurrence = Occurrence {
+        id: format!("occ-{id}"),
+        item: id.into(),
+        source: source.to_string_lossy().into(),
+        root: source.parent().unwrap().to_string_lossy().into(),
+        album: "source".into(),
+        relative: source.file_name().unwrap().to_string_lossy().into(),
+        hash,
+        identity: media::identity(source).unwrap(),
+        status: "pending".into(),
+        bytes: id.len() as u64,
+        computer: Some(Computer { id: "computer".into(), name: "Computer".into() }),
+    };
+    archive.place(source, item, Some(occurrence.clone()), None).unwrap();
+    occurrence
+}
+
+#[test]
+fn catalog_cleanup_checks_history_and_preserves_copies_on_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive_root = temp.path().join("archive");
+    fs::create_dir(&archive_root).unwrap();
+    let mut archive = Archive::open(&archive_root).unwrap();
+    let sources = temp.path().join("sources");
+    catalog_cleanup_item(&mut archive, &sources.join("cache/large.jpg"), "cache", "photo", 600, 600);
+    catalog_cleanup_item(&mut archive, &sources.join("small/a.jpg"), "small-a", "photo", 300, 300);
+    catalog_cleanup_item(&mut archive, &sources.join("small/b.jpg"), "small-b", "photo", 1, 200);
+    catalog_cleanup_item(&mut archive, &sources.join("mixed/a.jpg"), "mixed-a", "photo", 100, 100);
+    catalog_cleanup_item(&mut archive, &sources.join("mixed/b.jpg"), "mixed-b", "photo", 301, 300);
+    catalog_cleanup_item(&mut archive, &sources.join("unknown/a.jpg"), "unknown", "photo", 0, 0);
+    let shared = catalog_cleanup_item(&mut archive, &sources.join("cache/shared.jpg"), "shared", "photo", 600, 600);
+    let other_source = sources.join("family/shared.jpg");
+    fs::create_dir_all(other_source.parent().unwrap()).unwrap();
+    fs::copy(&shared.source, &other_source).unwrap();
+    let mut other = shared.clone();
+    other.id = "other-occurrence".into();
+    other.source = other_source.to_string_lossy().into();
+    other.root = other_source.parent().unwrap().to_string_lossy().into();
+    other.identity = media::identity(&other_source).unwrap();
+    archive.record_occurrence(&other).unwrap();
+    let mut legacy = catalog_cleanup_item(&mut archive, &sources.join("cache/legacy.jpg"), "legacy", "photo", 600, 600);
+    legacy.id = "legacy-occurrence".into();
+    legacy.source = "unlocated.jpg".into();
+    archive.record_occurrence(&legacy).unwrap();
+    catalog_cleanup_item(&mut archive, &sources.join("cache/buddy.jpg"), "buddy", "photo", 400, 400);
+    catalog_cleanup_item(&mut archive, &sources.join("cache/buddy.dng"), "buddy-raw", "raw", 400, 400);
+
+    let preview = archive.catalog_cleanup_preview().unwrap();
+    let cache = preview.iter().find(|folder| folder.path == sources.join("cache").to_string_lossy()).unwrap().clone();
+    let small = preview.iter().find(|folder| folder.path == sources.join("small").to_string_lossy()).unwrap().clone();
+    assert_eq!((preview.len(), cache.count, small.count), (2, 1, 2));
+    catalog_cleanup_item(&mut archive, &sources.join("small/c.jpg"), "small-c", "photo", 80, 80);
+    assert!(archive.catalog_cleanup_with(&[small], |_| panic!("stale preview must not trash files")).is_err());
+    assert_eq!(archive.item("small-a").unwrap().state, "active");
+
+    let trash = temp.path().join("trash");
+    fs::create_dir(&trash).unwrap();
+    let result = archive.catalog_cleanup_with(&[cache], |path| {
+        fs::rename(path, trash.join("cache.jpg")).map_err(|error| error.to_string())
+    }).unwrap();
+    assert_eq!(result.trashed, 1);
+    assert!(result.errors.is_empty());
+    assert_eq!(archive.item("cache").unwrap().state, "purged");
+    assert_eq!(fs::read(trash.join("cache.jpg")).unwrap(), b"cache");
+    assert_eq!(fs::read(sources.join("cache/large.jpg")).unwrap(), b"cache");
+    assert_eq!(archive.item("shared").unwrap().state, "active");
+    assert_eq!(archive.item("legacy").unwrap().state, "active");
+    assert_eq!(archive.item("buddy").unwrap().state, "active");
+
+    let small = archive.catalog_cleanup_preview().unwrap().into_iter()
+        .find(|folder| folder.path == sources.join("small").to_string_lossy()).unwrap();
+    let active_path = archive.root.join(archive.item("small-a").unwrap().path);
+    fs::write(&active_path, b"changed").unwrap();
+    let result = archive.catalog_cleanup_with(std::slice::from_ref(&small), |_| panic!("changed archive files must not be trashed")).unwrap();
+    assert_eq!(result.trashed, 0);
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(archive.item("small-a").unwrap().state, "active");
+    fs::write(&active_path, b"small-a").unwrap();
+    let result = archive.catalog_cleanup_with(&[small], |_| Err("Trash unavailable".into())).unwrap();
+    assert_eq!(result.trashed, 0);
+    assert_eq!(result.errors.len(), 1);
+    let retained = archive.item("small-a").unwrap();
+    assert_eq!(retained.state, "undo");
+    assert_eq!(fs::read(archive.root.join(retained.path)).unwrap(), b"small-a");
+}
+
+#[test]
+fn catalog_cleanup_requires_all_matching_origins_for_shared_items() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("archive");
+    fs::create_dir(&root).unwrap();
+    let mut archive = Archive::open(&root).unwrap();
+    let first = temp.path().join("cache/photo.jpg");
+    let mut occurrence = catalog_cleanup_item(&mut archive, &first, "shared", "photo", 600, 600);
+    let second = temp.path().join("temp/photo.jpg");
+    fs::create_dir_all(second.parent().unwrap()).unwrap();
+    fs::copy(&first, &second).unwrap();
+    occurrence.id = "second-occurrence".into();
+    occurrence.source = second.to_string_lossy().into();
+    occurrence.root = second.parent().unwrap().to_string_lossy().into();
+    occurrence.identity = media::identity(&second).unwrap();
+    archive.record_occurrence(&occurrence).unwrap();
+
+    let preview = archive.catalog_cleanup_preview().unwrap();
+    assert_eq!(preview.len(), 2);
+    let partial = archive.catalog_cleanup_with(&preview[..1], |_| panic!("incomplete selection must not trash files")).unwrap();
+    assert_eq!((partial.trashed, partial.skipped_shared), (0, 1));
+    assert_eq!(archive.item("shared").unwrap().state, "active");
+    let trash = temp.path().join("trash.jpg");
+    let complete = archive.catalog_cleanup_with(&preview, |path| {
+        fs::rename(path, &trash).map_err(|error| error.to_string())
+    }).unwrap();
+    assert_eq!((complete.trashed, complete.skipped_shared), (1, 0));
+    assert!(complete.errors.is_empty());
+    assert_eq!(fs::read(&trash).unwrap(), b"shared");
+    assert!(first.exists() && second.exists());
+}
+
 fn xmp_fixture() -> (tempfile::TempDir, Archive) {
     let directory = tempfile::Builder::new()
         .prefix(".xmp-test-")

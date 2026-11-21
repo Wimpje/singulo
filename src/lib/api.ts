@@ -7,6 +7,7 @@ export interface Settings {
   automaticMatches: boolean;
   deepVideoMatching: boolean;
   preventSleepDuringImport: boolean;
+  deferPotentialThumbnails: boolean;
 }
 
 export interface Media {
@@ -151,7 +152,31 @@ export interface Job {
   id: string;
   roots: string[];
   queued?: boolean;
+  deferredOnly?: boolean;
   progress: Partial<Progress>;
+}
+
+export interface DeferredFolder {
+  root: string;
+  path: string;
+  count: number;
+  reason: "named" | "small";
+}
+
+export interface CatalogCleanupFolder {
+  computer: string;
+  computerName: string;
+  path: string;
+  count: number;
+  bytes: number;
+  token: string;
+  samples: string[];
+}
+
+export interface CatalogCleanupResult {
+  trashed: number;
+  skippedShared: number;
+  errors: string[];
 }
 
 export interface ToolStatus {
@@ -167,6 +192,7 @@ export const defaults: Settings = {
   automaticMatches: true,
   deepVideoMatching: false,
   preventSleepDuringImport: false,
+  deferPotentialThumbnails: true,
 };
 
 export const emptySnapshot: Snapshot = {

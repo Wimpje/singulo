@@ -159,6 +159,107 @@ pub fn validate_roots(raw_roots: &[String], archive_root: &Path) -> Result<Vec<P
     Ok(roots)
 }
 
+fn cache_folder_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        ["thumbnails", "cache", "temp"].iter().any(|candidate| name.eq_ignore_ascii_case(candidate))
+    })
+}
+
+fn provenance_root<'a>(job: &'a QueuedJob, root: &'a Path) -> &'a Path {
+    job.deferred_roots.get(&root.to_string_lossy().into_owned())
+        .map_or(root, |original| Path::new(original))
+}
+
+pub(crate) fn classify_deferred_folders(
+    files: &[(PathBuf, PathBuf)],
+    complete_roots: &std::collections::HashSet<PathBuf>,
+    cancel: &Cancellation,
+    mut visiting: impl FnMut(&Path) -> Result<()>,
+) -> Result<HashMap<PathBuf, DeferredFolder>> {
+    let mut folders: HashMap<PathBuf, (PathBuf, bool, bool, usize, bool)> = HashMap::new();
+    for (root, path) in files {
+        cancel.check()?;
+        visiting(path)?;
+        let Some(parent) = path.parent() else { continue };
+        let folder = folders.entry(parent.to_path_buf()).or_insert_with(|| {
+            let named = parent.ancestors()
+                .any(|ancestor| ancestor.file_name().is_some_and(cache_folder_name));
+            (root.clone(), true, false, 0, named)
+        });
+        match media::kind(path) {
+            Some("photo") => {
+                folder.2 = true;
+                folder.3 += 1;
+                if folder.1 && !folder.4 {
+                    folder.1 = image::image_dimensions(path).is_ok_and(|(width, height)| {
+                        width > 0 && height > 0 && width <= 300 && height <= 300
+                    });
+                }
+            }
+            Some("heic" | "raw" | "video") => {
+                folder.2 = true;
+                folder.3 += 1;
+                folder.1 = false;
+            }
+            _ => {}
+        }
+    }
+    Ok(folders.into_iter().filter_map(
+        |(path, (root, all_small, has_media, count, named))| {
+            let scan_complete = complete_roots.contains(&root);
+            (has_media && (named || (scan_complete && all_small))).then(|| {
+                let folder = DeferredFolder {
+                    root: root.to_string_lossy().into_owned(),
+                    path: path.to_string_lossy().into_owned(),
+                    count,
+                    reason: if named { "named".into() } else { "small".into() },
+                };
+                (path, folder)
+            })
+        }
+    ).collect())
+}
+
+fn defer_folders(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    files: &mut Vec<(PathBuf, PathBuf)>,
+    progress: &mut Progress,
+) -> Result<()> {
+    let complete_roots = progress.folders.iter()
+        .filter(|folder| folder.scan_complete && folder.scan_errors == 0)
+        .map(|folder| PathBuf::from(&folder.root))
+        .collect();
+    let deferred = state.cancel.source_io(|| {
+        classify_deferred_folders(files, &complete_roots, &state.cancel, |path| {
+            progress.current = path.to_string_lossy().into_owned();
+            update(app, progress)
+        })
+    })?;
+    if deferred.is_empty() || state.cancel.requested() {
+        return Ok(());
+    }
+    let computer = crate::computer::current()?;
+    let mut archive = state.archive.lock().map_err(|e| e.to_string())?;
+    archive.as_mut().ok_or("Archive is not open.")?
+        .save_deferred_folders(&computer.id, &deferred.values().cloned().collect::<Vec<_>>())?;
+    drop(archive);
+    let folder_indices: HashMap<PathBuf, usize> = progress.folders.iter().enumerate()
+        .map(|(index, folder)| (PathBuf::from(&folder.root), index))
+        .collect();
+    files.retain(|(root, path)| {
+        if path.parent().is_some_and(|parent| deferred.contains_key(parent)) {
+            if let Some(&index) = folder_indices.get(root) {
+                progress.folders[index].discovered -= 1;
+            }
+            false
+        } else {
+            true
+        }
+    });
+    Ok(())
+}
+
 pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
     let _sleep_inhibitor = if job.settings.prevent_sleep_during_import {
         Some(crate::sleep::SleepInhibitor::acquire()?)
@@ -188,7 +289,28 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
     update(app, &progress)?;
     let roots = match state
         .cancel
-        .source_io(|| validate_roots(&job.roots, &archive_root))
+        .source_io(|| {
+            if job.deferred_only {
+                let mut roots = Vec::new();
+                for root in &job.roots {
+                    let validated = validate_roots(std::slice::from_ref(root), &archive_root)?;
+                    if validated.len() != 1 || validated[0].to_string_lossy() != *root {
+                        return Err("A deferred folder changed location; rescan the source.".into());
+                    }
+                    let original = job.deferred_roots.get(root).ok_or("Deferred source is missing.")?;
+                    let canonical_original = paths::canonical(Path::new(original))?;
+                    if canonical_original.to_string_lossy() != *original
+                        || !paths::starts_with(&validated[0], &canonical_original)
+                    {
+                        return Err("A deferred folder changed location; rescan the source.".into());
+                    }
+                    roots.extend(validated);
+                }
+                Ok(roots)
+            } else {
+                validate_roots(&job.roots, &archive_root)
+            }
+        })
     {
         Ok(roots) => roots,
         Err(_) if state.cancel.requested() => Vec::new(),
@@ -209,6 +331,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         let scan = state.cancel.source_io(|| {
             for entry in WalkDir::new(root)
                 .follow_links(false)
+                .max_depth(if job.deferred_only { 1 } else { usize::MAX })
                 .into_iter()
                 .filter_entry(|e| {
                     e.file_name() != ".singulo"
@@ -245,6 +368,12 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         }
         scan?;
         progress.folders[index].scan_complete = true;
+    }
+    if job.settings.defer_potential_thumbnails && !job.deferred_only && !state.cancel.requested()
+        && let Err(error) = defer_folders(app, &state, &mut files, &mut progress)
+        && !state.cancel.requested()
+    {
+        return Err(error);
     }
     // Import image companions before XMP so sidecars can inherit their owner's date/path.
     files.sort_by_key(|(_, path)| media::kind(path) == Some("sidecar"));
@@ -365,7 +494,7 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                         }
                         let occ = occurrence(
                             archive,
-                            root,
+                            provenance_root(job, root),
                             path,
                             &identity,
                             &hash,
@@ -633,6 +762,20 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
         progress.timings.backup_ms = backing_up.elapsed().as_millis() as u64;
         progress.timings.total_ms = started.elapsed().as_millis() as u64;
         archive.save_job(&job.id, &serde_json::json!({"id":job.id, "roots":job.roots, "settings":job.settings, "progress":progress}))?;
+        if progress.status == "complete" {
+            let computer = crate::computer::current()?;
+            let imported = if job.deferred_only {
+                job.roots.clone()
+            } else {
+                let imported: std::collections::HashSet<&Path> = files.iter()
+                    .filter_map(|(_, path)| path.parent()).collect();
+                archive.deferred_folders(&computer.id)?.into_iter()
+                    .filter(|folder| imported.contains(Path::new(&folder.path)))
+                    .map(|folder| folder.path)
+                    .collect()
+            };
+            archive.remove_deferred_folders(&computer.id, &imported)?;
+        }
     }
     update(app, &progress)
 }
@@ -694,7 +837,7 @@ fn commit_ready(
                     archive,
                     &job.id,
                     &job.settings,
-                    entry.root,
+                    provenance_root(job, entry.root),
                     entry.path,
                     &entry.identity,
                     inspected,

@@ -574,11 +574,12 @@ async fn video_preview(app: tauri::AppHandle, id: String) -> Result<String> {
 }
 
 #[tauri::command]
-async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool> {
+async fn start_import(app: tauri::AppHandle, roots: Vec<String>, deferred_only: Option<bool>) -> Result<bool> {
     if roots.is_empty() {
         return Err("Choose at least one source folder.".into());
     }
-    computer::current()?;
+    let computer = computer::current()?;
+    let deferred_only = deferred_only.unwrap_or(false);
     let state = app.state::<AppState>();
     let _discovery_gate = state.discovery_gate.lock().map_err(|e| e.to_string())?;
     if state.discovery.lock().map_err(|e| e.to_string())?.status.running {
@@ -587,25 +588,62 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
     if state.importing.load(Ordering::SeqCst) && state.cancel.requested() {
         return Err("Current import is cancelling; wait a moment before starting another.".into());
     }
-    let (settings, validated_roots) = {
+    let (settings, validated_roots, deferred_roots) = {
         let archive = state.archive.lock().map_err(|e| e.to_string())?;
         let archive = archive
             .as_ref()
             .ok_or("Choose an archive folder before importing.")?;
         archive.check()?;
-        let valid = import::validate_roots(&roots, &archive.root)?
-            .into_iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let mut deferred_roots = std::collections::HashMap::new();
+        let valid = if deferred_only {
+            let deferred = archive.deferred_folders(&computer.id)?
+                .into_iter().map(|folder| (folder.path.clone(), folder)).collect::<std::collections::HashMap<_, _>>();
+            let mut original_roots = std::collections::HashMap::new();
+            let mut seen = std::collections::HashSet::new();
+            let mut valid = Vec::new();
+            for root in &roots {
+                let saved = deferred.get(root)
+                    .ok_or("The selected deferred folder is no longer available.")?;
+                let path = import::validate_roots(std::slice::from_ref(root), &archive.root)?
+                    .into_iter().next().ok_or("Choose a source folder.")?;
+                let path = path.to_string_lossy().into_owned();
+                if path != *root {
+                    return Err("A deferred folder changed location; rescan the source.".into());
+                }
+                if seen.insert(path.clone()) {
+                    let original = match original_roots.entry(saved.root.clone()) {
+                        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            let original = import::validate_roots(std::slice::from_ref(&saved.root), &archive.root)?
+                                .into_iter().next().ok_or("The original source folder is unavailable.")?;
+                            entry.insert(original)
+                        }
+                    };
+                    if original.to_string_lossy() != saved.root || !paths::starts_with(Path::new(&path), original.as_path()) {
+                        return Err("A deferred folder changed location; rescan the source.".into());
+                    }
+                    deferred_roots.insert(path.clone(), saved.root.clone());
+                    valid.push(path);
+                }
+            }
+            valid
+        } else {
+            import::validate_roots(&roots, &archive.root)?
+                .into_iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
         if valid.is_empty() {
             return Err("Choose at least one source folder.".into());
         }
-        (archive.settings.clone(), valid)
+        (archive.settings.clone(), valid, deferred_roots)
     };
     let job = QueuedJob {
         id: uuid::Uuid::new_v4().to_string(),
         roots: validated_roots,
         settings,
+        deferred_only,
+        deferred_roots,
     };
     let mut queue = state.queue.lock().map_err(|e| e.to_string())?;
     let started = state
@@ -621,7 +659,7 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
     {
         let archive = state.archive.lock().map_err(|e| e.to_string())?;
         archive.as_ref().ok_or("Archive is not open.")?.save_job(&job.id,
-            &serde_json::json!({"id":job.id,"roots":job.roots,"settings":job.settings,"tracksCopies":true,"progress":{"status":"queued"}}))?;
+            &serde_json::json!({"id":job.id,"roots":job.roots,"settings":job.settings,"deferredOnly":job.deferred_only,"tracksCopies":true,"progress":{"status":"queued"}}))?;
     }
     queue.push_back(job);
     if started {
@@ -729,6 +767,31 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
         }
     });
     Ok(true)
+}
+
+#[tauri::command]
+async fn deferred_folders(app: tauri::AppHandle) -> Result<Vec<DeferredFolder>> {
+    read(app, |app| {
+        let computer = computer::current()?;
+        read_catalog(&app.state::<AppState>(), |archive| archive.deferred_folders(&computer.id))
+    }).await
+}
+
+#[tauri::command]
+async fn catalog_cleanup_preview(app: tauri::AppHandle) -> Result<Vec<CatalogCleanupFolder>> {
+    inspect_exclusive(app, |archive| archive.catalog_cleanup_preview()).await
+}
+
+#[tauri::command]
+async fn catalog_cleanup(
+    app: tauri::AppHandle,
+    folders: Vec<CatalogCleanupFolder>,
+    confirmed: bool,
+) -> Result<CatalogCleanupResult> {
+    if !confirmed {
+        return Err("Moving archive files to Trash requires explicit confirmation.".into());
+    }
+    change(app, move |archive| archive.catalog_cleanup(&folders)).await
 }
 
 #[tauri::command]
@@ -1149,6 +1212,9 @@ pub fn run() {
             video_original,
             video_preview,
             start_import,
+            deferred_folders,
+            catalog_cleanup_preview,
+            catalog_cleanup,
             control_import,
             job_history,
             clear_import_preview,
