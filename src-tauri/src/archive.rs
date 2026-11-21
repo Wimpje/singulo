@@ -213,6 +213,7 @@ mod performance_tests {
             albums: vec!["Holiday".into()],
         };
         let occurrence = Occurrence {
+            computer: None,
             id: "seed".into(),
             item: "seed".into(),
             source: "/fixture/photo.jpg".into(),
@@ -236,7 +237,7 @@ mod performance_tests {
                 "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
                  INSERT INTO occurrences SELECT printf('source-%06d',x),printf('/fixture/photo-%06d.jpg',x),printf('hash-%06d',x),
                  json_set(?1,'$.id',printf('source-%06d',x),'$.item',printf('photo-%06d',x),
-                     '$.source',printf('/fixture/photo-%06d.jpg',x),'$.hash',printf('hash-%06d',x)) FROM n",
+                     '$.source',printf('/fixture/photo-%06d.jpg',x),'$.hash',printf('hash-%06d',x)),'' FROM n",
                 [json(&occurrence)?]).map_err(|e| e.to_string())?;
             Ok(())
         }).unwrap();
@@ -244,7 +245,19 @@ mod performance_tests {
         // Exercise migration of a pre-existing large catalog, not just a new one.
         archive
             .connection
-            .execute_batch("PRAGMA user_version=1")
+            .execute_batch(
+                "BEGIN;
+                 CREATE TABLE occurrences_v1(id TEXT PRIMARY KEY, source TEXT NOT NULL, hash TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(source,hash));
+                 INSERT INTO occurrences_v1 SELECT id,source,hash,data FROM occurrences;
+                 DROP TABLE occurrences;
+                 ALTER TABLE occurrences_v1 RENAME TO occurrences;
+                 DROP TABLE source_groups;
+                 CREATE TABLE source_groups(source TEXT PRIMARY KEY, item TEXT NOT NULL, group_key TEXT NOT NULL, content_id TEXT);
+                 CREATE INDEX source_group_key ON source_groups(group_key);
+                 CREATE INDEX source_content_id ON source_groups(content_id);
+                 PRAGMA user_version=1;
+                 COMMIT;"
+            )
             .unwrap();
         drop(archive);
         let start = Instant::now();
@@ -289,7 +302,7 @@ mod performance_tests {
         );
         assert_eq!(
             archive
-                .occurrence_id(Path::new(&sidecar.source), "xmp")
+                .occurrence_id(Path::new(&sidecar.source), "xmp", "")
                 .unwrap()
                 .as_deref(),
             Some("xmp")
@@ -299,7 +312,7 @@ mod performance_tests {
         let plan: String = archive
             .connection
             .query_row(
-                "EXPLAIN QUERY PLAN SELECT item FROM source_groups WHERE group_key=?1",
+                "EXPLAIN QUERY PLAN SELECT item FROM source_groups WHERE computer_id='' AND group_key=?1",
                 ["/fixture/photo-000001"],
                 |row| row.get(3),
             )
@@ -478,6 +491,14 @@ impl Archive {
     }
 
     pub fn open(root: &Path) -> Result<Self> {
+        Self::open_inner(root, None)
+    }
+
+    pub fn open_existing(root: &Path, expected_id: &str) -> Result<Self> {
+        Self::open_inner(root, Some(expected_id))
+    }
+
+    fn open_inner(root: &Path, expected_id: Option<&str>) -> Result<Self> {
         if !root.is_dir() {
             return Err("Choose an existing destination folder.".into());
         }
@@ -488,6 +509,13 @@ impl Archive {
             .is_ok_and(|m| m.file_type().is_symlink())
         {
             return Err("Archive administration folder must not be a symlink.".into());
+        }
+        if let Some(expected) = expected_id {
+            let id = fs::read_to_string(private.join("archive-id"))
+                .map_err(|e| format!("Previous archive is unavailable: {e}"))?;
+            if id != expected || !private.join("catalog.sqlite").is_file() {
+                return Err("Previous archive does not match the saved archive. Choose it again.".into());
+            }
         }
         fs::create_dir_all(&private).map_err(|e| format!("Destination is not writable: {e}"))?;
         for directory in ["staging", "undo", "thumbnails", "previews", "recovery"] {
@@ -510,8 +538,12 @@ impl Archive {
         lock.try_lock_exclusive()
             .map_err(|e| format!("Archive is in use or locking is unsupported: {e}"))?;
         let marker = private.join("archive-id");
-        let id = if marker.exists() {
-            fs::read_to_string(&marker).map_err(|e| e.to_string())?
+        let id = if marker.exists() || expected_id.is_some() {
+            let id = fs::read_to_string(&marker).map_err(|e| e.to_string())?;
+            if expected_id.is_some_and(|expected| id != expected) {
+                return Err("Previous archive does not match the saved archive. Choose it again.".into());
+            }
+            id
         } else {
             let id = Uuid::new_v4().to_string();
             let mut file = OpenOptions::new()
@@ -523,8 +555,11 @@ impl Archive {
             file.sync_all().map_err(|e| e.to_string())?;
             id
         };
-        let connection =
-            Connection::open(private.join("catalog.sqlite")).map_err(|e| e.to_string())?;
+        let connection = if expected_id.is_some() {
+            Connection::open_with_flags(private.join("catalog.sqlite"), rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        } else {
+            Connection::open(private.join("catalog.sqlite"))
+        }.map_err(|e| e.to_string())?;
         register_functions(&connection)?;
         connection.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
@@ -617,6 +652,16 @@ impl Archive {
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
+        if version < 4 {
+            let backup = archive.root.join(".singulo/recovery").join(format!(
+                "before-computer-migration-{}.sqlite",
+                Uuid::new_v4()
+            ));
+            archive
+                .connection
+                .backup(rusqlite::MAIN_DB, &backup, None)
+                .map_err(|e| format!("Could not back up the catalog before migration: {e}"))?;
+        }
         if version < 3 {
             archive.transaction(|archive| {
                 let rows: Vec<(String, String, Option<String>)> = {
@@ -660,6 +705,31 @@ impl Archive {
                     .connection
                     .execute_batch("PRAGMA user_version=3;")
                     .map_err(|e| e.to_string())?;
+                Ok(())
+            })?;
+        }
+        if version < 4 {
+            archive.transaction(|archive| {
+                archive.connection.execute_batch(
+                    "CREATE TABLE occurrences_v4 (
+                         id TEXT PRIMARY KEY, source TEXT NOT NULL, hash TEXT NOT NULL,
+                         data TEXT NOT NULL, computer_id TEXT NOT NULL,
+                         UNIQUE(computer_id,source,hash));
+                     INSERT INTO occurrences_v4 SELECT id,source,hash,data,'' FROM occurrences;
+                     DROP TABLE occurrences;
+                     ALTER TABLE occurrences_v4 RENAME TO occurrences;
+                     CREATE INDEX occurrence_item ON occurrences(json_extract(data,'$.item'));
+                     CREATE INDEX occurrence_status ON occurrences(json_extract(data,'$.status'));
+                     CREATE TABLE source_groups_v4 (
+                         source TEXT NOT NULL, item TEXT NOT NULL, group_key TEXT NOT NULL,
+                         content_id TEXT, computer_id TEXT NOT NULL, PRIMARY KEY(computer_id,source));
+                     INSERT INTO source_groups_v4 SELECT source,item,group_key,content_id,'' FROM source_groups;
+                     DROP TABLE source_groups;
+                     ALTER TABLE source_groups_v4 RENAME TO source_groups;
+                     CREATE INDEX source_group_key ON source_groups(computer_id,group_key);
+                     CREATE INDEX source_content_id ON source_groups(computer_id,content_id);
+                     PRAGMA user_version=4;"
+                ).map_err(|e| e.to_string())?;
                 Ok(())
             })?;
         }
@@ -890,11 +960,11 @@ impl Archive {
             .collect()
     }
 
-    pub fn occurrence_id(&self, source: &Path, hash: &str) -> Result<Option<String>> {
+    pub fn occurrence_id(&self, source: &Path, hash: &str, computer_id: &str) -> Result<Option<String>> {
         self.connection
             .query_row(
-                "SELECT id FROM occurrences WHERE source=?1 AND hash=?2",
-                params![source.to_string_lossy(), hash],
+                "SELECT id FROM occurrences WHERE source=?1 AND hash=?2 AND computer_id=?3",
+                params![source.to_string_lossy(), hash, computer_id],
                 |r| r.get(0),
             )
             .optional()
@@ -931,18 +1001,19 @@ impl Archive {
         let item = self.item(&occurrence.item)?;
         let content_id =
             media::value(&item.media.metadata, "ContentIdentifier").and_then(|v| v.as_str());
-        self.connection.execute("INSERT INTO source_groups VALUES(?1,?2,?3,?4)
-            ON CONFLICT(source) DO UPDATE SET item=excluded.item,group_key=excluded.group_key,content_id=excluded.content_id",
-            params![occurrence.source,occurrence.item,Self::group_key(Path::new(&occurrence.source)),content_id])
+        let computer_id = occurrence.computer.as_ref().map_or("", |computer| computer.id.as_str());
+        self.connection.execute("INSERT INTO source_groups(source,item,group_key,content_id,computer_id) VALUES(?1,?2,?3,?4,?5)
+            ON CONFLICT(computer_id,source) DO UPDATE SET item=excluded.item,group_key=excluded.group_key,content_id=excluded.content_id",
+            params![occurrence.source,occurrence.item,Self::group_key(Path::new(&occurrence.source)),content_id,computer_id])
             .map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    pub fn sidecar_owner(&self, source: &Path) -> Result<Option<Item>> {
+    pub fn sidecar_owner(&self, source: &Path, computer_id: &str) -> Result<Option<Item>> {
         let id: Option<String> = self.connection.query_row(
-            "SELECT s.item FROM source_groups s JOIN items i ON i.id=s.item WHERE s.group_key=?1
+            "SELECT s.item FROM source_groups s JOIN items i ON i.id=s.item WHERE s.group_key=?1 AND s.computer_id=?2
              AND json_extract(i.data,'$.media.kind')!='sidecar' LIMIT 1",
-            [Self::group_key(source)], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+            params![Self::group_key(source), computer_id], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
         id.map(|id| self.item(&id)).transpose()
     }
 
@@ -1078,13 +1149,14 @@ impl Archive {
     fn record_occurrence_inner(&mut self, occurrence: &Occurrence) -> Result<()> {
         self.connection
             .execute(
-                "INSERT INTO occurrences(id,source,hash,data) VALUES(?1,?2,?3,?4)
-             ON CONFLICT(source,hash) DO UPDATE SET data=excluded.data",
+                "INSERT INTO occurrences(id,source,hash,data,computer_id) VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(computer_id,source,hash) DO UPDATE SET data=excluded.data",
                 params![
                     occurrence.id,
                     occurrence.source,
                     occurrence.hash,
-                    json(occurrence)?
+                    json(occurrence)?,
+                    occurrence.computer.as_ref().map_or("", |computer| computer.id.as_str())
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -1159,20 +1231,22 @@ impl Archive {
         let item = self.item(&occurrence.item)?;
         let content_id =
             media::value(&item.media.metadata, "ContentIdentifier").and_then(|v| v.as_str());
+        let computer_id = occurrence.computer.as_ref().map_or("", |computer| computer.id.as_str());
         self.connection
             .execute(
                 "INSERT OR IGNORE INTO companions
-             SELECT item,?1 FROM source_groups WHERE group_key=?2 AND item!=?1",
+             SELECT item,?1 FROM source_groups WHERE group_key=?2 AND computer_id=?3 AND item!=?1",
                 params![
                     occurrence.item,
-                    Self::group_key(Path::new(&occurrence.source))
+                    Self::group_key(Path::new(&occurrence.source)),
+                    computer_id
                 ],
             )
             .map_err(|e| e.to_string())?;
         if let Some(content_id) = content_id {
             self.connection.execute(
-                "INSERT OR IGNORE INTO companions SELECT item,?1 FROM source_groups WHERE content_id=?2 AND item!=?1",
-                params![occurrence.item,content_id]).map_err(|e| e.to_string())?;
+                "INSERT OR IGNORE INTO companions SELECT item,?1 FROM source_groups WHERE content_id=?2 AND computer_id=?3 AND item!=?1",
+                params![occurrence.item,content_id,computer_id]).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -1487,28 +1561,11 @@ impl Archive {
             rows.map(|r| parse(&r.map_err(|e| e.to_string())?))
                 .collect::<Result<Vec<_>>>()?
         };
-        for mut occurrence in staged_occurrences {
+        for occurrence in staged_occurrences {
             if let Some(stage) = occurrence.status.strip_prefix("staged:") {
-                let stage = PathBuf::from(stage);
-                if stage.exists() {
-                    match self.restore_source(
-                        &stage,
-                        Path::new(&occurrence.source),
-                        &occurrence.hash,
-                    ) {
-                        Ok(()) => {
-                            occurrence.status = "pending".into();
-                            occurrence.identity = media::identity(Path::new(&occurrence.source))?;
-                            self.record_occurrence(&occurrence)?;
-                        }
-                        Err(error) => errors.push(format!(
-                            "Source cleanup needs recovery at {}: {error}",
-                            stage.display()
-                        )),
-                    }
-                } else {
-                    errors.push(format!("Interrupted source cleanup at {}; check OS trash. Its result is not confirmed.", occurrence.source));
-                }
+                errors.push(format!(
+                    "Source cleanup recovery requires the original computer. Check the source and retained staging location manually: {stage}"
+                ));
             }
         }
         let pending_purges: Vec<Item> = {
@@ -2558,6 +2615,16 @@ impl Archive {
             }
         }
         Ok(preview)
+    }
+
+    pub fn clear_import_preview_retaining_all(&self, id: &str) -> Result<ClearImportPreview> {
+        let job = self.clearable_job(id)?;
+        Ok(ClearImportPreview {
+            tracks_copies: job["tracksCopies"] == true,
+            removable: 0,
+            retained: self.created_import_items(id)?.len(),
+            reasons: Vec::new(),
+        })
     }
 
     pub fn clear_import(&mut self, job: &str, trash_copies: bool) -> Result<()> {

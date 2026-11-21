@@ -25,6 +25,7 @@
   const textScales = [0.9, 1, 1.1, 1.2, 1.35, 1.5];
   let textScale = $state(storedTextScale());
   let highContrast = $state(window.localStorage.getItem("singulo.highContrast") === "true");
+  let portableMode = $state(false);
   let native = $state(false);
   let appVersion = $state("");
   let mode = $state("main");
@@ -215,7 +216,27 @@
 
   function changeLanguage(event: Event) {
     locale.language = (event.currentTarget as HTMLSelectElement).value === "nl" ? "nl" : "en";
-    window.localStorage.setItem("singulo.language", locale.language);
+    savePreference("singulo.language", locale.language);
+  }
+
+  function savePreference(key: string, value: string) {
+    window.localStorage.setItem(key, value);
+    if (native && portableMode) {
+      void api("set_portable_preference", { key, value }).catch((reason: unknown) => { error = message(reason); });
+    }
+  }
+
+  async function enablePortable() {
+    await run(async () => {
+      const preferences: Record<string, string> = {};
+      for (const key of ["singulo.language", "singulo.textScale", "singulo.highContrast", "singulo.thumbSize", "singulo.showInfo"]) {
+        const value = window.localStorage.getItem(key);
+        if (value !== null) preferences[key] = value;
+      }
+      await api("enable_portable", { preferences, archive: snapshot.root });
+      portableMode = true;
+      notice = t("Portable mode enabled in this app folder.");
+    });
   }
 
   function syncPreferences(event: StorageEvent) {
@@ -238,7 +259,7 @@
 
   function setTextScale(value: number) {
     textScale = value;
-    window.localStorage.setItem("singulo.textScale", String(value));
+    savePreference("singulo.textScale", String(value));
   }
 
   function stepTextScale(direction: -1 | 1) {
@@ -248,7 +269,7 @@
 
   function toggleContrast() {
     highContrast = !highContrast;
-    window.localStorage.setItem("singulo.highContrast", String(highContrast));
+    savePreference("singulo.highContrast", String(highContrast));
   }
 
   $effect.pre(() => {
@@ -477,7 +498,7 @@
   }
 
   function updateThumbSize() {
-    window.localStorage.setItem("singulo.thumbSize", String(thumbSize));
+    savePreference("singulo.thumbSize", String(thumbSize));
   }
 
   // Opened outside run() so the busy status only appears once folders have been chosen.
@@ -611,7 +632,7 @@
 
   function toggleInfo() {
     showInfo = !showInfo;
-    window.localStorage.setItem("singulo.showInfo", String(showInfo));
+    savePreference("singulo.showInfo", String(showInfo));
   }
 
   function reviewKey(event: KeyboardEvent) {
@@ -990,6 +1011,19 @@
     let disposed = false;
     const register = (unsubscribe: UnlistenFn) => { if (disposed) unsubscribe(); else removers.push(unsubscribe); };
     void run(async () => {
+      const portable = await api<Record<string, string> | null>("portable_preferences");
+      if (portable) {
+        portableMode = true;
+        for (const key of ["singulo.language", "singulo.textScale", "singulo.highContrast", "singulo.thumbSize", "singulo.showInfo"]) {
+          if (key in portable) window.localStorage.setItem(key, portable[key]);
+          else window.localStorage.removeItem(key);
+        }
+        locale.language = window.localStorage.getItem("singulo.language") === "nl" ? "nl" : "en";
+        textScale = storedTextScale();
+        highContrast = window.localStorage.getItem("singulo.highContrast") === "true";
+        thumbSize = Number(window.localStorage.getItem("singulo.thumbSize")) || 200;
+        showInfo = window.localStorage.getItem("singulo.showInfo") !== "false";
+      }
       const current = getCurrentWindow();
       if (mode !== "viewer") {
         register(await current.onDragDropEvent((event) => {
@@ -1019,13 +1053,13 @@
       register(await listen("closing", () => { notice = t("Stopping the import safely before closing. Retry the folders later to continue; copied files are kept."); }));
       await readSnapshot();
       if (!snapshot.root && mode === "main") {
-        const path = await api<string | null>("last_archive");
-        if (path) {
-          try {
-            await mutate(async () => { snapshot = await api<Snapshot>("open_archive", { path }); });
-          } catch (reason: unknown) {
-            notice = `${t("Previous archive unavailable")} (${message(reason)}). ${t("Connect the disk or choose a folder.")}`;
+        try {
+          const path = await api<string | null>("last_archive");
+          if (path) {
+            await mutate(async () => { snapshot = await api<Snapshot>("open_archive", { path, remembered: true }); });
           }
+        } catch (reason: unknown) {
+          notice = `${t("Previous archive unavailable")} (${message(reason)}). ${t("Connect the disk or choose a folder.")}`;
         }
       }
       config = { ...snapshot.settings };
@@ -1334,7 +1368,7 @@
           </section>
         {/if}
         <div class="stats"><div class="stat"><small>{t("PICTURES AND VIDEOS")}</small><strong>{snapshot.activeCount.toLocaleString()}</strong></div><div class="stat"><small>{t("ARCHIVE SIZE")}</small><strong>{bytes(snapshot.activeBytes)}</strong></div><div class="stat" title={t("Replaced lower-quality copies, kept so a duplicate merge can be undone.")}><small>{t("SPARE COPIES")}</small><strong>{snapshot.undoCount.toLocaleString()}</strong><span>{bytes(snapshot.undoBytes)}</span></div></div>
-        <section class="next-steps"><div><h3>{t("Clean up source folders")}</h3><p>{t("Moves source files with an identical archived copy to the system Trash.")}</p></div><button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={startCleanup}>{t("Review source cleanup")}</button></section>
+        <section class="next-steps"><div><h3>{t("Clean up source folders")}</h3><p>{t("Source cleanup is temporarily unavailable while support for multiple computers is being prepared.")}</p></div><button class="secondary" disabled title={t("Source cleanup is temporarily unavailable while support for multiple computers is being prepared.")}>{t("Review source cleanup")}</button></section>
         {#if jobs.some((job) => job.progress.status === "complete")}<section class="history"><h3>{t("Recent completed imports")}</h3>{#each jobs.filter((job) => job.progress.status === "complete").slice(0, 5) as job (job.id)}<div class="history-row"><div><strong>{job.roots.map((path) => path.split(/[\\/]/).pop()).join(", ")}</strong><small>{t("complete")} / {job.progress.copied ?? 0} {t("copied")} / {job.progress.duplicates ?? 0} {t("exact duplicates")}</small>{#if job.progress.warnings?.length}<details class="import-issues"><summary>{job.progress.warnings.length} {t("XMP sidecar warning(s)")}</summary>{#each job.progress.warnings as issue}<p>{issue}</p>{/each}</details>{/if}</div></div>{/each}</section>{/if}
       {:else if tab === "library"}
         <div class="library-page">{@render libraryView(false)}</div>
@@ -1356,6 +1390,11 @@
       {:else}
         <div class="page-heading"><div><p class="eyebrow">{t("SIMPLE SETTINGS, YOUR WAY")}</p><h1>{t("A place for everything.")}</h1><p class="subtitle">{t("Archive settings travel with your disk. Changes apply to future imports.")}</p></div></div>
         <section class="settings-card"><h3>{t("Language")}</h3><label class="language-setting">{t("Choose the interface language")}<select aria-label={t("Language")} value={locale.language} onchange={changeLanguage}><option value="en">English</option><option value="nl">Nederlands</option></select></label></section>
+        <section class="settings-card">
+          <h3>{t("Portable mode")}</h3>
+          <p class="muted">{t("Keep app preferences and the archive location beside this app, so they travel with it on an external disk. Install or copy the app to the disk before enabling this.")}</p>
+          <button class="secondary" disabled={!native || busy || portableMode} onclick={enablePortable}>{t(portableMode ? "Portable mode enabled" : "Enable portable mode")}</button>
+        </section>
         <section class="settings-card"><h3>{t("Folder organization")}</h3><label>{t("Choose a layout")}<select bind:value={config.template}>{#each presets as [value, label]}<option {value}>{t(label)}</option>{/each}{#if !presets.some(([value]) => value === config.template)}<option value={config.template}>{t("Custom layout")}</option>{/if}</select></label><details class="advanced"><summary>{t("Advanced folder template")}</summary><label>{t("Template")}<input bind:value={config.template} placeholder={"Family/{yyyy}/{mm}"} /></label><p>{t("Supported:")} <code>{"{yyyy}"}</code> <code>{"{mm}"}</code> <code>{"{dd}"}</code> <code>{"{media_type}"}</code>. {t("Safe literal folder names are welcome.")}</p></details>
           <div class="setting-columns"><label>{t("Filenames")}<select bind:value={config.filenames}><option value="original">{t("Keep original filenames")}</option><option value="date">{t("Use photo date / time")}</option></select></label><label>{t("Unknown-date folder")}<input bind:value={config.unknownFolder} /></label></div>
           <div class="path-preview"><small>{t("YOUR FILES WOULD LOOK LIKE THIS")}</small>{#each examples as example}<code>{example}</code>{/each}{#if !native}<code>2023/07/18/IMG_1234.jpg</code><code>unknown/undated.jpg</code>{/if}{#if configError}<p class="field-error">{configError}</p>{/if}<p>{t("Name collisions receive a unique suffix. Estimated dates stay marked; missing times aren't invented.")}</p></div>
@@ -1438,7 +1477,7 @@
           <button class="secondary full" disabled={!native} onclick={() => reveal(item)}>{t(revealLabel)}</button>
           {#if selected.companions.length}<p class="banner warning">{t("This picture belongs with related files (RAW/JPEG, sidecar or Live Photo), so it can't be removed on its own as a duplicate.")}</p>{/if}
           {#if item.media.warnings.length}<details><summary>{t("Metadata & quality notes")}</summary>{#each item.media.warnings as warning}<p class="muted">{warning}</p>{/each}</details>{/if}
-          <details><summary>{t("Original folders & import history")}</summary>{#each selected.sources as source}<p class="source-history"><strong>{source.album}</strong><code>{source.relative}</code><small>{source.status.startsWith("staged:") ? t("Cleanup recovery needed") : source.status === "trashed" ? t("Source moved to OS trash") : t("Source retained")}</small></p>{/each}</details>
+          <details><summary>{t("Original folders & import history")}</summary>{#each selected.sources as source}<p class="source-history"><strong>{source.album}</strong><code>{source.relative}</code><small>{source.computer?.name ?? t("Unknown computer")} · {source.status.startsWith("staged:") ? t("Cleanup recovery needed") : source.status === "trashed" ? t("Source moved to OS trash") : t("Source retained")}</small></p>{/each}</details>
           {#if mode !== "viewer"}
             <div class="lightbox-actions">
               {#if item.state === "undo"}
@@ -1594,7 +1633,7 @@
       {#if clearLoading}<p class="checking-files" role="status"><span class="activity-indicator" aria-hidden="true"></span>{t("Checking imported copies...")}</p>
       {:else if clearPreview}
         <label class="check-setting"><input type="radio" name="clear-import-mode" bind:group={trashImportCopies} value={false} disabled={working} /><span><strong>{t("Keep already copied files in the archive")}</strong><small>{t("Only dismiss this import from history. Nothing is removed from the archive or source folders.")}</small></span></label>
-        <label class="check-setting"><input type="radio" name="clear-import-mode" bind:group={trashImportCopies} value={true} disabled={working || !clearPreview.tracksCopies || !clearPreview.removable} /><span><strong>{t("Move newly copied archive files to system Trash")}</strong><small>{clearPreview.removable} {t("archive copy/copies can be removed. Sources are re-verified and left untouched.")}</small></span></label>
+        <label class="check-setting"><input type="radio" name="clear-import-mode" bind:group={trashImportCopies} value={true} disabled /><span><strong>{t("Move newly copied archive files to system Trash")}</strong><small>{t("This option is temporarily unavailable while support for multiple computers is being prepared.")}</small></span></label>
         {#if !clearPreview.tracksCopies}<p class="banner warning">{t("This older import does not record which archive copies it created. For safety, its archive files must stay in place.")}</p>{/if}
         {#if clearPreview.retained}<p>{clearPreview.retained} {t("protected archive copy/copies will stay in place.")}</p>{/if}
         {#each clearPreview.reasons as reason}<p class="muted">{t(reason)}</p>{/each}

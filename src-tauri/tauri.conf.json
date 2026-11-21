@@ -49,6 +49,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "windows": {
+      "nsis": {
+        "installerHooks": "portable-installer.nsh"
+      }
+    },
     "resources": {
       "resources/tools/": "tools/"
     },

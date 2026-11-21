@@ -1,9 +1,11 @@
 mod archive;
 mod cancel;
+mod computer;
 mod import;
 mod media;
 mod model;
 mod paths;
+mod portable;
 mod recycle;
 mod sleep;
 #[cfg(test)]
@@ -13,6 +15,8 @@ use archive::Archive;
 use model::*;
 use std::{fs, io::Cursor, path::Path, process::Command, sync::atomic::Ordering};
 use tauri::{Emitter, Manager};
+
+const SOURCE_CLEANUP_ENABLED: bool = false;
 
 struct Busy<'a>(&'a AppState);
 impl Drop for Busy<'_> {
@@ -160,7 +164,7 @@ async fn snapshot(app: tauri::AppHandle) -> Result<Snapshot> {
 }
 
 #[tauri::command]
-async fn open_archive(app: tauri::AppHandle, path: String) -> Result<Snapshot> {
+async fn open_archive(app: tauri::AppHandle, path: String, remembered: Option<bool>) -> Result<Snapshot> {
     read(app, move |app| {
         let state = app.state::<AppState>();
         let _busy = guard(&state)?;
@@ -177,7 +181,20 @@ async fn open_archive(app: tauri::AppHandle, path: String) -> Result<Snapshot> {
             let mut reader_root = state.archive_root.write().map_err(|e| e.to_string())?;
             *slot = None;
             *reader_root = None;
-            let mut archive = Archive::open(Path::new(&path))?;
+            let expected = if remembered == Some(true) {
+                match portable::last_archive()? {
+                    Some(Some((saved_path, id))) if saved_path == path => Some(id),
+                    Some(_) => return Err("The remembered archive changed. Choose it again.".into()),
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let mut archive = if let Some(id) = expected {
+                Archive::open_existing(Path::new(&path), &id)?
+            } else {
+                Archive::open(Path::new(&path))?
+            };
             let errors = archive.recover()?;
             let root = archive.root.clone();
             *state.progress.lock().map_err(|e| e.to_string())? = Progress {
@@ -191,9 +208,11 @@ async fn open_archive(app: tauri::AppHandle, path: String) -> Result<Snapshot> {
         let scope = app.asset_protocol_scope();
         let _ = scope.allow_directory(root.join(".singulo/thumbnails"), false);
         let _ = scope.allow_directory(root.join(".singulo/previews"), false);
-        let config = app.path().app_config_dir().map_err(|e| e.to_string())?;
-        fs::create_dir_all(&config).map_err(|e| e.to_string())?;
-        fs::write(config.join("last-archive.txt"), &path).map_err(|e| e.to_string())?;
+        if !portable::set_archive(&path)? {
+            let config = app.path().app_config_dir().map_err(|e| e.to_string())?;
+            fs::create_dir_all(&config).map_err(|e| e.to_string())?;
+            fs::write(config.join("last-archive.txt"), &path).map_err(|e| e.to_string())?;
+        }
         app.emit("library-changed", ()).map_err(|e| e.to_string())?;
         current_snapshot(app)
     })
@@ -203,6 +222,9 @@ async fn open_archive(app: tauri::AppHandle, path: String) -> Result<Snapshot> {
 #[tauri::command]
 async fn last_archive(app: tauri::AppHandle) -> Result<Option<String>> {
     read(app, |app| {
+        if let Some(archive) = portable::last_archive()? {
+            return Ok(archive.map(|(path, _)| path));
+        }
         let path = app
             .path()
             .app_config_dir()
@@ -215,6 +237,21 @@ async fn last_archive(app: tauri::AppHandle) -> Result<Option<String>> {
         }
     })
     .await
+}
+
+#[tauri::command]
+async fn portable_preferences(app: tauri::AppHandle) -> Result<Option<std::collections::HashMap<String, String>>> {
+    read(app, |_| portable::preferences()).await
+}
+
+#[tauri::command]
+async fn enable_portable(app: tauri::AppHandle, preferences: std::collections::HashMap<String, String>, archive: Option<String>) -> Result<()> {
+    read(app, move |_| portable::enable(preferences, archive)).await
+}
+
+#[tauri::command]
+async fn set_portable_preference(app: tauri::AppHandle, key: String, value: String) -> Result<()> {
+    read(app, move |_| portable::set_preference(&key, &value)).await
 }
 
 #[tauri::command]
@@ -459,6 +496,7 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>) -> Result<bool>
     if roots.is_empty() {
         return Err("Choose at least one source folder.".into());
     }
+    computer::current()?;
     let state = app.state::<AppState>();
     if state.importing.load(Ordering::SeqCst) && state.cancel.requested() {
         return Err("Current import is cancelling; wait a moment before starting another.".into());
@@ -697,7 +735,13 @@ async fn job_history(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>> {
 
 #[tauri::command]
 async fn clear_import_preview(app: tauri::AppHandle, id: String) -> Result<ClearImportPreview> {
-    inspect_exclusive(app, move |archive| archive.clear_import_preview(&id)).await
+    inspect_exclusive(app, move |archive| {
+        if SOURCE_CLEANUP_ENABLED {
+            archive.clear_import_preview(&id)
+        } else {
+            archive.clear_import_preview_retaining_all(&id)
+        }
+    }).await
 }
 
 #[tauri::command]
@@ -709,6 +753,9 @@ async fn clear_import(
 ) -> Result<()> {
     if !confirmed {
         return Err("Clearing an import requires explicit confirmation.".into());
+    }
+    if trash_copies {
+        return Err("Removing archive copies during import cleanup is temporarily unavailable.".into());
     }
     let job = id.clone();
     change(app.clone(), move |archive| {
@@ -849,6 +896,9 @@ async fn purge_item(
 
 #[tauri::command]
 async fn cleanup_preview(app: tauri::AppHandle) -> Result<Vec<CleanupRow>> {
+    if !SOURCE_CLEANUP_ENABLED {
+        return Err("Source cleanup is temporarily unavailable while computer-aware cleanup is being prepared.".into());
+    }
     read(app, |app| {
         let state = app.state::<AppState>();
         let _busy = guard(&state)?;
@@ -867,6 +917,9 @@ async fn clean_sources(
     confirmed: bool,
     empty_folders: bool,
 ) -> Result<Vec<String>> {
+    if !SOURCE_CLEANUP_ENABLED {
+        return Err("Source cleanup is temporarily unavailable while computer-aware cleanup is being prepared.".into());
+    }
     if !confirmed {
         return Err("Source cleanup requires explicit confirmation.".into());
     }
@@ -993,6 +1046,9 @@ pub fn run() {
             snapshot,
             open_archive,
             last_archive,
+            portable_preferences,
+            enable_portable,
+            set_portable_preference,
             save_settings,
             export_xmp,
             remove_exported_xmp,

@@ -4,7 +4,7 @@ A small, offline desktop app for organizing pictures and videos. Built with Taur
 
 Made by **nosmallthing**.
 
-The interface is available in English and Dutch. Choose a language on the Settings page; your choice is saved on this computer.
+The interface is available in English and Dutch. Choose a language on the Settings page; your choice is saved on this computer, or with the app in portable mode.
 
 Note that this is an AI coded application, created for my personal use. I hope someone will like it :-) 
 
@@ -39,20 +39,19 @@ Capture metadata comes first, followed by a date in the filename (such as `IMG-2
 
 Settings belong to each archive and affect new import jobs. **Preview reorganization** applies saved settings to existing managed files. A reversible recovery manifest is saved; **Preview undo of last reorganization** restores the previous layout when there are no conflicts.
 
+### Portable use on multiple computers
+
+Install the Windows build onto the external disk and select portable mode in the installer, or enable **Portable mode** in Settings. On macOS, place the app on the disk and enable it in Settings. For both platforms to share settings, put the macOS `.app` bundle and the Windows executable's installation folder contents in the same parent folder, alongside `Singulo portable data`. Keep this folder when updating or uninstalling the app; it contains the portable settings. System and WebView caches may still be stored on each computer.
+
+The archive can be on the same disk or a different one. When the app and archive are on the same filesystem, the archive location is stored relative to the app so drive-letter and mount-point changes work. A location on another disk is saved for the current OS; choose the archive again on another OS. The app verifies the remembered archive's identity before reopening it, and asks you to choose again if it is missing or different.
+
+New source-history entries include the computer name and a locally derived machine identifier, allowing identical paths on different computers to remain separate. Existing entries have an unknown computer. Renaming a computer may create a new identity; cloned computers with identical machine IDs and names may be indistinguishable. Only one computer should access an archive at a time.
+
+Opening an older catalog upgrades it automatically, after creating a backup named `before-computer-migration-*.sqlite` in `.singulo/recovery`. Keep a separate backup of the entire archive as well. Windows portable operation and the installer option still need testing on Windows.
+
 ### Source cleanup
 
-**Review source cleanup** is a separate, explicitly confirmed operation:
-
-- The preview opens immediately while source/archive verification runs. Choose whole source folders by default, or expand a folder to select individual files and see why files are being kept. File details load in small pages.
-- Re-reads source and archive hashes. Only unchanged sources with a byte-identical archived original qualify.
-- A similar-looking keeper alone is not enough; the exact original must still exist in the archive or archive undo.
-- Moves sources to native Trash/Recycle Bin. Unsupported/failed recycling never falls back to permanent deletion.
-- Optionally removes genuinely empty imported subfolders, never dropped roots or nonempty folders.
-- A temporary folder beside the source isolates the verified file during cleanup. If recovery fails, the app reports its location; do not delete it blindly.
-
-**Trash usually does not free disk space until you empty it yourself.** The app does not empty system trash. Restore source files through the OS, not archive undo.
-
-After cleanup the archive may be your only copy. Keep another backup, especially before purging archive undo. A hash verifies a copy; it does not make a single external disk a safe backup strategy.
+Source cleanup is temporarily unavailable while multi-computer safety is being completed. Clearing an import only removes its history entry and keeps all archived and source files. If an earlier cleanup was interrupted, the app reports the retained staging location; check the files on the original computer and recover them manually. Do not delete the staged files blindly.
 
 ### Interruptions and recovery
 
@@ -64,9 +63,7 @@ While an import is active, a status panel explains why comparisons, source clean
 
 **Imports needing attention** keeps canceled, failed, interrupted and partially successful imports visible, including imports older than the recent-history list. **Retry folders** starts the import again or queues it behind another import. New imports record per-folder scan completion, discovered/processed files, copied files, exact duplicates and failures. Expand the issues to see the affected paths and reasons. A retry of the same folders replaces the earlier entry, so repeated interrupted attempts appear once; a successful retry resolves the warning, and verified exact copies are skipped. Clearing the latest attempt shows the earlier one again, because it may still have its own copies. Older imports without folder totals are explicitly marked as needing a retry to establish completeness.
 
-**Clear import** dismisses an incomplete import from history. Keep its already copied archive files (the default), or explicitly choose to move eligible newly created archive copies to native system Trash. Source folders are never changed. Existing/shared copies, related RAW/JPEG/sidecar/Live Photo files, keepers of replaced pictures, and copies without an unchanged available source remain protected. Sources and archive bytes are re-verified before trashing; Trash failure stops clearing and keeps the import visible, with retained staged copies in archive spare copies. Interrupted clearing never resumes trashing automatically. Recover successfully trashed archive copies through system Trash, not archive Undo.
-
-Copy ownership tracking starts with this version. For an older import, the app cannot safely prove which archive files it originally created, so only the keep-files clearing option is available. Clearing history does not erase the safety tracking used to protect copies shared with another import.
+**Clear import** dismisses an incomplete import from history while retaining all archive copies and source files. Removing archive copies during clearing is temporarily unavailable.
 
 The archive contains ordinary media files and `.singulo/` with the SQLite catalog, staging/undo/cache folders, job history, catalog backup and provenance export. Move the whole archive between computers, including this folder. Never edit the catalog while the app is running.
 

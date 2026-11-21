@@ -147,6 +147,13 @@ pub struct Snapshot {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Computer {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Occurrence {
     pub id: String,
     pub item: String,
@@ -158,6 +165,8 @@ pub struct Occurrence {
     pub identity: String,
     pub status: String,
     pub bytes: u64,
+    #[serde(default)]
+    pub computer: Option<Computer>,
 }
 
 #[derive(Clone, Serialize)]

@@ -748,9 +748,10 @@ fn occurrence(
     bytes: u64,
     item: String,
 ) -> Result<Occurrence> {
+    let computer = crate::computer::current()?;
     Ok(Occurrence {
         id: archive
-            .occurrence_id(source, hash)?
+            .occurrence_id(source, hash, &computer.id)?
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
         item,
         source: source.to_string_lossy().into(),
@@ -769,6 +770,7 @@ fn occurrence(
         identity: identity.into(),
         status: "pending".into(),
         bytes,
+        computer: Some(computer),
     })
 }
 
@@ -808,8 +810,9 @@ fn import_one(
         .to_string_lossy()
         .to_string();
     media::apply_path_date(&mut media, &original_name, folder_date.as_deref());
+    let computer = crate::computer::current()?;
     let occurrence_id = archive
-        .occurrence_id(source, &media.hash)?
+        .occurrence_id(source, &media.hash, &computer.id)?
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let occurrence = |item: String| Occurrence {
         id: occurrence_id.clone(),
@@ -826,6 +829,7 @@ fn import_one(
         identity: identity.into(),
         status: "pending".into(),
         bytes: media.bytes,
+        computer: Some(computer.clone()),
     };
     if let Some(exact) = archive.exact_cached(&media.hash)? {
         if cancel.source_io(|| media::identity(source))? != identity {
@@ -837,7 +841,7 @@ fn import_one(
     }
     let id = Uuid::new_v4().to_string();
     let owner = if media.kind == "sidecar" {
-        archive.sidecar_owner(source)?
+        archive.sidecar_owner(source, &computer.id)?
     } else {
         None
     };

@@ -557,6 +557,7 @@ fn xmp_lifecycle_tracks_new_imports_dates_reorganization_undo_and_albums() {
     let source = directory.path().join("photo.jpg").canonicalize().unwrap();
     archive
         .record_occurrence(&Occurrence {
+            computer: None,
             id: "extra".into(),
             item: "photo".into(),
             source: source.to_string_lossy().into(),
@@ -898,6 +899,7 @@ fn folder_dates_are_fallbacks_and_date_parts_are_not_folder_labels() {
         let hash = add_item(&mut archive, id, original_date);
         archive
             .record_occurrence(&Occurrence {
+            computer: None,
                 id: format!("source-{id}"),
                 item: id.into(),
                 source: format!("/source/Photos/{relative}"),
@@ -962,6 +964,7 @@ fn repair_estimated_dates_moves_safely_and_preserves_protected_dates() {
                         albums: vec![],
                     },
                     Some(Occurrence {
+            computer: None,
                         id: format!("occ-{id}"),
                         item: id.into(),
                         source: file.to_string_lossy().into(),
@@ -1020,6 +1023,7 @@ fn repair_estimated_dates_moves_safely_and_preserves_protected_dates() {
     let conflict = archive.item("conflict").unwrap();
     archive
         .record_occurrence(&Occurrence {
+            computer: None,
             id: "other-conflict".into(),
             item: "conflict".into(),
             source: "another/conflict.jpg".into(),
@@ -1156,6 +1160,141 @@ fn repair_estimated_dates_moves_safely_and_preserves_protected_dates() {
 }
 
 #[test]
+fn catalog_upgrade_preserves_legacy_sources_and_separates_computers() {
+    let (directory, mut archive) = xmp_fixture();
+    xmp_original(directory.path(), &mut archive, "photo");
+    xmp_original(directory.path(), &mut archive, "other");
+    let hash = archive.item("photo").unwrap().media.hash;
+    let legacy = Occurrence {
+        id: "legacy".into(),
+        item: "photo".into(),
+        source: "/source/photo.jpg".into(),
+        root: "/source".into(),
+        album: "source".into(),
+        relative: "photo.jpg".into(),
+        hash: hash.clone(),
+        identity: "fixture".into(),
+        status: "pending".into(),
+        bytes: 5,
+        computer: None,
+    };
+    archive.record_occurrence(&legacy).unwrap();
+    drop(archive);
+    let catalog = directory.path().join("archive/.singulo/catalog.sqlite");
+    let connection = rusqlite::Connection::open(&catalog).unwrap();
+    connection.execute_batch(
+        "BEGIN;
+         CREATE TABLE occurrences_v3(id TEXT PRIMARY KEY, source TEXT NOT NULL, hash TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(source,hash));
+         INSERT INTO occurrences_v3 SELECT id,source,hash,data FROM occurrences;
+         DROP TABLE occurrences;
+         ALTER TABLE occurrences_v3 RENAME TO occurrences;
+         CREATE TABLE source_groups_v3(source TEXT PRIMARY KEY, item TEXT NOT NULL, group_key TEXT NOT NULL, content_id TEXT);
+         INSERT INTO source_groups_v3 SELECT source,item,group_key,content_id FROM source_groups;
+         DROP TABLE source_groups;
+         ALTER TABLE source_groups_v3 RENAME TO source_groups;
+         PRAGMA user_version=3;
+         COMMIT;"
+    ).unwrap();
+    drop(connection);
+    let mut archive = Archive::open(&directory.path().join("archive")).unwrap();
+    assert!(archive.occurrence("legacy").unwrap().computer.is_none());
+    assert!(fs::read_dir(archive.root.join(".singulo/recovery")).unwrap().any(|entry| {
+        let path = entry.unwrap().path();
+        if !path.file_name().unwrap().to_string_lossy().starts_with("before-computer-migration-") {
+            return false;
+        }
+        let backup = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let version: u32 = backup.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        let occurrences: u32 = backup.query_row("SELECT count(*) FROM occurrences", [], |row| row.get(0)).unwrap();
+        version == 3 && occurrences == 1
+    }));
+    for (id, name) in [("machine-a", "Laptop A"), ("machine-b", "Laptop B")] {
+        let mut occurrence = legacy.clone();
+        occurrence.id = id.into();
+        occurrence.computer = Some(Computer { id: id.into(), name: name.into() });
+        archive.record_occurrence(&occurrence).unwrap();
+        assert_eq!(archive.occurrence_id(Path::new("/source/photo.jpg"), &hash, id).unwrap().as_deref(), Some(id));
+    }
+    assert_eq!(archive.item_occurrences("photo").unwrap().len(), 3);
+
+    let mut other = legacy.clone();
+    other.id = "other-source".into();
+    other.item = "other".into();
+    other.hash = archive.item("other").unwrap().media.hash;
+    other.computer = Some(Computer { id: "machine-b".into(), name: "Laptop B".into() });
+    archive.record_occurrence(&other).unwrap();
+    assert_eq!(archive.sidecar_owner(Path::new("/source/photo.xmp"), "machine-a").unwrap().unwrap().id, "photo");
+    assert_eq!(archive.sidecar_owner(Path::new("/source/photo.xmp"), "machine-b").unwrap().unwrap().id, "other");
+}
+
+#[test]
+fn remembered_archive_requires_matching_identity_and_existing_catalog() {
+    let (directory, archive) = xmp_fixture();
+    let root = archive.root.clone();
+    let id = fs::read_to_string(root.join(".singulo/archive-id")).unwrap();
+    drop(archive);
+    assert!(Archive::open_existing(&root, "wrong-id").is_err());
+    assert!(Archive::open_existing(&root, &id).is_ok());
+    let catalog = root.join(".singulo/catalog.sqlite");
+    fs::rename(&catalog, root.join(".singulo/catalog.saved")).unwrap();
+    assert!(Archive::open_existing(&root, &id).is_err());
+    assert!(!catalog.exists());
+    let unrelated = directory.path().join("unrelated");
+    fs::create_dir(&unrelated).unwrap();
+    assert!(Archive::open_existing(&unrelated, &id).is_err());
+    assert!(!unrelated.join(".singulo").exists());
+}
+
+#[test]
+fn portable_archive_location_moves_with_app_and_checks_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let disk = directory.path().join("disk");
+    let app = disk.join("app");
+    let root = disk.join("photos");
+    fs::create_dir_all(&app).unwrap();
+    fs::create_dir(&root).unwrap();
+    drop(Archive::open(&root).unwrap());
+    let value = crate::portable::archive_value_at(&app, &root).unwrap();
+    let moved = directory.path().join("moved");
+    fs::rename(&disk, &moved).unwrap();
+    let (path, id) = crate::portable::resolve_archive_at(&moved.join("app"), &value).unwrap();
+    assert!(Archive::open_existing(Path::new(&path), &id).is_ok());
+    fs::write(moved.join("photos/.singulo/archive-id"), "different").unwrap();
+    assert!(Archive::open_existing(Path::new(&path), &id).is_err());
+    let incompatible = r#"{"relative":false,"path":"/other/photos","os":"other","archive_id":"id"}"#;
+    assert!(crate::portable::resolve_archive_at(&moved.join("app"), incompatible).is_err());
+}
+
+#[test]
+fn interrupted_cleanup_does_not_touch_foreign_source_or_staging_files() {
+    let (directory, mut archive) = xmp_fixture();
+    xmp_original(directory.path(), &mut archive, "photo");
+    let source = directory.path().join("source.jpg");
+    let staged = directory.path().join("staged.jpg");
+    fs::write(&source, b"source").unwrap();
+    fs::write(&staged, b"staged").unwrap();
+    let hash = archive.item("photo").unwrap().media.hash;
+    archive.record_occurrence(&Occurrence {
+        id: "interrupted".into(),
+        item: "photo".into(),
+        source: source.to_string_lossy().into(),
+        root: directory.path().to_string_lossy().into(),
+        album: "source".into(),
+        relative: "source.jpg".into(),
+        hash,
+        identity: "fixture".into(),
+        status: format!("staged:{}", staged.display()),
+        bytes: 5,
+        computer: Some(Computer { id: "another-computer".into(), name: "Other".into() }),
+    }).unwrap();
+    let warnings = archive.recover().unwrap();
+    assert!(warnings.iter().any(|warning| warning.contains(&staged.to_string_lossy().to_string())));
+    assert_eq!(fs::read(source).unwrap(), b"source");
+    assert_eq!(fs::read(staged).unwrap(), b"staged");
+    assert!(archive.occurrence("interrupted").unwrap().status.starts_with("staged:"));
+}
+
+#[test]
 fn layout_renders_dates_and_blocks_escaping_paths() {
     let mut settings = Settings::default();
     let media = sample(String::new());
@@ -1197,6 +1336,7 @@ fn exact_duplicates_keep_provenance_and_require_present_keeper() {
     archive.place(&source, item, None, None).unwrap();
     archive
         .record_occurrence(&Occurrence {
+            computer: None,
             id: "backup".into(),
             item: "original".into(),
             source: source.to_string_lossy().into(),
@@ -1292,6 +1432,7 @@ fn cleanup_requires_unchanged_source_and_exact_archived_bytes() {
     };
     archive.place(&source, item.clone(), None, None).unwrap();
     let occurrence = Occurrence {
+            computer: None,
         id: "source".into(),
         item: "original".into(),
         source: source.to_string_lossy().into(),
@@ -1350,6 +1491,7 @@ fn import_copy_fixture(
         media.kind = "sidecar".into();
     }
     let occurrence = Occurrence {
+            computer: None,
         id: name.into(),
         item: name.into(),
         source: source.to_string_lossy().into(),
@@ -1778,6 +1920,7 @@ fn reorganize_and_date_correction_handle_collisions_and_preserve_time() {
             &s1,
             first,
             Some(Occurrence {
+            computer: None,
                 id: "occ-1".into(),
                 item: "id-1".into(),
                 source: s1.canonicalize().unwrap().to_string_lossy().into(),
@@ -1798,6 +1941,7 @@ fn reorganize_and_date_correction_handle_collisions_and_preserve_time() {
             &xmp,
             sidecar,
             Some(Occurrence {
+            computer: None,
                 id: "occ-xmp".into(),
                 item: "id-xmp".into(),
                 source: xmp.canonicalize().unwrap().to_string_lossy().into(),

@@ -93,6 +93,7 @@ export interface Occurrence {
   root: string;
   album: string;
   status: string;
+  computer: { id: string; name: string } | null;
 }
 
 export interface Details {
