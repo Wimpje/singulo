@@ -3,7 +3,8 @@
   import { message, thumbnail, type PreviewItem } from "./api";
   import { t } from "./i18n.svelte";
 
-  let { item, large = false }: { item: PreviewItem; large?: boolean } = $props();
+  let { item, archive, large = false }: { item: PreviewItem; archive: string | null; large?: boolean } = $props();
+  let itemId = $derived(item.id);
   let element = $state<HTMLDivElement>();
   let source = $state("");
   let low = $state("");
@@ -11,7 +12,9 @@
   let loading = $state(false);
 
   $effect(() => {
-    const id = item.id;
+    const id = itemId;
+    // The same item ID can exist in another copy of an archive.
+    void archive;
     const size = large;
     const target = element;
     source = "";

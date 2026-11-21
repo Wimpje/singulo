@@ -1195,7 +1195,7 @@
         <div class="photo-grid" class:loading={libraryLoading} style={`--thumb:${thumbSize}px`}>
           {#each items as item (item.id)}
             <button class="photo-card" data-id={item.id} title={item.originalName} onclick={() => openItem(item.id)}>
-              <Preview {item} />
+              <Preview {item} archive={snapshot.root} />
               <span class="photo-caption"><strong>{item.originalName}</strong><small>{item.media.date?.slice(0, 10) ?? t("Date unknown")}{item.media.dateSource.startsWith("estimated") ? ` · ${t("estimated")}` : ""}</small></span>
               {#if item.state === "undo"}<span class="card-badge">{t("Spare copy")}</span>{/if}
             </button>
@@ -1493,7 +1493,7 @@
             {#each reviews as review, index (`${review.item}:${review.candidate}`)}
               <div class="disabled-hint" title={reviewDisabledReason}>
                 <button class="review-row" aria-label={`${t("Compare similar pictures")}: ${review.reason}`} disabled={busy || opening} onclick={() => openReview(index)}>
-                  <span class="review-thumbnails"><Preview item={review.itemPreview} /><Preview item={review.candidatePreview} /></span>
+                  <span class="review-thumbnails"><Preview item={review.itemPreview} archive={snapshot.root} /><Preview item={review.candidatePreview} archive={snapshot.root} /></span>
                   <span class="review-description"><strong>{t("Two similar pictures")}</strong><span>{review.reason}</span></span>
                   <span class="secondary">{t("Compare files")}</span>
                 </button>
@@ -1570,7 +1570,7 @@
           {@const video = videos[0]}
           <video src={video.source} controls autoplay onerror={() => videoFailed(0, video.id, video.source)}><track kind="captions" /></video>
         {:else}
-          <Preview {item} large />
+          <Preview {item} archive={snapshot.root} large />
           {#if item.media.kind === "video"}
             <div class="play-overlay">
               {#if videos[0]}<span role="status">{t(videos[0].phase === "converting" ? "Preparing a playable copy..." : "Opening video...")}</span>
@@ -1639,7 +1639,7 @@
                 {#if index === 0}<video bind:this={firstVideo} src={video.source} controls autoplay onerror={() => videoFailed(index, video.id, video.source)}><track kind="captions" /></video>
                 {:else}<video bind:this={secondVideo} src={video.source} controls autoplay onerror={() => videoFailed(index, video.id, video.source)}><track kind="captions" /></video>{/if}
               {:else}
-                <Preview item={detail.item} large />
+                <Preview item={detail.item} archive={snapshot.root} large />
               {/if}
               {#if pictureComparison?.recommendation === index}<span class="quality-label">{t("Probably better")}</span>{/if}
             </div>
