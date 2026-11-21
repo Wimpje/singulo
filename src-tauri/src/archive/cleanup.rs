@@ -1,8 +1,20 @@
 use super::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+fn windows_source(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        || source.starts_with("\\\\")
+        || source.starts_with(".\\")
+        || source.starts_with("..\\")
+}
+
 fn source_folder(source: &str) -> Option<&str> {
-    let end = source.rfind(['/', '\\'])?;
+    let end = if windows_source(source) {
+        source.rfind(['/', '\\'])?
+    } else {
+        source.rfind('/')?
+    };
     if end == 0 || (end == 2 && source.as_bytes().get(1) == Some(&b':')) {
         Some(&source[..=end])
     } else {
@@ -12,11 +24,11 @@ fn source_folder(source: &str) -> Option<&str> {
 
 fn cache_source(source: &str) -> bool {
     source_folder(source).is_some_and(|folder| {
-        folder.split(['/', '\\']).any(|name| {
-            ["thumbnails", "cache", "temp"]
-                .iter()
-                .any(|candidate| name.eq_ignore_ascii_case(candidate))
-        })
+        if windows_source(source) {
+            paths::likely_generated_folder(folder.split(['/', '\\']))
+        } else {
+            paths::likely_generated_folder(folder.split('/'))
+        }
     })
 }
 
@@ -274,8 +286,21 @@ mod tests {
         assert!(cache_source(r"C:\Photos\Cache\sample.jpg"));
         assert!(cache_source(r"\\server\share\TEMP\nested\file.jpg"));
         assert!(cache_source("/Photos/thumbnails/file.jpg"));
+        assert!(cache_source("/Photos/.thumbnails/nested/file.jpg"));
+        assert!(cache_source("/project/node_modules/package/icons/icon.png"));
+        assert!(cache_source("/Applications/Viewer.app/Contents/Resources/icon.png"));
+        assert!(cache_source(r"C:\Program Files\Viewer\resources\icon.png"));
+        assert!(cache_source(r"C:\Users\me\AppData\Local\Programs\Viewer\resources\icon.png"));
+        assert!(cache_source(r"D:\Steam\steamapps\common\Game\assets\texture.png"));
+        assert!(cache_source(r"D:\Games\Game_Data\StreamingAssets\texture.png"));
         assert!(!cache_source("/Photos/cached/file.jpg"));
         assert!(!cache_source("/Photos/cache.jpg"));
+        assert!(!cache_source("/Photos/assets/family.jpg"));
+        assert!(!cache_source("/Photos/icons/family.jpg"));
+        assert!(!cache_source(r"/Photos/trip\node_modules\pictures/family.jpg"));
+        assert!(!cache_source(r"/Photos/trip\cache/family.jpg"));
+        assert!(cache_source(r".\project\node_modules\package\icon.jpg"));
+        assert!(!cache_source(r"D:\Steam\steamapps\common\Game\Screenshots\photo.jpg"));
         assert_eq!(source_folder(r"C:\file.jpg"), Some(r"C:\"));
     }
 }

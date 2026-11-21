@@ -2,6 +2,63 @@ use crate::model::{Media, Result, Settings};
 use chrono::{Datelike, NaiveDateTime};
 use std::path::{Component, Path, PathBuf};
 
+pub fn likely_generated_folder<'a>(components: impl IntoIterator<Item = &'a str>) -> bool {
+    let mut previous = [""; 4];
+    for name in components.into_iter().filter(|name| !name.is_empty()) {
+        if [
+            "thumbnails",
+            ".thumbnails",
+            "cache",
+            ".cache",
+            "caches",
+            "temp",
+            "@eadir",
+            "node_modules",
+        ]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        {
+            return true;
+        }
+        let is_resources = name.eq_ignore_ascii_case("resources");
+        let is_assets = name.eq_ignore_ascii_case("assets");
+        let app_bundle = previous[2]
+            .get(previous[2].len().saturating_sub(4)..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".app"))
+            && previous[3].eq_ignore_ascii_case("contents")
+            && (is_resources || name.eq_ignore_ascii_case("frameworks"));
+        let steam_assets = previous[1].eq_ignore_ascii_case("steamapps")
+            && previous[2].eq_ignore_ascii_case("common")
+            && !previous[3].is_empty()
+            && (is_assets || is_resources);
+        let program_resources = ["program files", "program files (x86)"]
+            .iter()
+            .any(|prefix| previous[2].eq_ignore_ascii_case(prefix))
+            && !previous[3].is_empty()
+            && is_resources;
+        let local_program_resources = previous[0].eq_ignore_ascii_case("appdata")
+            && previous[1].eq_ignore_ascii_case("local")
+            && previous[2].eq_ignore_ascii_case("programs")
+            && !previous[3].is_empty()
+            && is_resources;
+        let unity_assets = previous[3]
+            .get(previous[3].len().saturating_sub(5)..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case("_data"))
+            && name.eq_ignore_ascii_case("streamingassets");
+        if app_bundle
+            || steam_assets
+            || program_resources
+            || local_program_resources
+            || unity_assets
+        {
+            return true;
+        }
+        previous.rotate_left(1);
+        previous[3] = name;
+    }
+    false
+}
+
 pub fn component(value: &str) -> Result<()> {
     let upper = value.split('.').next().unwrap_or("").to_uppercase();
     if value.is_empty()

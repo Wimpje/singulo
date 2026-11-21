@@ -159,12 +159,6 @@ pub fn validate_roots(raw_roots: &[String], archive_root: &Path) -> Result<Vec<P
     Ok(roots)
 }
 
-fn cache_folder_name(name: &std::ffi::OsStr) -> bool {
-    name.to_str().is_some_and(|name| {
-        ["thumbnails", "cache", "temp"].iter().any(|candidate| name.eq_ignore_ascii_case(candidate))
-    })
-}
-
 fn provenance_root<'a>(job: &'a QueuedJob, root: &'a Path) -> &'a Path {
     job.deferred_roots.get(&root.to_string_lossy().into_owned())
         .map_or(root, |original| Path::new(original))
@@ -182,8 +176,8 @@ pub(crate) fn classify_deferred_folders(
         visiting(path)?;
         let Some(parent) = path.parent() else { continue };
         let folder = folders.entry(parent.to_path_buf()).or_insert_with(|| {
-            let named = parent.ancestors()
-                .any(|ancestor| ancestor.file_name().is_some_and(cache_folder_name));
+            let named = paths::likely_generated_folder(parent.components()
+                .map(|part| part.as_os_str().to_str().unwrap_or("\0")));
             (root.clone(), true, false, 0, named)
         });
         match media::kind(path) {

@@ -20,7 +20,7 @@ fn sample(hash: String) -> Media {
 
 #[test]
 fn deferred_thumbnail_folders_are_conservatively_classified() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::Builder::new().prefix(".filter-test-").tempdir_in(".").unwrap();
     let root = temp.path();
     let mut files = Vec::new();
     for (folder, name, size) in [
@@ -30,6 +30,14 @@ fn deferred_thumbnail_folders_are_conservatively_classified() {
         ("mixed", "large.png", (301, 300)),
         ("unknown", "small.png", (50, 50)),
         ("Cache/nested", "large.png", (500, 500)),
+        (".thumbnails", "large.png", (500, 500)),
+        ("node_modules/package/images", "large.png", (500, 500)),
+        ("steamapps/common/Game/assets/textures", "large.png", (500, 500)),
+        ("Viewer.app/Contents/Resources", "large.png", (500, 500)),
+        ("Game_Data/StreamingAssets", "large.png", (500, 500)),
+        ("family/assets", "large.png", (500, 500)),
+        ("family/icons", "large.png", (500, 500)),
+        ("steamapps/common/Game/Screenshots", "large.png", (500, 500)),
     ] {
         let directory = root.join(folder);
         fs::create_dir_all(&directory).unwrap();
@@ -40,15 +48,35 @@ fn deferred_thumbnail_folders_are_conservatively_classified() {
     let raw = root.join("unknown").join("photo.heic");
     fs::write(&raw, b"unknown dimensions").unwrap();
     files.push((root.to_path_buf(), raw));
+    #[cfg(unix)]
+    let unusual = {
+        let folder = root.join(r"family\node_modules\wedding");
+        fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("large.png");
+        image::RgbImage::new(500, 500).save(&path).unwrap();
+        files.push((root.to_path_buf(), path));
+        folder
+    };
     let complete = [root.to_path_buf()].into_iter().collect();
     let cancel = crate::cancel::Cancellation::default();
     let found = crate::import::classify_deferred_folders(&files, &complete, &cancel, |_| Ok(())).unwrap();
-    assert_eq!(found.len(), 2);
+    assert_eq!(found.len(), 7);
     assert_eq!(found[&root.join("small")].count, 2);
     assert_eq!(found[&root.join("small")].reason, "small");
     assert_eq!(found[&root.join("Cache/nested")].reason, "named");
+    for folder in [
+        ".thumbnails", "node_modules/package/images", "steamapps/common/Game/assets/textures",
+        "Viewer.app/Contents/Resources", "Game_Data/StreamingAssets",
+    ] {
+        assert_eq!(found[&root.join(folder)].reason, "named");
+    }
+    for folder in ["family/assets", "family/icons", "steamapps/common/Game/Screenshots"] {
+        assert!(!found.contains_key(&root.join(folder)));
+    }
+    #[cfg(unix)]
+    assert!(!found.contains_key(&unusual));
     let incomplete = crate::import::classify_deferred_folders(&files, &Default::default(), &cancel, |_| Ok(())).unwrap();
-    assert_eq!(incomplete.len(), 1);
+    assert_eq!(incomplete.len(), 6);
     assert!(incomplete.contains_key(&root.join("Cache/nested")));
     let nested = root.join("Cache/nested");
     let files = vec![(nested.clone(), nested.join("large.png"))];
@@ -118,7 +146,7 @@ fn catalog_cleanup_item(archive: &mut Archive, source: &Path, id: &str, kind: &s
 
 #[test]
 fn catalog_cleanup_checks_history_and_preserves_copies_on_failure() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::Builder::new().prefix(".filter-test-").tempdir_in(".").unwrap();
     let archive_root = temp.path().join("archive");
     fs::create_dir(&archive_root).unwrap();
     let mut archive = Archive::open(&archive_root).unwrap();
@@ -187,7 +215,7 @@ fn catalog_cleanup_checks_history_and_preserves_copies_on_failure() {
 
 #[test]
 fn catalog_cleanup_requires_all_matching_origins_for_shared_items() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::Builder::new().prefix(".filter-test-").tempdir_in(".").unwrap();
     let root = temp.path().join("archive");
     fs::create_dir(&root).unwrap();
     let mut archive = Archive::open(&root).unwrap();
@@ -215,6 +243,36 @@ fn catalog_cleanup_requires_all_matching_origins_for_shared_items() {
     assert!(complete.errors.is_empty());
     assert_eq!(fs::read(&trash).unwrap(), b"shared");
     assert!(first.exists() && second.exists());
+}
+
+#[test]
+fn catalog_cleanup_previews_app_assets_but_not_generic_photo_folders() {
+    let temp = tempfile::Builder::new().prefix(".filter-test-").tempdir_in(".").unwrap();
+    let root = temp.path().join("archive");
+    fs::create_dir(&root).unwrap();
+    let mut archive = Archive::open(&root).unwrap();
+    for (folder, id) in [
+        ("project/node_modules/package/icons", "dependency"),
+        ("steamapps/common/Game/assets", "game-asset"),
+        ("Viewer.app/Contents/Resources", "app-resource"),
+        ("family/assets", "family-assets"),
+        ("family/icons", "family-icons"),
+        ("steamapps/common/Game/Screenshots", "screenshot"),
+    ] {
+        catalog_cleanup_item(&mut archive, &temp.path().join(folder).join("photo.jpg"), id, "photo", 600, 600);
+    }
+    #[cfg(unix)]
+    catalog_cleanup_item(&mut archive, &temp.path().join(r"family\node_modules\wedding").join("photo.jpg"), "backslash-name", "photo", 600, 600);
+    let folders = archive.catalog_cleanup_preview().unwrap();
+    assert_eq!(folders.len(), 3);
+    for folder in [
+        "project/node_modules/package/icons", "steamapps/common/Game/assets", "Viewer.app/Contents/Resources",
+    ] {
+        assert!(folders.iter().any(|entry| entry.path == temp.path().join(folder).to_string_lossy()));
+    }
+    for id in ["dependency", "game-asset", "app-resource", "family-assets", "family-icons", "screenshot"] {
+        assert_eq!(archive.item(id).unwrap().state, "active");
+    }
 }
 
 fn xmp_fixture() -> (tempfile::TempDir, Archive) {

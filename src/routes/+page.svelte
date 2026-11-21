@@ -1428,7 +1428,7 @@
       {/if}
       {#if deferredFolders.length && !importing && !queuedJobs.length && tab !== "import"}
         <div class="banner warning incomplete-notice" role="status">
-          <div><strong>{deferredFolders.length} {t("folders set aside for review")}</strong><p>{t("Some folders may contain thumbnails or other small images. You can choose which to import.")}</p></div>
+          <div><strong>{deferredFolders.length} {t("folders set aside for review")}</strong><p>{t("Some folders may contain thumbnails, caches or app assets. You can choose which to import.")}</p></div>
           <button class="secondary" onclick={() => tab = "import"}>{t("Review set-aside folders")}</button>
         </div>
       {/if}
@@ -1455,7 +1455,7 @@
                   {#each folders.slice(0, deferredLimits[root] ?? 100) as folder (folder.path)}
                     <label class="found-folder">
                       <input type="checkbox" checked={deferredSelected.has(folder.path)} onchange={(event) => selectDeferred([folder.path], event.currentTarget.checked)} />
-                      <span><code>{folder.path}</code><small>{folder.count.toLocaleString()} {t("photos and videos")} · {t(folder.reason === "named" ? "Named cache folder" : "All checked images are 300 × 300 or smaller")}</small></span>
+                      <span><code>{folder.path}</code><small>{folder.count.toLocaleString()} {t("photos and videos")} · {t(folder.reason === "named" ? "Likely cache or app assets" : "All checked images are 300 × 300 or smaller")}</small></span>
                     </label>
                   {/each}
                 </div>
@@ -1621,7 +1621,7 @@
           <div class="setting-columns"><label>{t("Filenames")}<select bind:value={config.filenames}><option value="original">{t("Keep original filenames")}</option><option value="date">{t("Use photo date / time")}</option></select></label><label>{t("Unknown-date folder")}<input bind:value={config.unknownFolder} /></label></div>
           <div class="path-preview"><small>{t("YOUR FILES WOULD LOOK LIKE THIS")}</small>{#each examples as example}<code>{example}</code>{/each}{#if !native}<code>2023/07/18/IMG_1234.jpg</code><code>unknown/undated.jpg</code>{/if}{#if configError}<p class="field-error">{configError}</p>{/if}<p>{t("Name collisions receive a unique suffix. Estimated dates stay marked; missing times aren't invented.")}</p></div>
           <label class="check-setting"><input type="checkbox" bind:checked={config.automaticMatches} /><span><strong>{t("Automatically group very confident matches")}</strong><small>{t("The clearly better version stays in your library. The duplicate is removed, but a spare copy is kept so you can restore it. Doubtful cases are left for you to compare.")}</small></span></label>
-          <label class="check-setting"><input type="checkbox" bind:checked={config.deferPotentialThumbnails} /><span><strong>{t("Set aside possible thumbnails and caches")}</strong><small>{t("Set aside folders named thumbnails, cache or temp, and folders where every recognized media file is a photo at most 300 × 300 pixels. Review them after importing. Outside named folders, files whose dimensions cannot be checked are imported normally.")}</small></span></label>
+          <label class="check-setting"><input type="checkbox" bind:checked={config.deferPotentialThumbnails} /><span><strong>{t("Set aside possible thumbnails, caches and app assets")}</strong><small>{t("Set aside known thumbnail, cache and app or game asset folders, and folders where every recognized media file is a photo at most 300 × 300 pixels. Review them after importing. Elsewhere, files whose dimensions cannot be checked are imported normally.")}</small></span></label>
           <label class="check-setting"><input type="checkbox" bind:checked={config.deepVideoMatching} disabled={!config.automaticMatches} /><span><strong>{t("Deep video comparison (slower)")}</strong><small>{t("Off by default: exact video duplicates are recognized by hash; possible matches from a preview or capture date and duration go to manual review. Enable to compare every frame and audio before automatically grouping a clearly higher-resolution equivalent. Requires automatic grouping above and can slow imports substantially.")}</small></span></label>
           <label class="check-setting"><input type="checkbox" bind:checked={config.preventSleepDuringImport} /><span><strong>{t("Keep the computer awake during imports")}</strong><small>{t("Prevents automatic sleep during imports, including while paused. The screen may still turn off. Closing a laptop lid or choosing Sleep can still interrupt an import.")}</small></span></label>
           <div class="button-row"><button class="primary" title={busyReason} disabled={!native || !snapshot.root || busy || !!configError || !settingsDirty} onclick={() => run(async () => { await mutate(async () => { await api("save_settings", { settings: config }); await refresh(true); }); notice = t("Settings saved for future imports. Existing files haven't moved."); })}>{t("Save archive settings")}</button>{#if settingsDirty}<span class="pill unsaved">{t("Unsaved changes")}</span><button class="text-button" onclick={() => config = { ...snapshot.settings }}>{t("Discard changes")}</button>{/if}<button class="text-button" onclick={() => config = { ...defaults }}>{t("Reset defaults")}</button></div>
@@ -1629,8 +1629,8 @@
         <section class="settings-card"><h3>{t("Choosing an external disk")}</h3><p class="muted">{t("Mac only: prefer APFS. Windows only: prefer NTFS. For use on both, exFAT is convenient, but lacks journaling and may require extra copying during import. Always eject safely and keep another backup.")}</p><p class="muted">{t("You do not need to reformat an existing disk. Formatting erases its files; this app never formats disks.")}</p></section>
         <h2>{t("Maintain your existing archive")}</h2>
         <section class="settings-card">
-          <h3>{t("Find possible thumbnails and caches")}</h3>
-          <p class="muted">{t("Find archive files from folders named thumbnails, cache or temp, and folders where all known cataloged media are photos at most 300 × 300 pixels. Only catalog history is checked; the original folders are not scanned.")}</p>
+          <h3>{t("Find possible thumbnails, caches and app assets")}</h3>
+          <p class="muted">{t("Find archive files from likely thumbnail, cache or app and game asset folders, and folders where all known cataloged media are photos at most 300 × 300 pixels. Only catalog history is checked; the original folders are not scanned.")}</p>
           <p class="muted">{t("Pictures from non-matching folders or with related files are left alone. For pictures in several matching folders, select every folder to remove them.")}</p>
           <p class="muted">{t("To recover a file from Trash, restore it outside the archive and import it again.")}</p>
           <button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={previewCatalogCleanup}>{t("Find folders to review")}</button>
