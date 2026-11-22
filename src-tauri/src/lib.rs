@@ -677,6 +677,15 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>, deferred_only: 
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = handle.state::<AppState>();
+        let stop_sampler = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sampler = {
+            let (app, stop) = (handle.clone(), std::sync::Arc::clone(&stop_sampler));
+            std::thread::Builder::new()
+                .name("import-speed".into())
+                .spawn(move || import::sample_read_rate(&app, &stop))
+                .map_err(|error| eprintln!("Could not start import speed sampler: {error}"))
+                .ok()
+        };
         loop {
             let job = match state.queue.lock() {
                 Ok(mut queue) => {
@@ -758,6 +767,10 @@ async fn start_import(app: tauri::AppHandle, roots: Vec<String>, deferred_only: 
             if let Err(error) = handle.emit("imports-changed", ()) {
                 eprintln!("Could not publish import history update: {error}");
             }
+        }
+        stop_sampler.store(true, Ordering::Relaxed);
+        if let Some(sampler) = sampler {
+            let _ = sampler.join();
         }
         if let Err(error) = handle.emit("library-changed", ()) {
             eprintln!("Could not publish library update: {error}");

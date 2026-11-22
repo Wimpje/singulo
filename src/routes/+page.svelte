@@ -126,6 +126,8 @@
   const percent = $derived(snapshot.progress.total ? Math.round(snapshot.progress.done / snapshot.progress.total * 100) : 0);
   const determinate = $derived(snapshot.progress.status !== "scanning" && snapshot.progress.total > 0 && (!importing || snapshot.progress.done > 0));
   const elapsedMs = $derived(importing ? Math.max(snapshot.progress.timings?.totalMs ?? 0, progressClock - progressStartedAt) : snapshot.progress.timings?.totalMs ?? 0);
+  const readSpeed = $derived(importing && snapshot.progress.status === "importing" && (snapshot.progress.readRate ?? 0) > 0
+    ? `${bytes(snapshot.progress.readRate ?? 0)}/s` : "");
   const queuedJobs = $derived(jobs.filter((job) => job.queued && job.id !== snapshot.progress.jobId).reverse());
   const deferredSelected = $derived(new Set(deferredSelection));
   const catalogCleanupSelected = $derived(new Set(catalogCleanupSelection));
@@ -142,6 +144,7 @@
     if (cancelling) return t("Cancelling import...");
     if (snapshot.progress.status === "paused") return t("Import paused");
     if (snapshot.progress.status === "scanning") return t("Finding photos and videos...");
+    if (snapshot.progress.phase === "reconnecting") return t("Waiting for the source folder to come back...");
     switch (displayedStage.phase) {
       case "hashing": return t("Reading originals and checking exact copies...");
       case "metadata": return t("Reading dates and camera details...");
@@ -156,13 +159,14 @@
     if (cancelling) return t("Waiting for the current operation to stop safely. Your source files are unchanged.");
     if (snapshot.progress.status === "paused") return t("Resume or cancel the import to make these actions available again.");
     if (snapshot.progress.status === "scanning") return `${(snapshot.progress.folders ?? []).reduce((total, folder) => total + folder.discovered, 0).toLocaleString()} ${t("recognized media files found")}`;
+    if (snapshot.progress.phase === "reconnecting") return `${snapshot.progress.current} — ${t("The connection dropped. The import continues automatically when the folder is reachable again; nothing is lost. You can also cancel.")}`;
     if (displayedStage.phase === "hashing") return `${(displayedStage.checked ?? 0).toLocaleString()} / ${displayedStage.total.toLocaleString()} ${t("originals checked")}`;
     if (displayedStage.phase === "metadata") return `${displayedStage.batchFiles ?? 0} ${t("files in this metadata batch")}`;
     if (displayedStage.phase === "raw") return t("RAW files such as PEF need decoding before they can be compared. Your original stays unchanged.");
     return "";
   });
   const activityTitle = $derived(importing
-    ? t(cancelling ? "Cancelling import..." : snapshot.progress.status === "scanning" ? "Scanning source folders..." : snapshot.progress.status === "paused" ? "Import paused" : "Importing photos and videos...")
+    ? t(cancelling ? "Cancelling import..." : snapshot.progress.status === "scanning" ? "Scanning source folders..." : snapshot.progress.status === "paused" ? "Import paused" : snapshot.progress.phase === "reconnecting" ? "Waiting for the source folder to come back..." : "Importing photos and videos...")
     : cleanupLoading ? t("Checking source files...")
     : clearLoading ? t("Checking imported copies...")
     : t(loaded ? "Updating your archive..." : "Opening your archive..."));
@@ -1311,7 +1315,7 @@
       </div>
       {#if importing}
         <div class="activity-actions">
-          {#if determinate}<strong>{percent}% · {snapshot.progress.done.toLocaleString()} / {snapshot.progress.total.toLocaleString()} {t("files")}</strong>{/if}
+          {#if determinate}<strong>{percent}% · {snapshot.progress.done.toLocaleString()} / {snapshot.progress.total.toLocaleString()} {t("files")}{#if readSpeed} · <span title={t("Current read speed from the source folders")}>{readSpeed}</span>{/if}</strong>{/if}
           {#if showImportLink && tab !== "import"}<button class="secondary" onclick={() => tab = "import"}>{t("View import progress")}</button>{/if}
         </div>
       {/if}
@@ -1541,7 +1545,7 @@
           </section>
         {/if}
         {#if busy || snapshot.progress.total > 0}
-          <section class="progress-card"><div class="section-line"><strong>{busy ? activityTitle : t(snapshot.progress.status)}</strong>{#if determinate}<span>{percent}% · {snapshot.progress.done} / {snapshot.progress.total} {t("files")}</span>{/if}</div>{@render importProgress()}
+          <section class="progress-card"><div class="section-line"><strong>{busy ? activityTitle : t(snapshot.progress.status)}</strong>{#if determinate}<span>{percent}% · {snapshot.progress.done} / {snapshot.progress.total} {t("files")}{#if readSpeed} · <span title={t("Current read speed from the source folders")}>{readSpeed}</span>{/if}</span>{/if}</div>{@render importProgress()}
             {#if importing}
               <div class="import-stage">
                 <strong>{phaseTitle}</strong>

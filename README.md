@@ -221,8 +221,7 @@ npm run tauri -- build --no-bundle
 ```
 If you want to build windows installers:
 
-```
-npm run tauri -- build 
+np build 
 ```
 
 #### Bumping the version

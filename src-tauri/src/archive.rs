@@ -408,6 +408,9 @@ fn copy_new_with_cancel(
             if count == 0 {
                 break;
             }
+            if let Some(cancel) = cancel {
+                cancel.count_read(count);
+            }
             output
                 .write_all(&buffer[..count])
                 .map_err(|e| format!("Copy failed: {e}"))?;
