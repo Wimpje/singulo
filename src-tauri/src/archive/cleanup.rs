@@ -49,7 +49,7 @@ pub(super) fn register_functions(connection: &Connection) -> Result<()> {
         .map_err(|e| e.to_string())
 }
 
-const CANDIDATES: &str = "
+const SOURCE_CTES: &str = "
 WITH source_rows AS MATERIALIZED (
     SELECT o.computer_id, coalesce(source_folder(o.source),'') AS folder,
         json_extract(o.data,'$.item') AS item,
@@ -72,7 +72,9 @@ WITH source_rows AS MATERIALIZED (
     GROUP BY s.item,s.computer_id,s.folder
 ), eligible AS (
     SELECT item FROM links GROUP BY item HAVING MIN(named OR small)=1
-)
+)";
+
+const CANDIDATES: &str = "
 SELECT i.data,l.computer_id,l.folder,l.computer_name
 FROM eligible e JOIN items i ON i.id=e.item JOIN links l ON l.item=i.id
 WHERE i.state='active'
@@ -97,7 +99,7 @@ impl Archive {
         self.check()?;
         let mut query = self
             .connection
-            .prepare(CANDIDATES)
+            .prepare(&format!("{SOURCE_CTES} {CANDIDATES}"))
             .map_err(|e| e.to_string())?;
         let mut rows = query.query([]).map_err(|e| e.to_string())?;
         let mut folders = BTreeMap::<FolderKey, FolderSummary>::new();
@@ -165,6 +167,13 @@ impl Archive {
 
     pub fn catalog_cleanup_preview(&self) -> Result<Vec<CatalogCleanupFolder>> {
         Ok(self.catalog_cleanup_candidates(&HashSet::new())?.0)
+    }
+
+    pub(super) fn likely_generated_items(&self) -> Result<HashSet<String>> {
+        let mut query = self.connection.prepare(&format!("{SOURCE_CTES} SELECT item FROM eligible"))
+            .map_err(|e| e.to_string())?;
+        query.query_map([], |row| row.get(0)).map_err(|e| e.to_string())?
+            .map(|row| row.map_err(|e| e.to_string())).collect()
     }
 
     pub fn catalog_cleanup(

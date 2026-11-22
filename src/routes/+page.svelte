@@ -11,13 +11,13 @@
   import {
     api, bytes, defaults, emptySnapshot, message,
     type Snapshot, type Settings, type Progress, type Item, type Details,
-    type Review, type CleanupRow, type ClearImportPreview, type MoveRow, type Job, type ToolStatus, type FolderSearch, type DeferredFolder, type CatalogCleanupFolder, type CatalogCleanupResult,
+    type ReviewGroup, type ReviewGroupPage, type ReviewGroupDetail, type ReviewResult, type CleanupRow, type ClearImportPreview, type MoveRow, type Job, type ToolStatus, type FolderSearch, type DeferredFolder, type CatalogCleanupFolder, type CatalogCleanupResult,
   } from "$lib/api";
 
   type Tab = "library" | "review" | "import" | "settings";
   type LibraryMonth = { month: string; count: number };
   type VideoPlayback = { id: string; request: number; source: string; phase: "opening" | "original" | "converting" | "proxy" };
-  type UndoAction = { review: Review; discarded: string; keptName: string };
+  type UndoAction = { token: string; moved: number };
   type CleanupFolder = { root: string; rows: CleanupRow[]; eligible: string[] };
   type XmpSummary = { created: number; updated: number; removed: number; skipped: number; errors: string[] };
   type DateRepairSummary = { updated: number; skipped: number; errors: string[] };
@@ -38,12 +38,23 @@
   let dropping = $state(false);
   let items = $state<Item[]>([]);
   let itemsStart = $state(0);
-  let reviews = $state<Review[]>([]);
+  let reviews = $state<ReviewGroup[]>([]);
+  let reviewTotal = $state(0);
+  let reviewLoading = $state(false);
+  let showHiddenReviews = $state(false);
+  let reviewRequest = 0;
+  let groupRequest = 0;
+  let reviewGroup = $state<ReviewGroupDetail | null>(null);
+  let groupDetails = $state<Details[]>([]);
+  let groupOffset = $state(0);
+  let discarded = $state<string[]>([]);
   let jobs = $state<Job[]>([]);
   let deferredFolders = $state<DeferredFolder[]>([]);
   let deferredSelection = $state<string[]>([]);
   let deferredLimits = $state<Record<string, number>>({});
   let catalogCleanup = $state<CatalogCleanupFolder[] | null>(null);
+  let catalogCleanupLoading = $state(false);
+  let catalogCleanupElapsed = $state(0);
   let catalogCleanupSelection = $state<string[]>([]);
   let catalogCleanupLimit = $state(100);
   let catalogCleanupResult = $state<CatalogCleanupResult | null>(null);
@@ -57,8 +68,6 @@
   let examples = $state<string[]>([]);
   let configError = $state("");
   let selected = $state<Details | null>(null);
-  let comparing = $state<Details | null>(null);
-  let currentReview = $state<Review | null>(null);
   let reviewIndex = $state(0);
   let opening = $state(false);
   let showInfo = $state(true);
@@ -69,8 +78,6 @@
   let dateEntry = $state("");
   let videos = $state<(VideoPlayback | null)[]>([null, null]);
   let videoRequest = 0;
-  let firstVideo = $state<HTMLVideoElement>();
-  let secondVideo = $state<HTMLVideoElement>();
   let cleanup = $state<CleanupRow[] | null>(null);
   let cleanupLoading = $state(false);
   let cleanupError = $state("");
@@ -163,11 +170,13 @@
   });
   const activityTitle = $derived(importing
     ? t(cancelling ? "Cancelling import..." : snapshot.progress.status === "scanning" ? "Scanning source folders..." : snapshot.progress.status === "paused" ? "Import paused" : "Importing photos and videos...")
+    : catalogCleanupLoading ? t("Checking catalog history...")
     : cleanupLoading ? t("Checking source files...")
     : clearLoading ? t("Checking imported copies...")
     : t(loaded ? "Updating your archive..." : "Opening your archive..."));
   const busyReason = $derived(!busy ? undefined : importing
     ? t("Comparisons, source cleanup and archive changes wait until the import finishes to avoid conflicting with files being added or matched.")
+    : catalogCleanupLoading ? t("Catalog history is being checked. You can keep browsing; archive changes will be available when checking finishes.")
     : cleanupLoading || clearLoading ? t("Files are being checked. You can keep browsing; archive changes will be available when checking finishes.")
     : t(loaded
       ? "An archive operation is in progress. Please wait for it to finish before making other changes."
@@ -175,7 +184,7 @@
   const reviewDisabledReason = $derived(busyReason ?? (opening ? t("Opening comparison...") : undefined));
   const viewerIndex = $derived(selected ? items.findIndex((item) => item.id === selected?.item.id) : -1);
   const absoluteIndex = $derived(viewerIndex < 0 ? -1 : itemsStart + viewerIndex);
-  const pictureComparison = $derived(selected && comparing ? comparePictures(selected.item.media, comparing.item.media) : null);
+  const pictureComparison = $derived(groupDetails.length === 2 && reviewGroup?.count === 2 ? comparePictures(groupDetails[0].item.media, groupDetails[1].item.media) : null);
   const monthCount = $derived(months.find((entry) => entry.month === month)?.count ?? 0);
   const monthPosition = $derived(months.findIndex((entry) => entry.month === month));
   const year = $derived(month === "unknown" ? "unknown" : month.slice(0, 4));
@@ -230,6 +239,14 @@
   });
 
   $effect(() => {
+    if (!catalogCleanupLoading) return;
+    const started = Date.now();
+    catalogCleanupElapsed = 0;
+    const timer = setInterval(() => { catalogCleanupElapsed = Math.floor((Date.now() - started) / 1000); }, 1000);
+    return () => clearInterval(timer);
+  });
+
+  $effect(() => {
     if (!progressKey || !importStatus) return;
     // Sample the stage, its details, and its path together. Counts and control states stay live.
     const sample = () => { stageProgress = snapshot.progress; };
@@ -239,7 +256,7 @@
   });
 
   $effect(() => {
-    document.body.style.overflow = selected && !comparing ? "hidden" : "";
+    document.body.style.overflow = selected || reviewGroup ? "hidden" : "";
   });
 
   function changeLanguage(event: Event) {
@@ -398,12 +415,15 @@
     await readSnapshot();
     if (snapshot.root) {
       if (mode === "main") {
-        [reviews] = await Promise.all([api<Review[]>("review_list"), refreshJobs()]);
+        await refreshJobs();
+        if (tab === "review" && !importing) await loadReviews();
       }
       await loadLibrary(preservePages);
     } else {
       items = [];
       jobs = [];
+      reviews = [];
+      reviewTotal = 0;
       deferredFolders = [];
       deferredSelection = [];
       itemsStart = 0;
@@ -412,6 +432,23 @@
       lastQuery = "";
       libraryLoading = false;
       searchSeq += 1;
+    }
+  }
+
+  async function loadReviews(more = false) {
+    if (!snapshot.root || importing) return;
+    const request = ++reviewRequest;
+    const root = snapshot.root;
+    const hidden = showHiddenReviews;
+    const offset = more ? reviews.length : 0;
+    reviewLoading = true;
+    try {
+      const page = await api<ReviewGroupPage>("review_groups", { showHidden: hidden, offset });
+      if (request !== reviewRequest || root !== snapshot.root || hidden !== showHiddenReviews) return;
+      reviews = more ? [...reviews, ...page.groups] : page.groups;
+      reviewTotal = page.total;
+    } finally {
+      if (request === reviewRequest) reviewLoading = false;
     }
   }
 
@@ -618,12 +655,15 @@
   }
 
   async function previewCatalogCleanup() {
-    await run(async () => {
-      catalogCleanup = await api<CatalogCleanupFolder[]>("catalog_cleanup_preview");
-      catalogCleanupSelection = [];
-      catalogCleanupLimit = 100;
-      catalogCleanupResult = null;
-    });
+    catalogCleanupLoading = true;
+    try {
+      await run(async () => {
+        catalogCleanup = await api<CatalogCleanupFolder[]>("catalog_cleanup_preview");
+        catalogCleanupSelection = [];
+        catalogCleanupLimit = 100;
+        catalogCleanupResult = null;
+      });
+    } finally { catalogCleanupLoading = false; }
   }
 
   async function cleanCatalog() {
@@ -699,8 +739,7 @@
 
   function showDetail(detail: Details) {
     selected = detail;
-    comparing = null;
-    currentReview = null;
+    reviewGroup = null;
     zoom = null;
     dateEntry = detail.item.media.date?.slice(0, 10) ?? "";
     resetVideos();
@@ -717,7 +756,7 @@
   }
 
   async function navigatePhoto(direction: -1 | 1) {
-    if (opening || working || !selected || comparing || absoluteIndex < 0) return;
+    if (opening || working || !selected || absoluteIndex < 0) return;
     const target = absoluteIndex + direction;
     const seq = ++detailSeq;
     opening = true;
@@ -764,13 +803,13 @@
       else if (moves !== null) moves = null;
       else if (cleanup !== null) cleanup = null;
       else if (zoom) zoom = null;
-      else if (selected) closeDetails();
+      else if (selected || reviewGroup) closeDetails();
       else return;
       event.preventDefault();
       return;
     }
     if (typing || target?.closest("video") || cleanup !== null || clearingJob !== null || moves !== null || working) return;
-    if (comparing && currentReview) {
+    if (reviewGroup) {
       reviewKey(event);
       return;
     }
@@ -791,14 +830,14 @@
   function reviewKey(event: KeyboardEvent) {
     if (opening || busy) return;
     const key = event.key.toLowerCase();
-    // Never let a held-down key resolve several matches the user hasn't seen.
-    if (event.repeat && (key === "1" || key === "2" || key === "b")) return;
-    if (key === "1" || key === "2") {
-      const index = key === "1" ? 0 : 1;
-      const detail = index === 0 ? selected : comparing;
-      const other = index === 0 ? comparing : selected;
-      if (detail && other && !other.companions.length) void resolve(detail.item.id);
-    } else if (key === "b") void resolve(null);
+    if (event.repeat && (/^[1-8]$/.test(key) || key === "b")) return;
+    if (/^[1-8]$/.test(key)) {
+      const detail = groupDetails[Number(key) - 1];
+      if (detail && !detail.companions.length) toggleDiscard(detail.item.id);
+    } else if (key === "b") {
+      discarded = [];
+      void resolveGroup();
+    }
     else if (key === "s" || event.key === "ArrowRight") void stepReview(1);
     else if (event.key === "ArrowLeft") void stepReview(-1);
     else if (key === "z") zoom = zoom ? null : { x: 50, y: 50 };
@@ -809,22 +848,45 @@
   async function openReview(index: number) {
     const review = reviews[index];
     if (!review) return;
-    const seq = ++detailSeq;
+    const seq = ++groupRequest;
     opening = true;
+    error = "";
     try {
-      const [first, second] = await Promise.all([
-        api<Details>("item_details", { id: review.item }),
-        api<Details>("item_details", { id: review.candidate }),
-      ]);
-      if (seq !== detailSeq) return;
-      selected = first;
-      comparing = second;
-      currentReview = review;
+      const group = await api<ReviewGroupDetail>("review_group_detail", { showHidden: showHiddenReviews, id: review.id, token: review.token, offset: 0 });
+      const details = await Promise.all(group.items.map((id) => api<Details>("item_details", { id })));
+      if (seq !== groupRequest) return;
+      selected = null;
+      reviewGroup = group;
+      groupDetails = details;
+      groupOffset = 0;
+      discarded = [];
       reviewIndex = index;
       zoom = null;
       resetVideos();
     } catch (reason: unknown) { error = message(reason); }
-    finally { if (seq === detailSeq) opening = false; }
+    finally { if (seq === groupRequest) opening = false; }
+  }
+
+  async function groupPage(offset: number) {
+    const group = reviewGroup;
+    if (!group || offset < 0 || offset >= group.count || opening) return;
+    const seq = ++groupRequest;
+    opening = true;
+    try {
+      const nextGroup = await api<ReviewGroupDetail>("review_group_detail", { showHidden: showHiddenReviews, id: group.id, token: group.token, offset });
+      const details = await Promise.all(nextGroup.items.map((id) => api<Details>("item_details", { id })));
+      if (seq !== groupRequest) return;
+      reviewGroup = nextGroup;
+      groupDetails = details;
+      groupOffset = offset;
+      zoom = null;
+      resetVideos();
+    } catch (reason: unknown) { error = message(reason); }
+    finally { if (seq === groupRequest) opening = false; }
+  }
+
+  function toggleDiscard(id: string) {
+    discarded = discarded.includes(id) ? discarded.filter((value) => value !== id) : [...discarded, id];
   }
 
   async function stepReview(direction: -1 | 1) {
@@ -832,23 +894,21 @@
     await openReview((reviewIndex + direction + reviews.length) % reviews.length);
   }
 
-  async function resolve(keeper: string | null) {
-    const review = currentReview;
-    if (!review || !selected || !comparing || working) return;
-    const index = reviewIndex;
-    const kept = keeper === selected.item.id ? selected : keeper === comparing.item.id ? comparing : null;
-    const discarded = keeper ? (keeper === review.item ? review.candidate : review.item) : null;
+  async function resolveGroup() {
+    const group = reviewGroup;
+    if (!group || working) return;
     await run(async () => {
+      let result: ReviewResult | undefined;
       await mutate(async () => {
-        await api("resolve_review", { item: review.item, candidate: review.candidate, keeper });
+        result = await api<ReviewResult>("resolve_review_group", { showHidden: showHiddenReviews, id: group.id, token: group.token, discarded });
+        showUndo({ token: result.token, moved: result.moved });
+        closeDetails();
         await refresh(true);
       });
-      if (discarded && kept) showUndo({ review, discarded, keptName: kept.item.originalName });
-      if (reviews.length) await openReview(Math.min(index, reviews.length - 1));
-      else {
-        closeDetails();
-        notice = t("All similar matches have been reviewed.");
-      }
+      if (!result) return;
+      if (result.errors.length) error = `${t("Some changes could not be completed. You can undo the completed changes.")} ${result.errors.join(" · ")}`;
+      else if (reviews.length) await openReview(Math.min(reviewIndex, reviews.length - 1));
+      else notice = t("All similar matches have been reviewed.");
     });
   }
 
@@ -862,18 +922,18 @@
     const action = undoAction;
     if (!action) return;
     clearTimeout(undoTimer);
-    undoAction = null;
     await run(async () => {
+      let result: ReviewResult | undefined;
       await mutate(async () => {
-        await api("undo_review", { item: action.review.item, candidate: action.review.candidate, reason: action.review.reason, discarded: action.discarded });
+        result = await api<ReviewResult>("undo_review_group", { token: action.token });
         await refresh(true);
       });
-      const index = reviews.findIndex((review) => review.item === action.review.item && review.candidate === action.review.candidate);
-      if (index >= 0) {
-        tab = "review";
-        await openReview(index);
+      if (!result) return;
+      if (result.errors.length) {
+        if (!result.retryable) undoAction = null;
+        error = `${t(result.retryable ? "Some files could not be restored. Try Undo again." : "Some changes could not be completed. Check the details below.")} ${result.errors.join(" · ")}`;
       }
-      notice = t("Restored. The match is back in review.");
+      else { undoAction = null; notice = t("Restored. The match is back in review."); }
     });
   }
 
@@ -1105,10 +1165,11 @@
   }
 
   function closeDetails() {
-    const id = selected && !comparing ? selected.item.id : null;
+    const id = selected?.item.id ?? null;
     detailSeq += 1;
+    groupRequest += 1;
     opening = false;
-    selected = null; comparing = null; currentReview = null; zoom = null; resetVideos();
+    selected = null; reviewGroup = null; groupDetails = []; discarded = []; zoom = null; resetVideos();
     if (!id) return;
     // Return to the last viewed photo in the grid, so keyboard and scroll position follow the lightbox.
     void tick().then(() => {
@@ -1117,6 +1178,12 @@
       card?.focus({ preventScroll: true });
     });
   }
+
+  $effect(() => {
+    if (!loaded || !native || mode !== "main" || tab !== "review" || !snapshot.root || importing) return;
+    showHiddenReviews;
+    untrack(() => { void loadReviews().catch((reason: unknown) => { error = message(reason); }); });
+  });
 
   $effect(() => {
     const next = { ...config };
@@ -1386,7 +1453,7 @@
         </button>
         <button class:active={tab === "review"} aria-current={tab === "review" ? "page" : undefined} onclick={() => tab = "review"}>
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2" y="5" width="9" height="14" rx="1.5" /><rect x="13" y="5" width="9" height="14" rx="1.5" /></svg>
-          {t("Similarity review")} {#if reviews.length}<span class="nav-count attention">{reviews.length}</span>{/if}
+          {t("Similarity review")} {#if reviewTotal}<span class="nav-count attention">{reviewTotal}</span>{/if}
         </button>
         <button class:active={tab === "import"} aria-current={tab === "import" ? "page" : undefined} onclick={() => tab = "import"}>
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3v11m-4-4 4 4 4-4" /><path d="M4 14v6h16v-6" /></svg>
@@ -1595,19 +1662,22 @@
       {:else if tab === "library"}
         <div class="library-page">{@render libraryView(false)}</div>
       {:else if tab === "review"}
-        <div class="page-heading"><div><p class="eyebrow">{t("SIMILAR DOESN'T ALWAYS MEAN THE SAME")}</p><h1>{t("A second look.")}</h1><p class="subtitle">{t("Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.")}</p></div><div class="review-actions"><span class="pill">{reviews.length} {t("to review")}</span>{#if reviews.length}<span class="disabled-hint" title={reviewDisabledReason}><button class="primary" disabled={busy || opening} onclick={() => openReview(0)}>{t("Start reviewing")}</button></span>{/if}</div></div>
+        <div class="page-heading"><div><p class="eyebrow">{t("SIMILAR DOESN'T ALWAYS MEAN THE SAME")}</p><h1>{t("A second look.")}</h1><p class="subtitle">{t("Compare uncertain matches. Edits, bursts and RAW/JPEG pairs deserve to stay.")}</p></div><div class="review-actions"><span class="pill">{reviewTotal.toLocaleString()} {t("groups to review")}</span>{#if reviews.length}<span class="disabled-hint" title={reviewDisabledReason}><button class="primary" disabled={busy || opening || reviewLoading} onclick={() => openReview(0)}>{t("Start reviewing")}</button></span>{/if}</div></div>
+        <label class="check-setting"><input type="checkbox" bind:checked={showHiddenReviews} disabled={reviewLoading || busy} /><span><strong>{t("Show possible thumbnails, caches and app assets")}</strong><small>{t("These matches are hidden by default, not deleted. Only pictures whose known source folders all match are hidden.")}</small></span></label>
         {#if reviews.length}
           <div class="review-list">
-            {#each reviews as review, index (`${review.item}:${review.candidate}`)}
+            {#each reviews as review, index (review.id)}
               <div class="disabled-hint" title={reviewDisabledReason}>
-                <button class="review-row" aria-label={`${t("Compare similar pictures")}: ${review.reason}`} disabled={busy || opening} onclick={() => openReview(index)}>
-                  <span class="review-thumbnails"><Preview item={review.itemPreview} archive={snapshot.root} /><Preview item={review.candidatePreview} archive={snapshot.root} /></span>
-                  <span class="review-description"><strong>{t("Two similar pictures")}</strong><span>{review.reason}</span></span>
+                <button class="review-row" aria-label={t("Compare similar pictures")} disabled={busy || opening || reviewLoading} onclick={() => openReview(index)}>
+                  <span class="review-thumbnails">{#each review.previews as preview (preview.id)}<Preview item={preview} archive={snapshot.root} />{/each}</span>
+                  <span class="review-description"><strong>{review.count.toLocaleString()} {t("related pictures")}</strong></span>
                   <span class="secondary">{t("Compare files")}</span>
                 </button>
               </div>
             {/each}
           </div>
+          {#if reviews.length < reviewTotal}<button class="secondary" disabled={reviewLoading || busy} onclick={() => { void loadReviews(true).catch((reason: unknown) => { error = message(reason); }); }}>{t("Show more groups")}</button>{/if}
+        {:else if reviewLoading}<p role="status">{t("Loading similar pictures...")}</p>
         {:else}<div class="empty"><span class="empty-check" aria-hidden="true">OK</span><h2>{t("Nothing needs a second look.")}</h2><p>{t("Uncertain matches will appear here. Exact duplicates are handled automatically.")}</p></div>{/if}
       {:else}
         <div class="page-heading"><div><p class="eyebrow">{t("SIMPLE SETTINGS, YOUR WAY")}</p><h1>{t("A place for everything.")}</h1><p class="subtitle">{t("Archive settings travel with your disk. Changes apply to future imports.")}</p></div></div>
@@ -1633,8 +1703,18 @@
           <p class="muted">{t("Find archive files from likely thumbnail, cache or app and game asset folders, and folders where all known cataloged media are photos at most 300 × 300 pixels. Only catalog history is checked; the original folders are not scanned.")}</p>
           <p class="muted">{t("Pictures from non-matching folders or with related files are left alone. For pictures in several matching folders, select every folder to remove them.")}</p>
           <p class="muted">{t("To recover a file from Trash, restore it outside the archive and import it again.")}</p>
-          <button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={previewCatalogCleanup}>{t("Find folders to review")}</button>
-          {#if catalogCleanup}
+          <button class="secondary" title={busyReason} disabled={!native || !snapshot.root || busy} onclick={previewCatalogCleanup}>{t(catalogCleanupLoading ? "Checking catalog history..." : "Find folders to review")}</button>
+          {#if catalogCleanupLoading}
+            <div class="checking-files" role="status">
+              <span class="activity-indicator" aria-hidden="true"></span>
+              <div>
+                <strong>{t("Checking catalog history...")}</strong>
+                <p>{t("Looking for matching folders in the catalog. Large archives can take a while; no files are moved or deleted during this check.")}</p>
+                <div class="progress-track indeterminate" role="progressbar" aria-label={t("Checking catalog history...")}><div style="width: 34%"></div></div>
+                <small aria-hidden="true">{t("Total elapsed")}: {catalogCleanupElapsed} s</small>
+              </div>
+            </div>
+          {:else if catalogCleanup}
             <p>{catalogCleanup.length.toLocaleString()} {t("folders to review")}</p>
             {#if catalogCleanup.length}
               <label class="check-setting"><input type="checkbox" checked={catalogCleanup.every((folder) => catalogCleanupSelected.has(catalogFolderKey(folder)))} onchange={(event) => selectCatalogFolders(catalogCleanup ?? [], event.currentTarget.checked)} /><span>{t("Select all folders")}</span></label>
@@ -1652,7 +1732,7 @@
               <p class="muted">{t("No eligible folders found.")}</p>
             {/if}
           {/if}
-          {#if catalogCleanupResult}
+          {#if catalogCleanupResult && !catalogCleanupLoading}
             <p role="status">{t("Moved to Trash")}: {catalogCleanupResult.trashed}</p>
             {#if catalogCleanupResult.skippedShared}<p>{catalogCleanupResult.skippedShared} {t("shared pictures kept because not every original folder was selected")}</p>{/if}
           {/if}
@@ -1688,7 +1768,7 @@
   {/if}
 {/if}
 
-{#if selected && !comparing}
+{#if selected}
   {@const item = selected.item}
   <div class="lightbox" role="dialog" aria-modal="true" aria-label={item.originalName} tabindex="-1" {@attach focusOnMount}>
     <header class="lightbox-top">
@@ -1749,13 +1829,12 @@
   </div>
 {/if}
 
-{#if selected && comparing && mode !== "viewer"}
-  {@const pair = [selected, comparing]}
+{#if reviewGroup && mode !== "viewer"}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="modal-backdrop" onclick={(event) => { if (!working && event.target === event.currentTarget) closeDetails(); }}>
     <div class="modal comparison" role="dialog" aria-modal="true" aria-label={t("Compare similar pictures")} tabindex="-1" {@attach focusOnMount}>
       <div class="modal-top">
-        <div><small>{t("COMPARE THE ORIGINALS")} · {t("Match")} {reviewIndex + 1} {t("of")} {reviews.length}</small><h2>{t("Which copy would you keep?")}</h2></div>
+        <div><small>{t("COMPARE THE ORIGINALS")} · {t("Group")} {reviewIndex + 1} {t("of")} {reviewTotal}</small><h2>{t("Choose which pictures to keep.")}</h2></div>
         <div class="button-row compact">
           <button class="secondary" title={reviewDisabledReason} disabled={opening || busy || reviews.length < 2} onclick={() => stepReview(-1)}>← {t("Previous")}</button>
           <button class="secondary" title={reviewDisabledReason} disabled={opening || busy || reviews.length < 2} onclick={() => stepReview(1)}>{t("Skip for now")} <kbd>S</kbd></button>
@@ -1764,19 +1843,15 @@
       </div>
       {#if error}<div class="banner error" role="alert"><span>{error}</span><button class="text-button" onclick={() => error = ""}>{t("Dismiss")}</button></div>{/if}
       {@render archiveActivity()}
-      {#if selected.companions.length && comparing.companions.length}
-        <p class="banner warning">{t("Both pictures belong with related files and can't be removed on their own. Choose Keep both / dismiss match to finish this pair.")}</p>
-      {/if}
-      <div class="detail-columns">
-        {#each pair as detail, index (detail.item.id)}
-          {@const other = index === 0 ? comparing : selected}
+      <p class="muted">{t("Pictures can be related indirectly. Each picture set aside must directly match one you keep. Related files always stay together.")}</p>
+      <div class="detail-columns group-columns">
+        {#each groupDetails as detail, index (detail.item.id)}
           <div class="detail-column">
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
             <div class="compare-pane" class:zoomed={!!zoom} style={zoom ? `--zx:${zoom.x}%;--zy:${zoom.y}%` : ""} title={t("Click to zoom both pictures")} onclick={zoomAt} onmousemove={panZoom}>
               {#if videos[index]?.source}
                 {@const video = videos[index]}
-                {#if index === 0}<video bind:this={firstVideo} src={video.source} controls autoplay onerror={() => videoFailed(index, video.id, video.source)}><track kind="captions" /></video>
-                {:else}<video bind:this={secondVideo} src={video.source} controls autoplay onerror={() => videoFailed(index, video.id, video.source)}><track kind="captions" /></video>{/if}
+                <video src={video.source} controls autoplay onerror={() => videoFailed(index, video.id, video.source)}><track kind="captions" /></video>
               {:else}
                 <Preview item={detail.item} archive={snapshot.root} large />
               {/if}
@@ -1786,48 +1861,46 @@
               {#if videos[index]}<p class="muted" role="status">{t(videos[index].phase === "converting" ? "Preparing a playable copy..." : "Opening video...")}</p>
               {:else}<button class="secondary full" disabled={working} onclick={() => playVideo(detail.item, index)}>▶ {t("Play video")}</button>{/if}
             {/if}
-            <button class="primary keep-button" title={reviewDisabledReason ?? (other.companions.length ? t("Not possible: the other picture belongs with related files (RAW/JPEG, sidecar or Live Photo) and can't be removed on its own.") : undefined)} disabled={opening || busy || !!other.companions.length} onclick={() => resolve(detail.item.id)}>
-              <span>{t("Keep this one")} <kbd>{index + 1}</kbd></span><small title={detail.item.originalName}>{detail.item.originalName}</small>
-            </button>
-            {#if other.companions.length && !detail.companions.length}<p class="muted">{t("Not possible: the other picture belongs with related files (RAW/JPEG, sidecar or Live Photo) and can't be removed on its own.")}</p>{/if}
+            <label class="check-setting"><input type="checkbox" checked={!discarded.includes(detail.item.id)} disabled={opening || busy || !!detail.companions.length} onchange={() => toggleDiscard(detail.item.id)} /><span><strong>#{groupOffset + index + 1} · {t("Keep this picture")}</strong><small>{detail.item.originalName} · {detail.item.media.width} × {detail.item.media.height} · {bytes(detail.item.media.bytes)}</small><small>{formatDate(detail.item.media.date)} · {dateSourceLabel(detail.item.media.dateSource)} · {detail.item.media.kind.toUpperCase()}</small><small>{t("Direct matches")}: {reviewGroup.links[index]?.numbers.map((number) => `#${number}`).join(", ")}{reviewGroup.links[index]?.more ? "…" : ""}</small>{#if detail.companions.length}<small>{t("Related files must stay together")}</small>{/if}</span></label>
+            <details><summary>{t("Original folders")}</summary>{#each detail.sources as source}<code>{source.album} / {source.relative}</code>{/each}</details>
           </div>
         {/each}
       </div>
-      <button class="secondary comparison-dismiss" title={reviewDisabledReason} disabled={opening || busy} onclick={() => resolve(null)}>{t("Keep both / dismiss match")} <kbd>B</kbd></button>
-      {#if videos[0]?.source && videos[1]?.source}<div class="button-row"><button class="secondary" onclick={() => run(async () => { if (firstVideo && secondVideo) { firstVideo.currentTime = 0; secondVideo.currentTime = 0; await Promise.all([firstVideo.play(), secondVideo.play()]); } })}>{t("Play both from start")}</button><button class="secondary" onclick={() => { firstVideo?.pause(); secondVideo?.pause(); }}>{t("Pause both")}</button></div>{/if}
-      <table class="difference-table">
-        <tbody>
-          {#each [
-            { label: t("Resolution"), values: pair.map((d) => `${d.item.media.width} × ${d.item.media.height}`), higher: pictureComparison?.resolution.substantiallyHigher, hint: t("at least 2x pixels") },
-            { label: t("File size"), values: pair.map((d) => bytes(d.item.media.bytes)), higher: pictureComparison?.size.substantiallyHigher, hint: t("at least 2x size") },
-            { label: t("Type"), values: pair.map((d) => `${d.item.media.kind.toUpperCase()} · ${d.item.originalName.split(".").pop()?.toUpperCase() ?? ""}`) },
-            { label: t("Date"), values: pair.map((d) => formatDate(d.item.media.date)), notes: pair.map((d) => dateSourceLabel(d.item.media.dateSource)) },
-            { label: t("Original folders"), values: pair.map((d) => d.item.albums.join(" · ") || "—") },
-            { label: t("Related files"), values: pair.map((d) => d.companions.length ? t("Yes, kept together") : "—") },
-            { label: t("Location in archive"), values: pair.map((d) => d.item.path), code: true },
-          ] as row (row.label)}
-            <tr class:differs={row.values[0] !== row.values[1]}>
-              <th scope="row">{row.label}</th>
-              {#each row.values as value, index}
-                <td class:quality-higher={row.higher === index}>{#if row.code}<code>{value}</code>{:else}{value}{/if}{#if row.higher === index} <small>({row.hint})</small>{/if}{#if row.notes}<small class="cell-note">{row.notes[index]}</small>{/if}</td>
-              {/each}
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-      {#if pictureComparison && pictureComparison.resolution.higher !== null && pictureComparison.size.higher !== null && pictureComparison.resolution.higher !== pictureComparison.size.higher}
-        <p class="muted">{t("Resolution and file size favor different pictures, so neither is recommended.")}</p>
+      {#if reviewGroup.count > 8}<div class="button-row"><button class="secondary" disabled={opening || groupOffset === 0} onclick={() => groupPage(groupOffset - 8)}>← {t("Previous pictures")}</button><span>{groupOffset + 1}–{Math.min(groupOffset + 8, reviewGroup.count)} / {reviewGroup.count}</span><button class="secondary" disabled={opening || groupOffset + 8 >= reviewGroup.count} onclick={() => groupPage(groupOffset + 8)}>{t("Next pictures")} →</button></div>{/if}
+      <div class="button-row"><button class="primary" title={reviewDisabledReason} disabled={opening || busy} onclick={resolveGroup}>{discarded.length ? t("Keep selected and set aside the rest") : t("Keep all and dismiss matches")}</button><span>{discarded.length} {t("pictures to set aside")}</span></div>
+      <p class="muted">{t("Set-aside pictures become spare copies that can be restored. Nothing is permanently deleted.")}</p>
+      {#if videos.filter((video) => video?.source).length === 2}
+        <div class="button-row"><button class="secondary" onclick={() => run(async () => { const playing = [...document.querySelectorAll<HTMLVideoElement>(".comparison video")]; for (const video of playing) video.currentTime = 0; await Promise.all(playing.map((video) => video.play())); })}>{t("Play both from start")}</button><button class="secondary" onclick={() => { for (const video of document.querySelectorAll<HTMLVideoElement>(".comparison video")) video.pause(); }}>{t("Pause both")}</button></div>
+      {/if}
+      {#if pictureComparison && groupDetails.length === 2}
+        <table class="difference-table">
+          <tbody>
+            {#each [
+              { label: t("Resolution"), values: groupDetails.map((d) => `${d.item.media.width} × ${d.item.media.height}`), higher: pictureComparison.resolution.substantiallyHigher, hint: t("at least 2x pixels") },
+              { label: t("File size"), values: groupDetails.map((d) => bytes(d.item.media.bytes)), higher: pictureComparison.size.substantiallyHigher, hint: t("at least 2x size") },
+              { label: t("Type"), values: groupDetails.map((d) => `${d.item.media.kind.toUpperCase()} · ${d.item.originalName.split(".").pop()?.toUpperCase() ?? ""}`) },
+              { label: t("Date"), values: groupDetails.map((d) => formatDate(d.item.media.date)), notes: groupDetails.map((d) => dateSourceLabel(d.item.media.dateSource)) },
+              { label: t("Original folders"), values: groupDetails.map((d) => d.item.albums.join(" · ") || "—") },
+              { label: t("Related files"), values: groupDetails.map((d) => d.companions.length ? t("Yes, kept together") : "—") },
+              { label: t("Location in archive"), values: groupDetails.map((d) => d.item.path), code: true },
+            ] as row (row.label)}
+              <tr class:differs={row.values[0] !== row.values[1]}>
+                <th scope="row">{row.label}</th>
+                {#each row.values as value, index}
+                  <td class:quality-higher={row.higher === index}>{#if row.code}<code>{value}</code>{:else}{value}{/if}{#if row.higher === index} <small>({row.hint})</small>{/if}{#if row.notes}<small class="cell-note">{row.notes[index]}</small>{/if}</td>
+                {/each}
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        {#if pictureComparison.resolution.higher !== null && pictureComparison.size.higher !== null && pictureComparison.resolution.higher !== pictureComparison.size.higher}<p class="muted">{t("Resolution and file size favor different pictures, so neither is recommended.")}</p>{/if}
       {/if}
       <details>
         <summary>{t("Why were these matched?")}</summary>
-        {#if currentReview?.reason}<p class="muted">{currentReview.reason}</p>{/if}
-        <p class="muted">{t("Keeping one picture removes the other from your library. A spare copy is kept, so you can always restore it. Keep both / dismiss match leaves both in your library and clears this pair.")}</p>
-        <p class="muted">{t("Highlighted measurements are at least twice as large. File size and pixel count do not guarantee better quality; compare the originals before choosing.")}</p>
-        {#each pair as detail}
-          <p class="source-history"><strong>{detail.item.originalName}</strong>{#each detail.sources as source}<code>{source.album} / {source.relative}</code>{/each}</p>
-        {/each}
+        {#each reviewGroup.reasons as reason}<p class="muted">{reason}</p>{/each}
+        <p class="muted">{t("File size and pixel count do not guarantee better quality; compare the originals before choosing.")}</p>
       </details>
-      <p class="key-hint">{t("1 / 2 keep · B keep both · ← → previous / next match · Z zoom · Esc close")}</p>
+      <p class="key-hint">{t("1–8 toggle visible pictures · B keep all · ← → previous / next group · Z zoom · Esc close")}</p>
     </div>
   </div>
 {/if}
@@ -1906,7 +1979,7 @@
 
 {#if undoAction}
   <div class="toast" role="status">
-    <span>{t("Kept")} <strong>{undoAction.keptName}</strong>. {t("The duplicate was removed; a spare copy is kept.")}</span>
+    <span>{undoAction.moved} {t("pictures set aside as restorable spare copies.")}</span>
     <button class="text-button" title={busyReason} disabled={busy} onclick={undoKeep}>{t("Undo")}</button>
     <button class="text-button" aria-label={t("Dismiss")} onclick={() => { clearTimeout(undoTimer); undoAction = null; }}>×</button>
   </div>
@@ -2076,7 +2149,6 @@
   .review-row:focus-visible { outline: 3px solid #879c70; outline-offset: 3px; }
   .review-description { flex: 1; min-width: 0; }
   .review-row strong { font-size: calc(14px * var(--text-scale, 1)); }
-  .review-description > span { display: block; font-size: calc(13px * var(--text-scale, 1)); line-height: 1.6; color: var(--hc-muted, #8b977f); margin: 7px 0 0; }
   .review-thumbnails { display: flex; gap: 6px; flex-shrink: 0; }
   .review-thumbnails :global(.preview) { width: 72px; height: 72px; }
   .review-thumbnails :global(.placeholder) { padding: 4px; gap: 2px; }
@@ -2109,12 +2181,12 @@
   footer { font-size: calc(11px * var(--text-scale, 1)); color: var(--hc-muted, #a7af9a); padding-top: 27px; display: flex; justify-content: space-between; gap: 20px; }
   .modal-backdrop { position: fixed; inset: 0; background: #13261acf; z-index: 10; overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 30px 22px; }
   .modal { position: relative; margin: 0; border: 0; color: inherit; width: min(760px, 100%); background: #fffdf8; border-radius: 15px; padding: 27px; box-shadow: 0 20px 100px #0003; max-height: calc(100vh - 60px); overflow: auto; }
-  .comparison-dismiss { width: 100%; margin-top: 8px; }
   .modal-top { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
   .modal-top small { font-size: calc(10px * var(--text-scale, 1)); letter-spacing: .12em; color: var(--hc-muted, #92a17f); }
   .modal-top h2 { font-family: Georgia, serif; font-weight: 400; margin: 8px 0 0; }
   .detail-columns { display: grid; grid-template-columns: 1fr; gap: 24px; }
   .comparison .detail-columns { grid-template-columns: 1fr 1fr; }
+  .comparison .group-columns { grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); }
   .detail-column { min-width: 0; }
   .source-history { margin-top: 12px; font-size: calc(13px * var(--text-scale, 1)); display: flex; flex-direction: column; gap: 5px; }
   .source-history code, .source-history small { font-size: calc(12px * var(--text-scale, 1)); color: var(--hc-muted, #96a386); }
@@ -2239,17 +2311,13 @@
   .compare-pane.zoomed { cursor: zoom-out; }
   .compare-pane.zoomed :global(img) { transform: scale(2.6); transform-origin: var(--zx) var(--zy); }
   .compare-pane video { margin: 0; }
-  .keep-button { width: 100%; flex-direction: column; gap: 4px; margin-top: 10px; white-space: normal; padding: 12px 16px; font-size: calc(14px * var(--text-scale, 1)); }
-  .keep-button small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: calc(13px * var(--text-scale, 1)); font-weight: 400; opacity: .85; }
   .detail-column > .muted { margin: 6px 0 0; }
-  .comparison-dismiss { width: 100%; margin-top: 10px; }
   .quality-label { position: absolute; top: 10px; left: 10px; padding: 5px 9px; border-radius: 6px; background: #e1efd8; color: #24521f; font-size: calc(14px * var(--text-scale, 1)); font-weight: 700; box-shadow: 0 2px 8px #0002; }
   .quality-higher { color: #2c6a26; font-weight: 700; }
   .quality-higher small { font-size: calc(13px * var(--text-scale, 1)); }
   .difference-table { width: 100%; border-collapse: collapse; margin-top: 18px; font-size: calc(14px * var(--text-scale, 1)); table-layout: fixed; }
-  .difference-table th { width: 150px; text-align: left; font-weight: 600; color: var(--hc-muted, #75816c); padding: 8px 10px 8px 0; vertical-align: top; }
+  .difference-table th { width: 150px; text-align: left; font-weight: 600; color: var(--hc-muted, #75816c); padding: 8px 10px 8px 0; vertical-align: top; border-top: 1px solid #edf0e6; }
   .difference-table td { padding: 8px 10px; vertical-align: top; overflow-wrap: anywhere; border-top: 1px solid #edf0e6; }
-  .difference-table th { border-top: 1px solid #edf0e6; }
   .difference-table tr.differs td { background: #f7f9f1; font-weight: 600; }
   .difference-table code { font-size: calc(13px * var(--text-scale, 1)); font-weight: 400; color: var(--hc-muted, #5f7850); }
   .difference-table td > small:not(.cell-note) { margin-left: 5px; }

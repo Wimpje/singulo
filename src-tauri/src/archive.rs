@@ -11,7 +11,9 @@ use uuid::Uuid;
 
 mod xmp;
 mod cleanup;
+mod review;
 pub use xmp::XmpSummary;
+pub use review::{ReviewGroupPage, ReviewGroupDetail, ReviewResult};
 
 #[derive(Serialize, Deserialize)]
 struct Operation {
@@ -336,6 +338,25 @@ mod performance_tests {
         println!(
             "100k catalog: seed={seed_time:?}, migration={migration_time:?}, deep page={page_time:?}, indexed companion link={link_time:?}, streamed backup={backup_time:?}"
         );
+        archive.connection.execute_batch(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<50000)
+             INSERT INTO reviews SELECT printf('photo-%06d',x*2-1),printf('photo-%06d',x*2),'similar' FROM n;"
+        ).unwrap();
+        let start = Instant::now();
+        let first = serde_json::to_value(archive.review_groups(false, 0).unwrap()).unwrap();
+        let group_time = start.elapsed();
+        assert_eq!(first["total"], 50_000);
+        assert_eq!(first["groups"].as_array().unwrap().len(), 30);
+        let start = Instant::now();
+        let second = serde_json::to_value(archive.review_groups(false, 30).unwrap()).unwrap();
+        let cached_page_time = start.elapsed();
+        assert_eq!(second["groups"].as_array().unwrap().len(), 30);
+        let group = &first["groups"][0];
+        archive.resolve_review_group(false, group["id"].as_str().unwrap(), group["token"].as_str().unwrap(), &[]).unwrap();
+        let start = Instant::now();
+        let refreshed = serde_json::to_value(archive.review_groups(false, 0).unwrap()).unwrap();
+        assert_eq!(refreshed["total"], 49_999);
+        println!("100k review: group={group_time:?}, cached page={cached_page_time:?}, post-resolution refresh={:?}", start.elapsed());
     }
 }
 
@@ -359,6 +380,8 @@ pub struct Archive {
     xmp_names: std::sync::Mutex<xmp::DirectoryNames>,
     xmp_work: std::sync::Arc<std::sync::atomic::AtomicBool>,
     xmp_exporting: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    review_index: std::cell::RefCell<Option<review::ReviewIndex>>,
+    review_undo: Option<review::ReviewUndo>,
 }
 
 fn json<T: Serialize + ?Sized>(value: &T) -> Result<String> {
@@ -489,6 +512,8 @@ impl Archive {
             xmp_names: Default::default(),
             xmp_work: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             xmp_exporting: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            review_index: Default::default(),
+            review_undo: None,
         })
     }
 
@@ -653,6 +678,8 @@ impl Archive {
             xmp_names: Default::default(),
             xmp_work: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(xmp_work)),
             xmp_exporting: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(xmp_exporting)),
+            review_index: Default::default(),
+            review_undo: None,
         };
         let version: u32 = archive
             .connection
@@ -1153,6 +1180,7 @@ impl Archive {
     }
 
     fn record_occurrence_inner(&mut self, occurrence: &Occurrence) -> Result<()> {
+        *self.review_index.borrow_mut() = None;
         self.connection
             .execute(
                 "INSERT INTO occurrences(id,source,hash,data,computer_id) VALUES(?1,?2,?3,?4,?5)
@@ -1210,6 +1238,7 @@ impl Archive {
     }
 
     fn store(&mut self, item: &Item) -> Result<()> {
+        *self.review_index.borrow_mut() = None;
         self.connection.execute(
             "INSERT INTO items VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET hash=excluded.hash,state=excluded.state,data=excluded.data",
             params![item.id, item.media.hash, item.state, json(item)?]
@@ -1355,6 +1384,7 @@ impl Archive {
     }
 
     pub fn add_review(&mut self, item: &str, candidate: &str, reason: &str) -> Result<()> {
+        *self.review_index.borrow_mut() = None;
         self.connection
             .execute(
                 "INSERT OR IGNORE INTO reviews VALUES(?1,?2,?3)",
@@ -1383,12 +1413,14 @@ impl Archive {
     }
 
     pub fn dismiss_review(&mut self, item: &str, candidate: &str) -> Result<()> {
+        *self.review_index.borrow_mut() = None;
         self.connection.execute("DELETE FROM reviews WHERE (item=?1 AND candidate=?2) OR (item=?2 AND candidate=?1)",
             params![item, candidate]).map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn transfer_reviews(&mut self, from: &str, to: &str) -> Result<()> {
+        *self.review_index.borrow_mut() = None;
         self.connection
             .execute(
                 "INSERT OR IGNORE INTO reviews
@@ -1670,13 +1702,17 @@ impl Archive {
     }
 
     pub fn restore(&mut self, id: &str) -> Result<()> {
+        self.restore_file(id)?;
+        self.backup()
+    }
+
+    fn restore_file(&mut self, id: &str) -> Result<()> {
         let item = self.item(id)?;
         if item.state != "undo" {
             return Err("Only retained undo copies can be restored.".into());
         }
         let wanted = paths::relative(&item.settings, &item.media, &item.original_name)?;
-        self.relocate(id, wanted, "active", None)?;
-        self.backup()
+        self.relocate(id, wanted, "active", None)
     }
 
     pub fn cleanup_reader(&self) -> Result<Self> {
@@ -1695,6 +1731,8 @@ impl Archive {
             xmp_names: Default::default(),
             xmp_work: self.xmp_work.clone(),
             xmp_exporting: self.xmp_exporting.clone(),
+            review_index: Default::default(),
+            review_undo: None,
         })
     }
 

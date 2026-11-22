@@ -399,6 +399,8 @@ impl Archive {
             xmp_names: Default::default(),
             xmp_work: self.xmp_work.clone(),
             xmp_exporting: self.xmp_exporting.clone(),
+            review_index: Default::default(),
+            review_undo: None,
         })
     }
 

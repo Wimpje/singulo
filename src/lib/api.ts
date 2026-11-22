@@ -148,6 +148,34 @@ export interface Review {
   candidatePreview: PreviewItem;
 }
 
+export interface ReviewGroup {
+  id: string;
+  token: string;
+  count: number;
+  previews: PreviewItem[];
+}
+
+export interface ReviewGroupPage {
+  total: number;
+  groups: ReviewGroup[];
+}
+
+export interface ReviewGroupDetail {
+  id: string;
+  token: string;
+  count: number;
+  items: string[];
+  reasons: string[];
+  links: { numbers: number[]; more: boolean }[];
+}
+
+export interface ReviewResult {
+  token: string;
+  moved: number;
+  errors: string[];
+  retryable: boolean;
+}
+
 export interface Job {
   id: string;
   roots: string[];

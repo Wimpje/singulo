@@ -145,6 +145,170 @@ fn catalog_cleanup_item(archive: &mut Archive, source: &Path, id: &str, kind: &s
 }
 
 #[test]
+fn review_groups_hide_only_suspicious_origins_before_grouping() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("archive");
+    fs::create_dir(&root).unwrap();
+    let mut archive = Archive::open(&root).unwrap();
+    let source = temp.path().join("sources");
+    for id in ["a", "b", "c", "d"] {
+        catalog_cleanup_item(&mut archive, &source.join(format!("family/{id}.jpg")), id, "photo", 600, 600);
+    }
+    let mut hidden = catalog_cleanup_item(&mut archive, &source.join("cache/h.jpg"), "h", "photo", 600, 600);
+    catalog_cleanup_item(&mut archive, &source.join("cache/h.dng"), "h-raw", "raw", 600, 600);
+    catalog_cleanup_item(&mut archive, &source.join("small/s.jpg"), "s", "photo", 300, 300);
+    archive.add_review("a", "b", "match").unwrap();
+    archive.add_review("c", "d", "match").unwrap();
+    archive.add_review("a", "h", "match").unwrap();
+    archive.add_review("h", "c", "match").unwrap();
+    archive.add_review("a", "s", "small match").unwrap();
+    let page = serde_json::to_value(archive.review_groups(false, 0).unwrap()).unwrap();
+    assert_eq!(page["total"], 2);
+    let all = serde_json::to_value(archive.review_groups(true, 0).unwrap()).unwrap();
+    assert_eq!(all["total"], 1);
+    assert_eq!(all["groups"][0]["count"], 6);
+
+    let extra = source.join("family/h.jpg");
+    fs::copy(&hidden.source, &extra).unwrap();
+    hidden.id = "other-h".into();
+    hidden.source = extra.to_string_lossy().into();
+    hidden.identity = media::identity(&extra).unwrap();
+    archive.record_occurrence(&hidden).unwrap();
+    let page = serde_json::to_value(archive.review_groups(false, 0).unwrap()).unwrap();
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["groups"][0]["count"], 5);
+}
+
+#[test]
+fn review_groups_do_not_move_companions_apart() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("archive");
+    fs::create_dir(&root).unwrap();
+    let mut archive = Archive::open(&root).unwrap();
+    catalog_cleanup_item(&mut archive, &temp.path().join("family/a.jpg"), "a", "photo", 600, 600);
+    catalog_cleanup_item(&mut archive, &temp.path().join("family/a.dng"), "raw", "raw", 600, 600);
+    catalog_cleanup_item(&mut archive, &temp.path().join("family/b.jpg"), "b", "photo", 600, 600);
+    archive.add_review("a", "b", "match").unwrap();
+    let page = serde_json::to_value(archive.review_groups(false, 0).unwrap()).unwrap();
+    let group = &page["groups"][0];
+    assert!(archive.resolve_review_group(false, group["id"].as_str().unwrap(), group["token"].as_str().unwrap(), &["a".into()]).is_err());
+    assert_eq!(archive.item("a").unwrap().state, "active");
+    assert_eq!(archive.item("raw").unwrap().state, "active");
+}
+
+#[test]
+fn review_group_details_page_pictures_and_keep_direct_match_numbers() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("archive");
+    fs::create_dir(&root).unwrap();
+    let mut archive = Archive::open(&root).unwrap();
+    for index in 0..10 {
+        let id = format!("p{index}");
+        catalog_cleanup_item(&mut archive, &temp.path().join(format!("family/{id}.jpg")), &id, "photo", 600, 600);
+        if index > 0 {
+            archive.add_review(&format!("p{}", index - 1), &id, "match").unwrap();
+        }
+    }
+    let page = serde_json::to_value(archive.review_groups(false, 0).unwrap()).unwrap();
+    let group = &page["groups"][0];
+    let id = group["id"].as_str().unwrap();
+    let token = group["token"].as_str().unwrap();
+    let first = serde_json::to_value(archive.review_group_detail(false, id, token, 0).unwrap()).unwrap();
+    let second = serde_json::to_value(archive.review_group_detail(false, id, token, 8).unwrap()).unwrap();
+    assert_eq!(first["count"], 10);
+    assert_eq!(first["items"].as_array().unwrap().len(), 8);
+    assert_eq!(second["items"].as_array().unwrap().len(), 2);
+    assert_eq!(second["links"][0]["numbers"], serde_json::json!([8, 10]));
+}
+
+#[test]
+fn review_groups_require_direct_matches_and_can_be_undone() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("archive");
+    fs::create_dir(&root).unwrap();
+    let mut archive = Archive::open(&root).unwrap();
+    for id in ["a", "b", "c"] {
+        catalog_cleanup_item(&mut archive, &temp.path().join(format!("family/{id}.jpg")), id, "photo", 600, 600);
+    }
+    archive.add_review("a", "b", "first").unwrap();
+    archive.add_review("b", "c", "second").unwrap();
+    let page = serde_json::to_value(archive.review_groups(false, 0).unwrap()).unwrap();
+    let group = &page["groups"][0];
+    let id = group["id"].as_str().unwrap();
+    let token = group["token"].as_str().unwrap();
+    assert!(archive.resolve_review_group(false, id, token, &["b".into(), "c".into()]).is_err());
+    assert_eq!(archive.item("b").unwrap().state, "active");
+    let outcome = serde_json::to_value(archive.resolve_review_group(false, id, token, &["a".into(), "c".into()]).unwrap()).unwrap();
+    assert_eq!(outcome["moved"], 2);
+    assert_eq!(archive.item("a").unwrap().state, "undo");
+    assert_eq!(archive.item("c").unwrap().state, "undo");
+    assert_eq!(serde_json::to_value(archive.review_groups(false, 0).unwrap()).unwrap()["total"], 0);
+    assert!(archive.resolve_review_group(false, id, token, &[]).is_err());
+    archive.undo_review_group(outcome["token"].as_str().unwrap()).unwrap();
+    assert_eq!(archive.item("a").unwrap().state, "active");
+    assert_eq!(archive.item("c").unwrap().state, "active");
+    assert_eq!(serde_json::to_value(archive.review_groups(false, 0).unwrap()).unwrap()["total"], 1);
+    assert_eq!(archive.reviews().unwrap().len(), 2);
+}
+
+#[test]
+fn review_group_partial_failure_keeps_original_links_and_allows_undo() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("archive");
+    fs::create_dir(&root).unwrap();
+    let mut archive = Archive::open(&root).unwrap();
+    for id in ["a", "b", "c"] {
+        catalog_cleanup_item(&mut archive, &temp.path().join(format!("family/{id}.jpg")), id, "photo", 600, 600);
+    }
+    archive.add_review("a", "b", "first").unwrap();
+    archive.add_review("b", "c", "second").unwrap();
+    let page = serde_json::to_value(archive.review_groups(false, 0).unwrap()).unwrap();
+    let group = &page["groups"][0];
+    fs::write(root.join(archive.item("c").unwrap().path), b"changed").unwrap();
+    let result = serde_json::to_value(archive.resolve_review_group(
+        false, group["id"].as_str().unwrap(), group["token"].as_str().unwrap(),
+        &["a".into(), "c".into()],
+    ).unwrap()).unwrap();
+    assert_eq!(result["moved"], 1);
+    assert!(!result["errors"].as_array().unwrap().is_empty());
+    assert_eq!(archive.item("a").unwrap().state, "undo");
+    assert_eq!(archive.item("c").unwrap().state, "active");
+    archive.undo_review_group(result["token"].as_str().unwrap()).unwrap();
+    assert_eq!(archive.item("a").unwrap().state, "active");
+    assert_eq!(archive.reviews().unwrap().len(), 2);
+}
+
+#[test]
+fn review_group_does_not_restore_over_a_pending_operation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("archive");
+    fs::create_dir(&root).unwrap();
+    let mut archive = Archive::open(&root).unwrap();
+    for id in ["a", "b"] {
+        catalog_cleanup_item(&mut archive, &temp.path().join(format!("family/{id}.jpg")), id, "photo", 600, 600);
+    }
+    archive.add_review("a", "b", "match").unwrap();
+    let page = serde_json::to_value(archive.review_groups(false, 0).unwrap()).unwrap();
+    let group = &page["groups"][0];
+    let result = serde_json::to_value(archive.resolve_review_group(
+        false, group["id"].as_str().unwrap(), group["token"].as_str().unwrap(), &["a".into()],
+    ).unwrap()).unwrap();
+    let connection = rusqlite::Connection::open(root.join(".singulo/catalog.sqlite")).unwrap();
+    connection.execute(
+        "INSERT INTO operations VALUES('pending-test', ?1)",
+        [serde_json::json!({"item": {"id": "a"}}).to_string()],
+    ).unwrap();
+    let token = result["token"].as_str().unwrap();
+    let blocked = serde_json::to_value(archive.undo_review_group(token).unwrap()).unwrap();
+    assert_eq!(blocked["retryable"], true);
+    assert!(!blocked["errors"].as_array().unwrap().is_empty());
+    assert_eq!(archive.item("a").unwrap().state, "undo");
+    connection.execute("DELETE FROM operations WHERE id='pending-test'", []).unwrap();
+    archive.undo_review_group(token).unwrap();
+    assert_eq!(archive.item("a").unwrap().state, "active");
+}
+
+#[test]
 fn catalog_cleanup_checks_history_and_preserves_copies_on_failure() {
     let temp = tempfile::Builder::new().prefix(".filter-test-").tempdir_in(".").unwrap();
     let archive_root = temp.path().join("archive");

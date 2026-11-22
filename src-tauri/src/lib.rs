@@ -935,6 +935,30 @@ async fn review_list(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>> {
 }
 
 #[tauri::command]
+async fn review_groups(app: tauri::AppHandle, show_hidden: bool, offset: usize) -> Result<archive::ReviewGroupPage> {
+    read(app, move |app| {
+        read_catalog(&app.state::<AppState>(), |archive| archive.review_groups(show_hidden, offset))
+    }).await
+}
+
+#[tauri::command]
+async fn review_group_detail(app: tauri::AppHandle, show_hidden: bool, id: String, token: String, offset: usize) -> Result<archive::ReviewGroupDetail> {
+    read(app, move |app| {
+        read_catalog(&app.state::<AppState>(), |archive| archive.review_group_detail(show_hidden, &id, &token, offset))
+    }).await
+}
+
+#[tauri::command]
+async fn resolve_review_group(app: tauri::AppHandle, show_hidden: bool, id: String, token: String, discarded: Vec<String>) -> Result<archive::ReviewResult> {
+    change(app, move |archive| archive.resolve_review_group(show_hidden, &id, &token, &discarded)).await
+}
+
+#[tauri::command]
+async fn undo_review_group(app: tauri::AppHandle, token: String) -> Result<archive::ReviewResult> {
+    change(app, move |archive| archive.undo_review_group(&token)).await
+}
+
+#[tauri::command]
 async fn resolve_review(
     app: tauri::AppHandle,
     item: String,
@@ -1220,6 +1244,10 @@ pub fn run() {
             clear_import_preview,
             clear_import,
             review_list,
+            review_groups,
+            review_group_detail,
+            resolve_review_group,
+            undo_review_group,
             resolve_review,
             undo_review,
             restore_item,
