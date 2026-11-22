@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, atomic::AtomicBool};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, AtomicU64},
+};
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -90,6 +93,9 @@ pub struct Progress {
     pub folders: Vec<FolderProgress>,
     #[serde(default)]
     pub timings: ImportTimings,
+    /// Recent source read speed in bytes per second (0 when idle or paused).
+    #[serde(default)]
+    pub read_rate: u64,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -136,6 +142,7 @@ impl Default for Progress {
             warnings: Vec::new(),
             folders: Vec::new(),
             timings: ImportTimings::default(),
+            read_rate: 0,
         }
     }
 }
@@ -217,6 +224,7 @@ pub struct AppState {
     pub discovery_gate: Mutex<()>,
     pub pause: AtomicBool,
     pub queue: Mutex<std::collections::VecDeque<QueuedJob>>,
+    pub read_rate: AtomicU64,
 }
 
 pub struct QueuedJob {
@@ -271,6 +279,7 @@ impl Default for AppState {
             discovery_gate: Mutex::new(()),
             pause: AtomicBool::new(false),
             queue: Mutex::new(std::collections::VecDeque::new()),
+            read_rate: AtomicU64::new(0),
         }
     }
 }

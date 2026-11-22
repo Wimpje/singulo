@@ -1,5 +1,5 @@
 use crate::model::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(windows)]
 use std::{
     os::windows::io::OwnedHandle,
@@ -14,11 +14,21 @@ pub const CANCELLED: &str = "Import cancelled.";
 #[derive(Default)]
 pub struct Cancellation {
     requested: AtomicBool,
+    read_bytes: AtomicU64,
     #[cfg(windows)]
     source_thread: Mutex<Option<SourceThread>>,
 }
 
 impl Cancellation {
+    /// Counts source bytes read for the import throughput indicator.
+    pub fn count_read(&self, bytes: usize) {
+        self.read_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    pub fn read_bytes(&self) -> u64 {
+        self.read_bytes.load(Ordering::Relaxed)
+    }
+
     pub fn requested(&self) -> bool {
         self.requested.load(Ordering::SeqCst)
     }

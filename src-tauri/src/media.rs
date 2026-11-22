@@ -138,6 +138,9 @@ fn hash_reader(file: &mut File, cancel: Option<&Cancellation>) -> Result<String>
         if count == 0 {
             break;
         }
+        if let Some(cancel) = cancel {
+            cancel.count_read(count);
+        }
         digest.update(&buffer[..count]);
     }
     Ok(digest.finalize().to_hex().to_string())

@@ -52,6 +52,7 @@ export interface Progress {
   warnings?: string[];
   folders?: FolderProgress[];
   timings?: ImportTimings;
+  readRate?: number;
 }
 
 export interface FolderProgress {

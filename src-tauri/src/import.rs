@@ -59,6 +59,7 @@ fn buffer_source(path: &Path, size: u64, identity: &str, cancel: &Cancellation) 
             if count == 0 {
                 break;
             }
+            cancel.count_read(count);
             bytes.extend_from_slice(&buffer[..count]);
         }
         if bytes.len() as u64 != size || media::identity(path)? != identity {
@@ -85,6 +86,11 @@ pub fn update(app: &tauri::AppHandle, progress: &Progress) -> Result<()> {
         return Ok(());
     }
     *previous = progress.clone();
+    previous.read_rate = if previous.status == "importing" {
+        state.read_rate.load(Ordering::Relaxed)
+    } else {
+        0
+    };
     if status == "cancelling" {
         mark_cancelling(&mut previous);
     }
@@ -92,8 +98,117 @@ pub fn update(app: &tauri::AppHandle, progress: &Progress) -> Result<()> {
     app.emit("progress", &*previous).map_err(|e| e.to_string())
 }
 
+/// Samples source bytes read about once per second and publishes a smoothed
+/// rate, so long copies from slow shares still show live speed between files.
+pub fn sample_read_rate(app: &tauri::AppHandle, stop: &std::sync::atomic::AtomicBool) {
+    let state = app.state::<AppState>();
+    let mut samples = VecDeque::from([(Instant::now(), state.cancel.read_bytes())]);
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(1000));
+        let now = (Instant::now(), state.cancel.read_bytes());
+        samples.push_back(now);
+        if samples.len() > 4 {
+            samples.pop_front();
+        }
+        let (since, from) = samples[0];
+        let seconds = now.0.duration_since(since).as_secs_f64();
+        let rate = if seconds > 0.0 {
+            (now.1.saturating_sub(from) as f64 / seconds) as u64
+        } else {
+            0
+        };
+        state.read_rate.store(rate, Ordering::Relaxed);
+        let Ok(mut progress) = state.progress.lock() else {
+            break;
+        };
+        let rate = if progress.status == "importing" { rate } else { 0 };
+        if progress.read_rate != rate {
+            progress.read_rate = rate;
+            if let Err(error) = app.emit("progress", &*progress) {
+                eprintln!("Could not publish import speed: {error}");
+            }
+        }
+    }
+    state.read_rate.store(0, Ordering::Relaxed);
+}
+
 fn active_status(status: &str) -> bool {
     matches!(status, "scanning" | "importing" | "paused")
+}
+
+/// Attempts per file (including the first) after a dropped connection; waiting for an
+/// unreachable share to return does not use up attempts.
+const SOURCE_ATTEMPTS: usize = 3;
+
+/// OS error codes that mean a network share or removable drive went away mid-read.
+fn connection_error(error: &str) -> bool {
+    #[cfg(windows)]
+    const CODES: &[i32] = &[21, 51, 53, 54, 55, 59, 64, 67, 121, 1167, 1231, 1232, 1236, 2250];
+    #[cfg(target_os = "macos")]
+    const CODES: &[i32] = &[6, 50, 51, 52, 53, 54, 57, 60, 64, 65, 70];
+    #[cfg(not(any(windows, target_os = "macos")))]
+    const CODES: &[i32] = &[6, 100, 101, 102, 103, 104, 107, 110, 112, 113, 116];
+    error.match_indices("(os error ").any(|(start, marker)| {
+        let digits: String = error[start + marker.len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.parse().is_ok_and(|code: i32| CODES.contains(&code))
+    })
+}
+
+fn source_reachable(root: &Path, cancel: &Cancellation) -> bool {
+    cancel
+        .source_io(|| std::fs::read_dir(root).map(drop).map_err(|e| e.to_string()))
+        .is_ok()
+}
+
+/// A failure is worth retrying when it looks like a dropped connection or the source
+/// folder itself has disappeared (unplugged drive, unmounted share).
+fn source_lost(root: &Path, error: &str, cancel: &Cancellation) -> bool {
+    error != CANCELLED
+        && !cancel.requested()
+        && (connection_error(error) || !source_reachable(root, cancel))
+}
+
+/// Waits until a source folder is reachable again. A brief blip gets a short pause so
+/// the connection can settle; a missing share is polled until it returns or the user cancels.
+fn wait_for_source(app: &tauri::AppHandle, progress: &mut Progress, root: &Path) -> Result<()> {
+    let state = app.state::<AppState>();
+    let (phase, current) = (progress.phase.clone(), progress.current.clone());
+    progress.phase = "reconnecting".into();
+    progress.current = root.to_string_lossy().into();
+    let mut settle = 0;
+    loop {
+        for _ in 0..10 {
+            if state.cancel.requested() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        if state.cancel.requested() {
+            break;
+        }
+        if source_reachable(root, &state.cancel) {
+            settle += 1;
+            if settle >= 2 {
+                break;
+            }
+        } else {
+            settle = 0;
+        }
+        update(app, progress)?;
+    }
+    progress.phase = phase;
+    progress.current = current;
+    update(app, progress)
+}
+
+/// Files whose source dropped out after hashing; they get another pass once it returns.
+struct SourceRetry<'a> {
+    files: Vec<(&'a Path, &'a Path)>,
+    lost: Option<&'a Path>,
+    allowed: bool,
 }
 
 pub fn mark_cancelling(progress: &mut Progress) -> bool {
@@ -436,263 +551,106 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                 .recv()
                 .map_err(|_| "Decoder workers stopped unexpectedly.".to_string())
         };
-        // Show the first results promptly, then amortize metadata startup across larger batches.
-        let first_batch = files.len().min(4);
-        'batches: for batch in files[..first_batch]
-            .chunks(4)
-            .chain(files[first_batch..].chunks(64))
-        {
-            if shared.cancel.requested() {
-                break 'batches;
-            }
-            if shared.cancel.requested() {
-                break;
-            }
-            enum Prepped<'b> {
-                Finished(&'b Path, &'b Path, Result<bool>),
-                NeedsInspect(&'b Path, &'b Path, String, String),
-            }
-            let mut prepped = Vec::with_capacity(batch.len());
-            let mut metadata_paths = Vec::new();
-            let mut exact_occurrences = Vec::new();
-            for (root, path) in batch {
+        let mut pending: Vec<(&Path, &Path)> = files
+            .iter()
+            .map(|(root, path)| (root.as_path(), path.as_path()))
+            .collect();
+        let mut retry = SourceRetry {
+            files: Vec::new(),
+            lost: None,
+            allowed: true,
+        };
+        for pass in 0..SOURCE_ATTEMPTS {
+            retry.allowed = pass + 1 < SOURCE_ATTEMPTS;
+            // Show the first results promptly, then amortize metadata startup across larger batches.
+            let first_batch = if pass == 0 { pending.len().min(4) } else { 0 };
+            'batches: for batch in pending[..first_batch]
+                .chunks(4)
+                .chain(pending[first_batch..].chunks(64))
+            {
                 if shared.cancel.requested() {
-                    break;
+                    break 'batches;
                 }
-                while shared.pause.load(Ordering::Relaxed) && !shared.cancel.requested() {
-                    progress.status = "paused".into();
-                    update(app, &progress)?;
-                    std::thread::sleep(Duration::from_millis(200));
+                enum Prepped<'b> {
+                    Finished(&'b Path, &'b Path, Result<bool>),
+                    NeedsInspect(&'b Path, &'b Path, String, String),
                 }
-                if shared.cancel.requested() {
-                    break;
-                }
-                progress.status = "importing".into();
-                progress.phase = "hashing".into();
-                progress.current = path.to_string_lossy().into();
-                progress.timings.total_ms = started.elapsed().as_millis() as u64;
-                update(app, &progress)?;
-                let hashing = Instant::now();
-                let checked: Result<Option<(String, String)>> = (|| {
-                    let (identity, hash) = shared
-                        .cancel
-                        .source_io(|| media::hash_with_identity(path, &shared.cancel))?;
-                    shared.cancel.check()?;
-                    let guard = shared.archive.lock().map_err(|e| e.to_string())?;
-                    let archive = guard.as_ref().ok_or("Archive is not open.")?;
-                    if let Some(exact) = archive.exact_cached(&hash)? {
-                        if shared.cancel.source_io(|| media::identity(path))? != identity {
-                            return Err(
-                                "Source changed before duplicate confirmation; retry it.".into()
-                            );
-                        }
-                        let occ = occurrence(
-                            archive,
-                            provenance_root(job, root),
-                            path,
-                            &identity,
-                            &hash,
-                            exact.media.bytes,
-                            exact.id,
-                        )?;
-                        exact_occurrences.push(occ);
-                        return Ok(None);
+                let mut prepped = Vec::with_capacity(batch.len());
+                let mut metadata_paths = Vec::new();
+                let mut exact_occurrences = Vec::new();
+                for &(root, path) in batch {
+                    if shared.cancel.requested() {
+                        break;
                     }
-                    Ok(Some((identity, hash)))
-                })();
-                progress.timings.hash_ms += hashing.elapsed().as_millis() as u64;
-                progress.checked += 1;
-                match checked {
-                    Err(error) => prepped.push(Prepped::Finished(root, path, Err(error))),
-                    Ok(None) => prepped.push(Prepped::Finished(root, path, Ok(true))),
-                    Ok(Some((identity, hash))) => {
-                        if media::kind(path) != Some("sidecar") {
-                            metadata_paths.push(path.clone());
-                        }
-                        prepped.push(Prepped::NeedsInspect(root, path, identity, hash));
-                    }
-                }
-                while let Ok(done) = done_rx.try_recv() {
-                    receive(&mut queue, base, done);
-                }
-                commit_ready(
-                    app,
-                    job,
-                    &mut queue,
-                    &mut base,
-                    &mut progress,
-                    &mut checkpoint,
-                    &mut candidate_cache,
-                )?;
-            }
-            if shared.cancel.requested() {
-                break;
-            }
-            if !exact_occurrences.is_empty() {
-                let writing = Instant::now();
-                let recorded: Result<()> = (|| {
-                    let mut guard = shared.archive.lock().map_err(|e| e.to_string())?;
-                    guard
-                        .as_mut()
-                        .ok_or("Archive is not open.")?
-                        .record_import_occurrences(&job.id, &exact_occurrences)
-                })();
-                progress.timings.placement_ms += writing.elapsed().as_millis() as u64;
-                if let Err(error) = recorded {
-                    for item in &mut prepped {
-                        if let Prepped::Finished(_, _, result @ Ok(true)) = item {
-                            *result = Err(format!(
-                                "Could not record duplicate source history: {error}"
-                            ));
-                        }
-                    }
-                }
-            }
-            let extracting = Instant::now();
-            let metadata = if metadata_paths.is_empty() {
-                Ok(HashMap::new())
-            } else {
-                progress.phase = "metadata".into();
-                progress.batch_files = metadata_paths.len();
-                progress.current.clear();
-                progress.timings.total_ms = started.elapsed().as_millis() as u64;
-                update(app, &progress)?;
-                media::metadata_batch(app, &metadata_paths, &shared.cancel)
-            };
-            progress.timings.metadata_ms += extracting.elapsed().as_millis() as u64;
-            for item in prepped {
-                if shared.cancel.requested() {
-                    break;
-                }
-                let entry = match item {
-                    Prepped::Finished(root, path, result) => Entry {
-                        root,
-                        path,
-                        identity: String::new(),
-                        stage: Stage::Finished(result),
-                        buffered_bytes: 0,
-                        decode_ms: 0,
-                    },
-                    Prepped::NeedsInspect(root, path, identity, hash) => {
-                        progress.phase = if media::kind(path) == Some("raw") {
-                            "raw"
-                        } else {
-                            "decoding"
-                        }
-                        .into();
-                        progress.current = path.to_string_lossy().into();
-                        progress.timings.total_ms = started.elapsed().as_millis() as u64;
+                    while shared.pause.load(Ordering::Relaxed) && !shared.cancel.requested() {
+                        progress.status = "paused".into();
                         update(app, &progress)?;
-                        if shared
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    if shared.cancel.requested() {
+                        break;
+                    }
+                    progress.status = "importing".into();
+                    if let Some(lost) = retry.lost.take() {
+                        wait_for_source(app, &mut progress, lost)?;
+                    }
+                    progress.phase = "hashing".into();
+                    progress.current = path.to_string_lossy().into();
+                    progress.timings.total_ms = started.elapsed().as_millis() as u64;
+                    update(app, &progress)?;
+                    let hashing = Instant::now();
+                    let mut check = || -> Result<Option<(String, String)>> {
+                        let (identity, hash) = shared
                             .cancel
-                            .source_io(|| media::identity(path))
-                            .ok()
-                            .as_ref()
-                            != Some(&identity)
-                        {
-                            Entry {
-                                root,
-                                path,
-                                identity: String::new(),
-                                stage: Stage::Finished(Err(
-                                    "Source changed during batch metadata extraction; retry it."
-                                        .into(),
-                                )),
-                                buffered_bytes: 0,
-                                decode_ms: 0,
+                            .source_io(|| media::hash_with_identity(path, &shared.cancel))?;
+                        shared.cancel.check()?;
+                        let guard = shared.archive.lock().map_err(|e| e.to_string())?;
+                        let archive = guard.as_ref().ok_or("Archive is not open.")?;
+                        if let Some(exact) = archive.exact_cached(&hash)? {
+                            if shared.cancel.source_io(|| media::identity(path))? != identity {
+                                return Err(
+                                    "Source changed before duplicate confirmation; retry it.".into()
+                                );
                             }
-                        } else {
-                            let row = if media::kind(path) == Some("sidecar") {
-                                Ok(serde_json::json!({}))
-                            } else {
-                                match &metadata {
-                                    Ok(rows) => rows.get(path).cloned().ok_or_else(|| {
-                                        "Metadata batch omitted this file.".to_string()
-                                    }),
-                                    Err(error) => Err(error.clone()),
-                                }
-                            };
-                            let prepared = shared
-                                .cancel
-                                .source_io(|| media::prepare_inspection(path, hash, row));
-                            let mut buffered_bytes = 0;
-                            let mut decode_ms = 0;
-                            let stage = match prepared {
-                                Err(error) => Stage::Finished(Err(error)),
-                                Ok(media)
-                                    if media.kind == "photo" && media.bytes <= BUFFER_LIMIT =>
-                                {
-                                    while queue
-                                        .iter()
-                                        .map(|entry| entry.buffered_bytes)
-                                        .sum::<usize>()
-                                        + media.bytes as usize
-                                        > BUFFER_BUDGET
-                                    {
-                                        let done = receive_waiting(&queue, &mut progress)?;
-                                        receive(&mut queue, base, done);
-                                        commit_ready(
-                                            app,
-                                            job,
-                                            &mut queue,
-                                            &mut base,
-                                            &mut progress,
-                                            &mut checkpoint,
-                                            &mut candidate_cache,
-                                        )?;
-                                    }
-                                    let reading = Instant::now();
-                                    let bytes =
-                                        buffer_source(path, media.bytes, &identity, &shared.cancel);
-                                    progress.timings.buffer_ms +=
-                                        reading.elapsed().as_millis() as u64;
-                                    match bytes {
-                                        Err(error) => Stage::Finished(Err(error)),
-                                        Ok(bytes) => {
-                                            buffered_bytes = bytes.len();
-                                            let index = base + queue.len();
-                                            task_tx
-                                                .send(Task {
-                                                    index,
-                                                    path: path.to_path_buf(),
-                                                    media,
-                                                    bytes,
-                                                })
-                                                .map_err(
-                                                    |_| "Decoder workers stopped unexpectedly.",
-                                                )?;
-                                            Stage::Inspecting
-                                        }
-                                    }
-                                }
-                                Ok(media) => {
-                                    // External decoders and large images stay on the I/O coordinator.
-                                    let decoding = Instant::now();
-                                    let result = media::inspect(
-                                        app,
-                                        path,
-                                        media,
-                                        None,
-                                        Some(&shared.cancel),
-                                    );
-                                    decode_ms = decoding.elapsed().as_millis() as u64;
-                                    Stage::Inspected(Box::new(Ok(result)))
-                                }
-                            };
-                            Entry {
-                                root,
+                            let occ = occurrence(
+                                archive,
+                                provenance_root(job, root),
                                 path,
-                                identity,
-                                stage,
-                                buffered_bytes,
-                                decode_ms,
+                                &identity,
+                                &hash,
+                                exact.media.bytes,
+                                exact.id,
+                            )?;
+                            exact_occurrences.push(occ);
+                            return Ok(None);
+                        }
+                        Ok(Some((identity, hash)))
+                    };
+                    let mut checked = check();
+                    for _ in 1..SOURCE_ATTEMPTS {
+                        match &checked {
+                            Err(error) if source_lost(root, error, &shared.cancel) => {
+                                wait_for_source(app, &mut progress, root)?;
+                                progress.phase = "hashing".into();
+                                checked = check();
                             }
+                            _ => break,
                         }
                     }
-                };
-                queue.push_back(entry);
-                progress.timings.total_ms = started.elapsed().as_millis() as u64;
-                loop {
+                    progress.timings.hash_ms += hashing.elapsed().as_millis() as u64;
+                    if pass == 0 {
+                        progress.checked += 1;
+                    }
+                    match checked {
+                        Err(error) => prepped.push(Prepped::Finished(root, path, Err(error))),
+                        Ok(None) => prepped.push(Prepped::Finished(root, path, Ok(true))),
+                        Ok(Some((identity, hash))) => {
+                            if media::kind(path) != Some("sidecar") {
+                                metadata_paths.push(path.to_path_buf());
+                            }
+                            prepped.push(Prepped::NeedsInspect(root, path, identity, hash));
+                        }
+                    }
                     while let Ok(done) = done_rx.try_recv() {
                         receive(&mut queue, base, done);
                     }
@@ -704,29 +662,223 @@ pub fn run(app: &tauri::AppHandle, job: &QueuedJob) -> Result<()> {
                         &mut progress,
                         &mut checkpoint,
                         &mut candidate_cache,
+                        &mut retry,
                     )?;
-                    if queue.len() < workers * 4 || shared.cancel.requested() {
+                }
+                if shared.cancel.requested() {
+                    break;
+                }
+                if !exact_occurrences.is_empty() {
+                    let writing = Instant::now();
+                    let recorded: Result<()> = (|| {
+                        let mut guard = shared.archive.lock().map_err(|e| e.to_string())?;
+                        guard
+                            .as_mut()
+                            .ok_or("Archive is not open.")?
+                            .record_import_occurrences(&job.id, &exact_occurrences)
+                    })();
+                    progress.timings.placement_ms += writing.elapsed().as_millis() as u64;
+                    if let Err(error) = recorded {
+                        for item in &mut prepped {
+                            if let Prepped::Finished(_, _, result @ Ok(true)) = item {
+                                *result = Err(format!(
+                                    "Could not record duplicate source history: {error}"
+                                ));
+                            }
+                        }
+                    }
+                }
+                let extracting = Instant::now();
+                let metadata = if metadata_paths.is_empty() {
+                    Ok(HashMap::new())
+                } else {
+                    progress.phase = "metadata".into();
+                    progress.batch_files = metadata_paths.len();
+                    progress.current.clear();
+                    progress.timings.total_ms = started.elapsed().as_millis() as u64;
+                    update(app, &progress)?;
+                    media::metadata_batch(app, &metadata_paths, &shared.cancel)
+                };
+                progress.timings.metadata_ms += extracting.elapsed().as_millis() as u64;
+                for item in prepped {
+                    if shared.cancel.requested() {
                         break;
                     }
-                    let done = receive_waiting(&queue, &mut progress)?;
-                    receive(&mut queue, base, done);
+                    let entry = match item {
+                        Prepped::Finished(root, path, result) => Entry {
+                            root,
+                            path,
+                            identity: String::new(),
+                            stage: Stage::Finished(result),
+                            buffered_bytes: 0,
+                            decode_ms: 0,
+                        },
+                        Prepped::NeedsInspect(root, path, identity, hash) => {
+                            progress.phase = if media::kind(path) == Some("raw") {
+                                "raw"
+                            } else {
+                                "decoding"
+                            }
+                            .into();
+                            progress.current = path.to_string_lossy().into();
+                            progress.timings.total_ms = started.elapsed().as_millis() as u64;
+                            update(app, &progress)?;
+                            if shared
+                                .cancel
+                                .source_io(|| media::identity(path))
+                                .ok()
+                                .as_ref()
+                                != Some(&identity)
+                            {
+                                Entry {
+                                    root,
+                                    path,
+                                    identity: String::new(),
+                                    stage: Stage::Finished(Err(
+                                        "Source changed during batch metadata extraction; retry it."
+                                            .into(),
+                                    )),
+                                    buffered_bytes: 0,
+                                    decode_ms: 0,
+                                }
+                            } else {
+                                let row = if media::kind(path) == Some("sidecar") {
+                                    Ok(serde_json::json!({}))
+                                } else {
+                                    match &metadata {
+                                        Ok(rows) => rows.get(path).cloned().ok_or_else(|| {
+                                            "Metadata batch omitted this file.".to_string()
+                                        }),
+                                        Err(error) => Err(error.clone()),
+                                    }
+                                };
+                                let prepared = shared
+                                    .cancel
+                                    .source_io(|| media::prepare_inspection(path, hash, row));
+                                let mut buffered_bytes = 0;
+                                let mut decode_ms = 0;
+                                let stage = match prepared {
+                                    Err(error) => Stage::Finished(Err(error)),
+                                    Ok(media)
+                                        if media.kind == "photo" && media.bytes <= BUFFER_LIMIT =>
+                                    {
+                                        while queue
+                                            .iter()
+                                            .map(|entry| entry.buffered_bytes)
+                                            .sum::<usize>()
+                                            + media.bytes as usize
+                                            > BUFFER_BUDGET
+                                        {
+                                            let done = receive_waiting(&queue, &mut progress)?;
+                                            receive(&mut queue, base, done);
+                                            commit_ready(
+                                                app,
+                                                job,
+                                                &mut queue,
+                                                &mut base,
+                                                &mut progress,
+                                                &mut checkpoint,
+                                                &mut candidate_cache,
+                                                &mut retry,
+                                            )?;
+                                        }
+                                        let reading = Instant::now();
+                                        let bytes =
+                                            buffer_source(path, media.bytes, &identity, &shared.cancel);
+                                        progress.timings.buffer_ms +=
+                                            reading.elapsed().as_millis() as u64;
+                                        match bytes {
+                                            Err(error) => Stage::Finished(Err(error)),
+                                            Ok(bytes) => {
+                                                buffered_bytes = bytes.len();
+                                                let index = base + queue.len();
+                                                task_tx
+                                                    .send(Task {
+                                                        index,
+                                                        path: path.to_path_buf(),
+                                                        media,
+                                                        bytes,
+                                                    })
+                                                    .map_err(
+                                                        |_| "Decoder workers stopped unexpectedly.",
+                                                    )?;
+                                                Stage::Inspecting
+                                            }
+                                        }
+                                    }
+                                    Ok(media) => {
+                                        // External decoders and large images stay on the I/O coordinator.
+                                        let decoding = Instant::now();
+                                        let result = media::inspect(
+                                            app,
+                                            path,
+                                            media,
+                                            None,
+                                            Some(&shared.cancel),
+                                        );
+                                        decode_ms = decoding.elapsed().as_millis() as u64;
+                                        Stage::Inspected(Box::new(Ok(result)))
+                                    }
+                                };
+                                Entry {
+                                    root,
+                                    path,
+                                    identity,
+                                    stage,
+                                    buffered_bytes,
+                                    decode_ms,
+                                }
+                            }
+                        }
+                    };
+                    queue.push_back(entry);
+                    progress.timings.total_ms = started.elapsed().as_millis() as u64;
+                    loop {
+                        while let Ok(done) = done_rx.try_recv() {
+                            receive(&mut queue, base, done);
+                        }
+                        commit_ready(
+                            app,
+                            job,
+                            &mut queue,
+                            &mut base,
+                            &mut progress,
+                            &mut checkpoint,
+                            &mut candidate_cache,
+                            &mut retry,
+                        )?;
+                        if queue.len() < workers * 4 || shared.cancel.requested() {
+                            break;
+                        }
+                        let done = receive_waiting(&queue, &mut progress)?;
+                        receive(&mut queue, base, done);
+                    }
                 }
             }
+            loop {
+                commit_ready(
+                    app,
+                    job,
+                    &mut queue,
+                    &mut base,
+                    &mut progress,
+                    &mut checkpoint,
+                    &mut candidate_cache,
+                    &mut retry,
+                )?;
+                if queue.is_empty() || shared.cancel.requested() {
+                    break;
+                }
+                let done = receive_waiting(&queue, &mut progress)?;
+                receive(&mut queue, base, done);
+            }
+            if retry.files.is_empty() || shared.cancel.requested() {
+                break;
+            }
+            pending = std::mem::take(&mut retry.files);
+            retry.lost = retry.lost.or(Some(pending[0].0));
         }
         drop(task_tx);
-        while !queue.is_empty() && !shared.cancel.requested() {
-            let done = receive_waiting(&queue, &mut progress)?;
-            receive(&mut queue, base, done);
-            commit_ready(
-                app,
-                job,
-                &mut queue,
-                &mut base,
-                &mut progress,
-                &mut checkpoint,
-                &mut candidate_cache,
-            )?;
-        }
         Ok(())
     })?;
     progress.phase = "finalizing".into();
@@ -800,14 +952,16 @@ struct Entry<'a> {
 
 /// Commits finished entries in scan order, so XMP sidecars still follow their owners and
 /// similar files within one batch are compared against each other deterministically.
-fn commit_ready(
+#[allow(clippy::too_many_arguments)]
+fn commit_ready<'a>(
     app: &tauri::AppHandle,
     job: &QueuedJob,
-    queue: &mut VecDeque<Entry>,
+    queue: &mut VecDeque<Entry<'a>>,
     base: &mut usize,
     progress: &mut Progress,
     checkpoint: &mut Instant,
     candidate_cache: &mut PreviewCache,
+    retry: &mut SourceRetry<'a>,
 ) -> Result<()> {
     let state = app.state::<AppState>();
     while !state.cancel.requested()
@@ -844,6 +998,14 @@ fn commit_ready(
         };
         if matches!(&result, Err(error) if error == CANCELLED) {
             break;
+        }
+        if let Err(error) = &result
+            && retry.allowed
+            && (retry.lost == Some(entry.root) || source_lost(entry.root, error, &state.cancel))
+        {
+            retry.files.push((entry.root, entry.path));
+            retry.lost = Some(entry.root);
+            continue;
         }
         if let Some(folder) = progress
             .folders
